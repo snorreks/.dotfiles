@@ -1,0 +1,87 @@
+{
+  "dashboard_port": 3333,
+  "services": {
+    "11434": "Ollama",
+    "27015": "Steam (game)",
+    "27016": "Steam (game)",
+    "5173": "Vite",
+    "5432": "PostgreSQL",
+    "3306": "MySQL",
+    "6379": "Redis",
+    "27017": "MongoDB",
+    "9090": "Prometheus",
+    "9050": "Tor SOCKS",
+    "9150": "Tor SOCKS (browser)",
+    "9229": "Node inspector",
+    "8888": "Jupyter",
+    "5555": "adb",
+    "631": "CUPS"
+  },
+  "projects": [
+    {
+      "name": "Aikami",
+      "groups": [
+        {
+          "title": "Firebase Emulator Hub",
+          "entries": [{ "name": "Emulator Suite", "port": 4401 }]
+        },
+        {
+          "title": "Firebase Emulators",
+          "entries": [
+            { "name": "Auth", "port": 9098 },
+            { "name": "Firestore", "port": 8081 },
+            { "name": "Functions", "port": 5003 },
+            { "name": "Hosting", "port": 5002 },
+            { "name": "PubSub", "port": 8086 },
+            { "name": "Storage", "port": 9198 },
+            { "name": "Dataconnect", "port": 9398 }
+          ]
+        },
+        {
+          "title": "Frontend Apps",
+          "entries": [
+            { "name": "PWA", "port": 5274 },
+            { "name": "Game", "port": 5276 }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Nordclaw",
+      "groups": [
+        {
+          "title": "Firebase Emulator Hub",
+          "entries": [{ "name": "Emulator Suite", "port": 4400 }]
+        },
+        {
+          "title": "Firebase Emulators",
+          "entries": [
+            { "name": "Auth", "port": 9099 },
+            { "name": "Firestore", "port": 8080 },
+            { "name": "Functions", "port": 5001 },
+            { "name": "Hosting", "port": 5000 },
+            { "name": "PubSub", "port": 8085 },
+            { "name": "Storage", "port": 9199 },
+            { "name": "Dataconnect", "port": 9399 }
+          ]
+        },
+        {
+          "title": "Frontend Apps",
+          "entries": [
+            { "name": "Admin", "port": 5172 },
+            { "name": "PWA", "port": 5174 },
+            { "name": "Landing", "port": 5176 },
+            { "name": "Extension", "port": 5179 }
+          ]
+        },
+        {
+          "title": "Internal Services",
+          "entries": [
+            { "name": "Edge Proxy", "port": 3000 },
+            { "name": "Audit Worker", "port": 3001 }
+          ]
+        }
+      ]
+    }
+  ]
+}

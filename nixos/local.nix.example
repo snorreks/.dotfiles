@@ -1,0 +1,11 @@
+# nixos/local.nix.example
+#
+# Copy this to nixos/local.nix (gitignored) for personal, un-committed
+# overrides that apply on top of options.nix + the host's own overrides —
+# e.g. temporarily flipping monitor layout, or a one-off value you don't
+# want in git history. Anything in options.nix can be overridden here.
+#
+# nixos/local.nix does not exist by default; if absent, no overrides apply.
+{
+  # enableExternalMonitors = false;
+}

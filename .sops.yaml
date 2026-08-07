@@ -1,0 +1,5 @@
+creation_rules:
+  - path_regex: nixos/secrets\.yaml$
+    key_groups:
+      - age:
+          - age1jml3kl64x4vvprgp0gnm2na06ypch9h25j6dtk3w68zn82m0k4hs8eay5t

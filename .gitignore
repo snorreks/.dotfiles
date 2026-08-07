@@ -1,0 +1,25 @@
+# Browser backups (contain session tokens, cookies, history)
+backups/
+
+# Wallpapers are committed (converted to WebP, ~30MB total)
+# Runtime state: currently selected default wallpaper path
+wallpapers/.default
+# Plaintext secrets — use sops-nix encrypted secrets.yaml instead
+nixos/secrets.nix
+nixos/config/home/files/.ssh/github_snorreks
+nixos/config/home/files/.aws/credentials
+
+# Per-machine local overrides — see nixos/local.nix.example
+nixos/local.nix
+
+# Build artifacts
+result
+result-*
+
+# Age/Sops keys — never commit
+*.age
+keys.txt
+
+# VPN WireGuard configs contain private keys — never commit
+nixos/config/home/vpn/configs/
+.claude/

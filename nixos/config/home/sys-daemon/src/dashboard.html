@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>dev-ports</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, sans-serif; background: #1e1e2e; color: #cdd6f4; padding: 2rem; min-height: 100vh; }
+  .container { max-width: 1200px; margin: 0 auto; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 2rem; flex-wrap: wrap; gap: .5rem; }
+  header h1 { font-size: 1.5rem; font-weight: 600; }
+  .meta { display: flex; align-items: center; gap: 1rem; color: #a6adc8; font-size: .85rem; }
+  .status-badge { display: inline-flex; align-items: center; gap: .35rem; padding: .2rem .6rem; border-radius: 999px; font-size: .8rem; }
+  .status-badge.running { background: #1e3a2e; color: #a6e3a1; }
+  .status-badge.stopped { background: #3a1e1e; color: #f38ba8; }
+  .projects { display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 1.5rem; }
+  .project { background: #181825; border-radius: 12px; padding: 1.25rem; border: 1px solid #313244; }
+  .project h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; padding-bottom: .5rem; border-bottom: 1px solid #313244; }
+  .group { margin-bottom: 1rem; }
+  .group:last-child { margin-bottom: 0; }
+  .group h3 { font-size: .75rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: #6c7086; margin-bottom: .4rem; }
+  .ports { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .port { display: inline-flex; align-items: center; gap: .35rem; padding: .35rem .7rem; border-radius: 8px; text-decoration: none; font-size: .85rem; border: 1px solid transparent; transition: all .15s; }
+  .port.running { background: #1e3a2e; border-color: #2a5a3e; color: #a6e3a1; }
+  .port.running:hover { background: #2a5a3e; }
+  .port.stopped { background: #2a1e1e; border-color: #4a2a2a; color: #6c7086; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .dot.green { background: #a6e3a1; box-shadow: 0 0 6px #a6e3a166; }
+  .dot.red { background: #f38ba8; box-shadow: 0 0 6px #f38ba866; }
+  .kill { margin-left: 4px; border: none; border-radius: 4px; background: transparent; color: #f38ba8; cursor: pointer; font-size: .8rem; opacity: .6; }
+  .kill:hover { opacity: 1; }
+  .kill:disabled { opacity: .3; cursor: default; }
+  .other-section { margin-top: 1.5rem; background: #181825; border-radius: 12px; padding: 1.25rem; border: 1px solid #313244; }
+  .other-section h2 { font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem; color: #f5c2e7; }
+  .name { font-weight: 500; }
+  .num { opacity: .7; font-family: monospace; }
+  .svc { font-size: .75rem; color: #a6adc8; opacity: .85; font-style: italic; }
+  .toast { position: fixed; bottom: 1.5rem; right: 1.5rem; padding: .6rem 1rem; border-radius: 8px; font-size: .85rem; z-index: 100; }
+  .toast.success { background: #1e3a2e; color: #a6e3a1; border: 1px solid #2a5a3e; }
+  .toast.error { background: #3a1e1e; color: #f38ba8; border: 1px solid #5a2a2a; }
+  @media (max-width: 600px) { body { padding: 1rem; } .projects { grid-template-columns: 1fr; } header { flex-direction: column; align-items: flex-start; } }
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>🔌 dev-ports</h1>
+    <div class="meta">
+      <span class="status-badge" id="badge">…</span>
+      <span id="refreshed">waiting…</span>
+    </div>
+  </header>
+  <div class="projects" id="projects"></div>
+  <div class="other-section" id="other" hidden>
+    <h2>Other Running Ports</h2>
+    <div class="ports" id="other-ports"></div>
+  </div>
+</div>
+<script>
+const $ = (s) => document.querySelector(s);
+
+function render(s) {
+  const others = Object.keys(s.otherStatus).filter((p) => s.otherStatus[p]).map(Number);
+  const runningKnown = Object.values(s.status).filter(Boolean).length;
+  const total = Object.keys(s.status).length + others.length;
+  const running = runningKnown + others.length;
+
+  const badge = $('#badge');
+  badge.className = 'status-badge ' + (running > 0 ? 'running' : 'stopped');
+  badge.textContent = running + '/' + total + ' running' + (others.length ? ' (' + others.length + ' other)' : '');
+  $('#refreshed').textContent = 'live — ' + new Date(s.lastCheck).toLocaleTimeString();
+
+  $('#projects').innerHTML = s.projects.map((proj) => `
+    <div class="project"><h2>${proj.name}</h2>
+      ${proj.groups.map((g) => `<div class="group"><h3>${g.title}</h3><div class="ports">
+        ${g.entries.map((e) => {
+          const up = !!s.status[e.port];
+          return `<div class="port ${up ? 'running' : 'stopped'}"><span class="dot ${up ? 'green' : 'red'}"></span><span class="name">${e.name}</span><span class="num">:${e.port}</span>${up ? `<button class="kill" data-port="${e.port}" title="Kill process on ${e.port}">✕</button>` : ''}</div>`;
+        }).join('')}
+      </div></div>`).join('')}
+    </div>`).join('');
+
+  const o = others.sort((a, b) => a - b);
+  $('#other').hidden = o.length === 0;
+  $('#other-ports').innerHTML = o.map((p) => {
+    const svc = (s.otherServices && s.otherServices[p]) || '';
+    return `<div class="port running"${svc ? ` title="${p} — ${svc}"` : ''}><span class="dot green"></span><span class="name">:${p}</span>${svc ? `<span class="svc">${svc}</span>` : ''}<button class="kill" data-port="${p}" title="Kill process on ${p}">✕</button></div>`;
+  }).join('');
+}
+
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.kill');
+  if (!btn) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch('/api/kill', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ port: Number(btn.dataset.port) }),
+    });
+    const d = await r.json();
+    toast(d.success, d.message);
+    if (d.success) setTimeout(() => render(lastSnap), 900);
+  } catch {
+    toast(false, 'request failed');
+    btn.disabled = false;
+  }
+});
+
+function toast(success, msg) {
+  const old = document.querySelector('.toast');
+  if (old) old.remove();
+  const t = document.createElement('div');
+  t.className = 'toast ' + (success ? 'success' : 'error');
+  t.textContent = (success ? '✅ ' : '❌ ') + msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3000);
+}
+
+// Event-driven: SSE pushes a new snapshot whenever the daemon sees a change.
+// A 30s full reload is a fallback only (e.g. browser resumed a background tab).
+let lastSnap = null;
+const es = new EventSource('/api/stream');
+es.onmessage = (ev) => {
+  try {
+    lastSnap = JSON.parse(ev.data);
+    render(lastSnap);
+  } catch {}
+};
+es.onerror = () => {};
+setTimeout(() => location.reload(), 30000);
+</script>
+</body>
+</html>
