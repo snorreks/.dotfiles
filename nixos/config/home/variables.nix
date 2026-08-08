@@ -57,7 +57,7 @@
 
     # --- Secrets (resolved at shell runtime via sops-nix decrypted files) ---
     # These read from /run/secrets at shell startup — no secrets in the Nix store.
-    ANTHROPIC_API_KEY = "$(cat ${config.sops.secrets.ANTHROPIC_API_KEY.path})";
+    # ANTHROPIC_API_KEY = "$(cat ${config.sops.secrets.ANTHROPIC_API_KEY.path})"; # We want to use the oauth instead
     GOOGLE_AI_API_KEY = "$(cat ${config.sops.secrets.GOOGLE_AI_API_KEY.path})";
     GEMINI_API_KEY = "$(cat ${config.sops.secrets.GOOGLE_AI_API_KEY.path})";
     OPENROUTER_API_KEY = "$(cat ${config.sops.secrets.OPENROUTER_API_KEY.path})";
