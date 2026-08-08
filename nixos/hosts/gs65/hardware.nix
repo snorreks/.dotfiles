@@ -13,9 +13,32 @@
   boot.kernelModules = ["kvm-intel"];
   boot.extraModulePackages = [];
 
+  # Post-impermanence-migration layout (see docs/impermanence-migration.md):
+  # single btrfs partition (LABEL=nixos) with root/home/nix/persist subvolumes.
+  # root gets rolled back to empty on every boot once persistence.nix is active.
   fileSystems."/" = {
-    device = "/dev/disk/by-uuid/f225d6b7-077a-48ec-b721-a16edfd6ec92";
-    fsType = "ext4";
+    device = "LABEL=nixos";
+    fsType = "btrfs";
+    options = ["subvol=/root" "compress=zstd" "noatime"];
+  };
+
+  fileSystems."/home" = {
+    device = "LABEL=nixos";
+    fsType = "btrfs";
+    options = ["subvol=/home" "compress=zstd" "noatime"];
+  };
+
+  fileSystems."/nix" = {
+    device = "LABEL=nixos";
+    fsType = "btrfs";
+    options = ["subvol=/nix" "compress=zstd" "noatime"];
+  };
+
+  fileSystems."/persist" = {
+    device = "LABEL=nixos";
+    fsType = "btrfs";
+    options = ["subvol=/persist" "compress=zstd" "noatime"];
+    neededForBoot = true; # required by impermanence's persistence assertion
   };
 
   fileSystems."/boot" = {
