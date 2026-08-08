@@ -85,7 +85,8 @@
     targets.zed.enable = false;
     targets.waybar.enable = false;
     targets.starship.enable = false;
-    targets.yazi.enable = true;
+    # yazi theme is owned by the dynamic theme module (theme/lib.nix mkYaziTheme)
+    targets.yazi.enable = false;
     polarity = "dark";
     # https://github.com/tinted-theming/base16-schemes
     base16Scheme = "${pkgs.base16-schemes}/share/themes/tokyo-night-dark.yaml";

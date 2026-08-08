@@ -68,6 +68,17 @@
     fuse.userAllowOther = true;
   };
 
+  # nm-applet crashes with SIGSEGV inside the unmaintained libdbusmenu-glib
+  # when the tray host (waybar) restarts/re-registers while its menu is being
+  # updated. No upstream fix exists (library is dead). Self-heal instead:
+  # restart the applet automatically if it ever crashes again.
+  systemd.user.services.nm-applet = {
+    serviceConfig = {
+      Restart = lib.mkForce "on-failure";
+      RestartSec = lib.mkForce "2s";
+    };
+  };
+
   # This is a pure Wayland setup, so the traditional X.Org server is disabled.
   services.xserver.enable = false;
   services.libinput.enable = true;

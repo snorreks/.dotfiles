@@ -1,7 +1,12 @@
 # nixos/config/home/pcmanfm.nix
 #
 # PCManFM-Qt — Native Wayland File Manager wrapped with Fusion styling,
-# Stylix Base16 color palette integration, and Papirus-Dark SVG icons.
+# dynamic theme QSS (theme/lib.nix `mkPcmanfmQss`), and Papirus-Dark SVG icons.
+#
+# The wrapper resolves the stylesheet at launch:
+#   • ~/.cache/theme/pcmanfm.qss (matugen render / theme-apply-static) if present
+#   • else the build-time static QSS (tokyo-night fallback)
+# Qt applies -stylesheet only at startup, so pcmanfm re-themes on next launch.
 {
   pkgs,
   opts,
@@ -9,218 +14,24 @@
   lib,
   ...
 }: let
+  theme = import ./theme/lib.nix {inherit lib;};
+
   # Stylix Base16 Color Scheme Shortcuts (Tokyo Night Dark)
   c = config.lib.stylix.colors;
 
-  # Comprehensive Qt Stylesheet dynamically generated from Stylix theme colors.
-  # Fully styles all Fusion widgets (menus, toolbars, tabs, dropdowns) dark.
-  qssTheme = pkgs.writeText "pcmanfm-qt-stylix.qss" ''
-    /* Global Base Styling for all Qt Widgets */
-    QWidget {
-      background-color: #${c.base00};
-      color: #${c.base05};
-    }
+  # Static fallback stylesheet (tokyo-night) — used until the first render.
+  qssTheme = pkgs.writeText "pcmanfm-qt-stylix.qss" (theme.mkPcmanfmQss c);
 
-    /* Main Window & View Background */
-    QMainWindow, QDialog, Fm--MainView, Fm--FolderView {
-      background-color: #${c.base00};
-      color: #${c.base05};
-    }
-
-    /* Menu Bar at the very top */
-    QMenuBar {
-      background-color: #${c.base00};
-      color: #${c.base05};
-      border-bottom: 1px solid #${c.base01};
-    }
-
-    QMenuBar::item {
-      background-color: transparent;
-      color: #${c.base05};
-      padding: 4px 8px;
-      border-radius: 4px;
-    }
-
-    QMenuBar::item:selected {
-      background-color: #${c.base02};
-      color: #${c.base0D};
-    }
-
-    /* Toolbars & Path / Breadcrumbs */
-    QToolBar {
-      background-color: #${c.base01};
-      border-bottom: 1px solid #${c.base02};
-      spacing: 4px;
-      padding: 2px;
-    }
-
-    QToolButton {
-      background-color: transparent;
-      color: #${c.base05};
-      border: 1px solid transparent;
-      border-radius: 4px;
-      padding: 3px 6px;
-    }
-
-    QToolButton:hover {
-      background-color: #${c.base02};
-      border: 1px solid #${c.base02};
-    }
-
-    QToolButton:checked, QToolButton:pressed {
-      background-color: #${c.base02};
-      color: #${c.base0D};
-    }
-
-    /* Dropdowns / ComboBoxes (e.g., View Mode Selector) */
-    QComboBox {
-      background-color: #${c.base00};
-      color: #${c.base05};
-      border: 1px solid #${c.base02};
-      border-radius: 4px;
-      padding: 3px 8px;
-    }
-
-    QComboBox:hover {
-      border: 1px solid #${c.base0D};
-    }
-
-    QComboBox::drop-down {
-      border: none;
-    }
-
-    QComboBox QAbstractItemView {
-      background-color: #${c.base01};
-      color: #${c.base05};
-      border: 1px solid #${c.base02};
-      selection-background-color: #${c.base02};
-      selection-color: #${c.base0D};
-    }
-
-    /* Tab Bar */
-    QTabBar {
-      background-color: #${c.base01};
-    }
-
-    QTabBar::tab {
-      background-color: #${c.base01};
-      color: #${c.base04};
-      padding: 6px 12px;
-      border-top-left-radius: 4px;
-      border-top-right-radius: 4px;
-      margin-right: 2px;
-    }
-
-    QTabBar::tab:selected {
-      background-color: #${c.base00};
-      color: #${c.base05};
-      border-bottom: 2px solid #${c.base0D};
-    }
-
-    QTabBar::tab:hover:!selected {
-      background-color: #${c.base02};
-    }
-
-    /* Location Bar Input */
-    QLineEdit {
-      background-color: #${c.base00};
-      color: #${c.base05};
-      border: 1px solid #${c.base02};
-      border-radius: 6px;
-      padding: 4px 8px;
-      selection-background-color: #${c.base0D};
-    }
-
-    QLineEdit:focus {
-      border: 1px solid #${c.base0D};
-    }
-
-    /* Side Pane (Places / Bookmarks / Devices) */
-    Fm--SidePane, QDockWidget {
-      background-color: #${c.base01};
-      color: #${c.base05};
-      border-right: 1px solid #${c.base02};
-    }
-
-    /* File List & Icon Grid View */
-    QTreeView, QListView, QColumnView {
-      background-color: #${c.base00};
-      color: #${c.base05};
-      border: none;
-    }
-
-    QTreeView::item:selected, QListView::item:selected {
-      background-color: #${c.base02};
-      color: #${c.base0D};
-      border-radius: 4px;
-    }
-
-    QHeaderView::section {
-      background-color: #${c.base01};
-      color: #${c.base05};
-      padding: 4px;
-      border: none;
-      border-right: 1px solid #${c.base02};
-      border-bottom: 1px solid #${c.base02};
-    }
-
-    /* Right-Click Context Menus */
-    QMenu {
-      background-color: #${c.base01};
-      color: #${c.base05};
-      border: 1px solid #${c.base02};
-      border-radius: 8px;
-      padding: 4px;
-    }
-
-    QMenu::item {
-      padding: 6px 20px 6px 10px;
-      border-radius: 4px;
-    }
-
-    QMenu::item:selected {
-      background-color: #${c.base02};
-      color: #${c.base0D};
-    }
-
-    /* Scrollbars */
-    QScrollBar:vertical, QScrollBar:horizontal {
-      background: #${c.base00};
-      width: 8px;
-      height: 8px;
-      border: none;
-    }
-
-    QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
-      background: #${c.base02};
-      border-radius: 4px;
-      min-height: 20px;
-    }
-
-    /* Status Bar at Bottom */
-    QStatusBar {
-      background-color: #${c.base01};
-      color: #${c.base05};
-      border-top: 1px solid #${c.base02};
-    }
+  pcmanfm-wrapped = pkgs.writeShellScriptBin "pcmanfm" ''
+    qss="$HOME/.cache/theme/pcmanfm.qss"
+    [ -f "$qss" ] || qss=${qssTheme}
+    export QT_QPA_PLATFORM=wayland
+    export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+    export QT_STYLE_OVERRIDE=fusion
+    export QT_PLUGIN_PATH="${pkgs.qt6.qtsvg}/lib/qt-6/plugins''${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
+    export XDG_DATA_DIRS="${config.gtk.iconTheme.package}/share:${pkgs.papirus-icon-theme}/share:${pkgs.hicolor-icon-theme}/share''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+    exec ${pkgs.pcmanfm-qt}/bin/pcmanfm-qt -stylesheet "$qss" "$@"
   '';
-
-  pcmanfm-wrapped = pkgs.symlinkJoin {
-    name = "pcmanfm";
-    paths = [pkgs.pcmanfm-qt];
-    buildInputs = [pkgs.makeWrapper];
-    postBuild = ''
-      makeWrapper ${pkgs.pcmanfm-qt}/bin/pcmanfm-qt "$out/bin/pcmanfm" \
-        --add-flags "-stylesheet ${qssTheme}" \
-        --set QT_QPA_PLATFORM wayland \
-        --set QT_WAYLAND_DISABLE_WINDOWDECORATION 1 \
-        --set QT_STYLE_OVERRIDE fusion \
-        --prefix QT_PLUGIN_PATH : "${pkgs.qt6.qtsvg}/lib/qt-6/plugins" \
-        --prefix XDG_DATA_DIRS : "${config.gtk.iconTheme.package}/share" \
-        --prefix XDG_DATA_DIRS : "${pkgs.papirus-icon-theme}/share" \
-        --prefix XDG_DATA_DIRS : "${pkgs.hicolor-icon-theme}/share"
-    '';
-  };
 
   pcmanfm-settings = ''
     [System]

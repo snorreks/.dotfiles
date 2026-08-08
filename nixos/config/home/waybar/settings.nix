@@ -8,6 +8,10 @@
     passthrough = false;
     gtk-layer-shell = true;
 
+    # Hot-swap the stylesheet on file change (file watcher, no bar teardown).
+    # Lets wallpaper re-themes apply without SIGUSR2/SIGUSR1.
+    reload_style_on_change = true;
+
     # ── Modular Group Layouts ──────────────────────────────────────────
     modules-left = [
       "custom/power"

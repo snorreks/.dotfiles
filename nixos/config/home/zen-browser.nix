@@ -4,8 +4,13 @@
   inputs,
   pkgs,
   lib,
+  config,
   ...
 }: let
+  # Accent follows the static palette baseline (build-time). Set as a
+  # defaultPref (NOT lockPref) so it stays user-overridable / changeable.
+  accent = "#${config.lib.stylix.colors.base0D}";
+
   # We let firefox account sync extensions
   prefs = {
     # --- Transparency / Glass ---
@@ -14,7 +19,6 @@
     "zen.view.use-single-toolbar" = true;
     "zen.view.compact-mode.hide-toolbar" = true;
     "zen.view.sidebar-expanded" = false;
-    "zen.theme.accent-color" = "#2ac3de";
 
     # --- Performance ---
     "gfx.webrender.all" = true;
@@ -36,7 +40,11 @@ in {
       inputs.zen-browser.packages.${pkgs.stdenv.hostPlatform.system}.zen-browser-unwrapped
       {
         extraPrefs = lib.concatLines (
-          lib.mapAttrsToList (
+          [
+            # Accent is a defaultPref (overridable at runtime/user.js)
+            ''defaultPref(${lib.strings.toJSON "zen.theme.accent-color"}, ${lib.strings.toJSON accent});''
+          ]
+          ++ lib.mapAttrsToList (
             name: value: ''lockPref(${lib.strings.toJSON name}, ${lib.strings.toJSON value});''
           )
           (prefs

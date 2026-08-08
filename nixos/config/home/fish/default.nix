@@ -103,6 +103,18 @@
 
       set fish_greeting # Disable greeting
       if status is-interactive
+          # Dynamic theme: prefer the runtime-rendered starship config
+          # (wallpaper colors), fall back to the HM-managed static one.
+          if test -f "$HOME/.cache/theme/starship.toml"
+              set -gx STARSHIP_CONFIG "$HOME/.cache/theme/starship.toml"
+          end
+
+          # Dynamic theme: yazi reads config from the runtime dir
+          # (HM configs symlinked + theme.toml rendered from the palette).
+          if test -d "$HOME/.cache/theme/yazi"
+              set -gx YAZI_CONFIG_HOME "$HOME/.cache/theme/yazi"
+          end
+
           starship init fish | source
 
           set fish_vi_force_cursor

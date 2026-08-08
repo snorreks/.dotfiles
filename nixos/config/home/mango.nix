@@ -8,6 +8,7 @@
 }: let
   _ = lib.getExe;
   c = config.lib.stylix.colors;
+  theme = import ./theme/lib.nix {inherit lib;};
 in {
   wayland.windowManager.mango = {
     enable = true;
@@ -33,16 +34,10 @@ in {
     '';
 
     # ── Settings ──────────────────────────────────────────────────────────
+    # Colors are NOT here — they live in `extraConfig` below (single source:
+    # theme/lib.nix `mkMangoColors`), so the dynamic theme renderer can swap
+    # them at runtime via ~/.cache/theme/mango-colors.conf + mmsg reload.
     settings = {
-      focuscolor = "0x${c.base0D}FF"; # Primary Accent (Blue/Sapphire)
-      bordercolor = "0x${c.base02}FF"; # Dark Border / Surface
-      rootcolor = "0x${c.base00}FF"; # Wallpaper Background
-      urgentcolor = "0x${c.base08}FF"; # Urgent / Error (Red)
-      scratchpadcolor = "0x${c.base0C}FF"; # Scratchpad (Cyan)
-      maximizescreencolor = "0x${c.base0B}FF"; # Maximized (Green)
-      globalcolor = "0x${c.base0E}FF"; # Global Windows (Purple/Mauve)
-      overlaycolor = "0x${c.base0A}FF"; # Overlay (Yellow)
-
       # ── Window Appearance & Geometry ───────────────────────────────
       border_radius = 8;
       borderpx = 1; # Slightly thicker border for accent pop
@@ -200,7 +195,7 @@ in {
         "SUPER+SHIFT,q,killclient, force"
         "SUPER,space,togglefloating"
         "ALT,backslash,togglefloating"
-        "SUPER,Escape,spawn,swaylock"
+        "SUPER,Escape,spawn,swaylock-runtime"
         "SUPER+SHIFT,Escape,spawn,shutdown-script"
         "SUPER+SHIFT,Delete,spawn,kill-switch --light"
         "SUPER+CTRL+SHIFT,code:119,spawn,kill-switch --full"
@@ -351,5 +346,9 @@ in {
         "ALT,DOWN,spawn,brightnessctl s 2%-"
       ];
     };
+
+    # Static WM colors (tokyo-night) — appended after settings. The dynamic
+    # renderer strips and re-appends this block from ~/.cache/theme/mango-colors.conf.
+    extraConfig = theme.renderMangoColors (theme.mkMangoColors c);
   };
 }

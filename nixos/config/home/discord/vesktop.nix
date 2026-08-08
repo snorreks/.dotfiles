@@ -1,22 +1,24 @@
+# nixos/config/home/discord/vesktop.nix
+#
+# Vesktop — Discord client with Vencord built in (the "spicetify for discord").
+#
+# Theming: Vencord loads plain CSS from ~/.config/vesktop/themes/. The theme
+# file `dynamic.theme.css` is written at render time by the dynamic theme
+# module (theme/lib.nix `mkVesktopCss` — palette colors as Discord CSS
+# variables) — static palette on rebuild/toggle-off, wallpaper palette in
+# dynamic mode.
+#
+# Notes:
+# • The old ./readonlyFix.patch is unnecessary — nixpkgs vesktop already
+#   applies its own read-only settings fix.
+# • The custom ozone wrapProgram is redundant — nixpkgs passes Wayland ozone
+#   flags when NIXOS_OZONE_WL is set (it is, in environment.nix).
 {
   pkgs,
-  lib,
   ...
-}: let
-  # Define the modified Discord package separately
-  discordPackage = pkgs.vesktop.overrideAttrs (old: {
-    patches = (old.patches or []) ++ [./readonlyFix.patch];
-    postFixup =
-      (old.postFixup or "")
-      + ''
-        wrapProgram $out/bin/${pkgs.vesktop.meta.mainProgram or (lib.getName pkgs.vesktop)} \
-          --add-flags "--enable-features=UseOzonePlatform --ozone-platform=wayland"
-      '';
-  });
-in {
-  # Use the modified package in home.packages
+}: {
   home.packages = [
-    discordPackage
+    pkgs.vesktop
   ];
 
   # Directly specify the Discord settings
@@ -37,7 +39,7 @@ in {
     autoUpdateNotification = false;
     useQuickCss = true;
     themeLinks = [];
-    enabledThemes = ["Catppuccin.theme.css"];
+    enabledThemes = ["dynamic.theme.css"];
     enableReactDevtools = true;
     frameless = false;
     transparent = true;

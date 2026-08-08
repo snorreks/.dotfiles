@@ -48,3 +48,6 @@ fi
 
 # Apply the wallpaper with transition effects
 awww img --transition-type fade --transition-duration 2 "$target"
+
+# Sync theme colors to the new wallpaper (no-op-ish in static mode)
+theme-render

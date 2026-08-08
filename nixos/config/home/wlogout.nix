@@ -6,7 +6,7 @@
     layout = [
       {
         label = "lock";
-        action = "swaylock";
+        action = "swaylock-runtime";
         text = "Lock";
         keybind = "l";
       }

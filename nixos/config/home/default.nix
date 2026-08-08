@@ -14,6 +14,7 @@
     ./btop.nix # resources monitor
     ./git.nix # version control
     ./theme.nix # gtk theme and stylix
+    ./theme # dynamic wallpaper theming (matugen render layer)
     ./mango.nix # window manager (mangowm)
     ./foot.nix # terminal (foot)
     ./mako.nix # notification daemon

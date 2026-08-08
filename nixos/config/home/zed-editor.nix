@@ -90,10 +90,13 @@
       # --- General Editor Settings ---
       load_direnv = "shell_hook";
       base_keymap = "VSCode";
+      # Palette-generated theme (theme/lib.nix mkZedTheme →
+      # ~/.config/zed/themes/dynamic.json). Static palette on rebuild,
+      # wallpaper palette in dynamic mode; applies on next launch.
       theme = {
-        mode = "system";
+        mode = "dark";
         light = "One Light";
-        dark = "One Dark";
+        dark = "Dynamic";
       };
 
       node = {

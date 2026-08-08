@@ -30,6 +30,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
+    # Wallpaper-derived dynamic theming (runtime color extraction + templates).
+    # NOTE: deliberately does NOT follow the pinned nixpkgs — base16 palette
+    # output requires matugen >= 4.0 (added 2026-02), which predates the pin.
+    matugen = {
+      url = "github:InioX/matugen";
+    };
+
     zen-browser = {
       url = "github:youwen5/zen-browser-flake";
       inputs.nixpkgs.follows = "nixpkgs";
