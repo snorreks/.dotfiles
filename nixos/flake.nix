@@ -7,10 +7,6 @@
     # Revert to nixos-unstable once fixed upstream.
     nixpkgs.url = "github:NixOS/nixpkgs/421eebfd0ec7bccd4abe826ce62d7e6e83129493";
     nur.url = "github:nix-community/NUR";
-    envycontrol = {
-      url = "github:bayasdev/envycontrol";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
 
     llm-agents.url = "github:numtide/llm-agents.nix";
     curd = {
@@ -34,11 +30,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    comfyui-nix-nix = {
-      url = "github:utensils/comfyui-nix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     zen-browser = {
       url = "github:youwen5/zen-browser-flake";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -56,6 +47,13 @@
 
     alejandra = {
       url = "github:kamadorueda/alejandra";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    impermanence.url = "github:nix-community/impermanence";
+
+    disko = {
+      url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -76,7 +74,7 @@
     # The host's own hardware + any host-only extra modules live in
     # ./hosts/<key>/default.nix.
     hosts = {
-      sonny-laptop.optsOverrides = {};
+      legion.optsOverrides = {};
       gs65.optsOverrides = import ./hosts/gs65/options.nix;
     };
 
@@ -102,6 +100,8 @@
           inputs.mangowm.nixosModules.mango
           inputs.sops-nix.nixosModules.sops
           inputs.home-manager.nixosModules.home-manager
+          inputs.impermanence.nixosModules.impermanence
+          inputs.disko.nixosModules.disko
           {
             home-manager = {
               backupFileExtension = "backup";
@@ -138,17 +138,16 @@
     # Builds two flake outputs per host:
     #   <hostname>       — default build, ollama-cuda included
     #   <hostname>-fast  — skips ollama-cuda for quick rebuilds (nswitch-fast)
-    nixosConfigurations =
-      nixpkgs.lib.foldl' (
-        acc: hostKey: let
-          hostCfg = hosts.${hostKey};
-          hostname = (baseOpts // hostCfg.optsOverrides // localOverrides).hostname;
-        in
-          acc
-          // {
-            ${hostname} = mkHost hostKey hostCfg true;
-            "${hostname}-fast" = mkHost hostKey hostCfg false;
-          }
-      ) {} (builtins.attrNames hosts);
+    nixosConfigurations = nixpkgs.lib.foldl' (
+      acc: hostKey: let
+        hostCfg = hosts.${hostKey};
+        hostname = (baseOpts // hostCfg.optsOverrides // localOverrides).hostname;
+      in
+        acc
+        // {
+          ${hostname} = mkHost hostKey hostCfg true;
+          "${hostname}-fast" = mkHost hostKey hostCfg false;
+        }
+    ) {} (builtins.attrNames hosts);
   };
 }

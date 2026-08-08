@@ -63,6 +63,14 @@ in {
         path = "${config.home.homeDirectory}/.aws/credentials";
         mode = "0600";
       };
+
+      # base64 tar.gz of Thunderbird account/auth files (prefs.js, logins,
+      # OpenPGP keys, address book) — NOT the mail store. See
+      # backup_thunderbird_profile / restore_thunderbird_profile.
+      "thunderbird_profile_bundle" = {
+        path = "${config.home.homeDirectory}/.config/sops/thunderbird-profile-bundle.b64";
+        mode = "0600";
+      };
     };
 
     templates =

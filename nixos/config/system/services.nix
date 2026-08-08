@@ -23,7 +23,7 @@
 
   # Ollama Service for LLM Inference
   # Controlled via opts.enableOllama (default true).
-  # Use nswitch-fast (or build sonny-laptop-fast) to skip it.
+  # Use nswitch-fast (or build legion-fast) to skip it.
   services.ollama = lib.mkIf opts.enableOllama {
     enable = true;
     package = pkgs.ollama-cuda;

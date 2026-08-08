@@ -1,4 +1,20 @@
-{device ? throw "Set this to your disk device, e.g. /dev/sda", ...}: {
+# nixos/disko.nix
+#
+# Fresh-install disk layout: ESP + swap + one btrfs partition holding the
+# `root`, `home`, `nix`, `persist` subvolumes. Only `root` gets rolled back to
+# empty on every boot (see config/system/persistence.nix) — `home`, `nix`,
+# and `persist` are ordinary persistent subvolumes.
+#
+# Use this for a genuine from-scratch install (nixos-anywhere, or booting a
+# blank disk from the installer). It is NOT what turned this machine's
+# existing dual-boot disk into this layout — that was done in place with
+# btrfs-convert to avoid wiping the Windows-shared ESP/swap partitions and to
+# avoid needing to back up ~900G with nowhere to put it. See README.md
+# ("Migrating an existing install to impermanence") for that procedure.
+#
+# Usage once a host actually wants this to manage its disk:
+#   disko.devices = (import ../../disko.nix { device = "/dev/${opts.deviceName}"; }).disko.devices;
+{device ? throw "Set this to your disk device, e.g. /dev/nvme0n1", ...}: {
   disko.devices = {
     disk.main = {
       inherit device;
@@ -6,11 +22,6 @@
       content = {
         type = "gpt";
         partitions = {
-          boot = {
-            name = "boot";
-            size = "1M";
-            type = "EF02";
-          };
           esp = {
             name = "ESP";
             size = "500M";
@@ -22,7 +33,7 @@
             };
           };
           swap = {
-            size = "4G";
+            size = "8G";
             content = {
               type = "swap";
               resumeDevice = true;
@@ -32,36 +43,28 @@
             name = "root";
             size = "100%";
             content = {
-              type = "lvm_pv";
-              vg = "root_vg";
-            };
-          };
-        };
-      };
-    };
-    lvm_vg = {
-      root_vg = {
-        type = "lvm_vg";
-        lvs = {
-          root = {
-            size = "100%FREE";
-            content = {
               type = "btrfs";
-              extraArgs = ["-f"];
+              extraArgs = ["-f" "-L" "nixos"];
 
               subvolumes = {
                 "/root" = {
                   mountpoint = "/";
+                  mountOptions = ["compress=zstd" "noatime"];
                 };
 
-                "/persist" = {
-                  mountOptions = ["subvol=persist" "noatime"];
-                  mountpoint = "/persist";
+                "/home" = {
+                  mountpoint = "/home";
+                  mountOptions = ["compress=zstd" "noatime"];
                 };
 
                 "/nix" = {
-                  mountOptions = ["subvol=nix" "noatime"];
                   mountpoint = "/nix";
+                  mountOptions = ["compress=zstd" "noatime"];
+                };
+
+                "/persist" = {
+                  mountpoint = "/persist";
+                  mountOptions = ["compress=zstd" "noatime"];
                 };
               };
             };

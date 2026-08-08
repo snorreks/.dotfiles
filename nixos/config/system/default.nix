@@ -16,6 +16,9 @@
     ./gaming.nix
     ./hardware.nix
     ./docker.nix
-    # ./persistence.nix
+    ./cache-cleanup.nix
+    # ./persistence.nix — enable after the impermanence disk migration is
+    # done (needs /persist to exist). See README.md "Migrating an existing
+    # install to impermanence".
   ];
 }

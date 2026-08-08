@@ -2,7 +2,7 @@
 # 'rec' allows variables to reference each other inside this set
 rec {
   username = "sonny";
-  hostname = "sonny-laptop";
+  hostname = "legion";
 
   # User Variables
   deviceName = "nvme0n1";
@@ -12,7 +12,6 @@ rec {
   defaultFileManager = "pcmanfm";
   defaultTerminal = "foot";
   gitEmail = "snorrekstrand@hotmail.com";
-  theme = "atelier-cave";
   flakeDir = "/home/${username}/.dotfiles/nixos";
   intelBusId = "0:2:0"; # Use the correct Bus ID for your Intel GPU
   nvidiaBusId = "1:0:0"; # Use the correct Bus ID for your NVIDIA GPU

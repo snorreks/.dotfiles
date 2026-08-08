@@ -235,9 +235,6 @@ in {
         # Bluetooth Popup
         "SUPER,b,spawn,${opts.defaultTerminal} --title=bluetuith-popup --window-size-chars=80x24 bluetuith"
 
-        # Hardware & Utilities
-        "SUPER+SHIFT,h,spawn,set-gpu-hybrid"
-
         # Fullscreen / Layout Toggles
         "SUPER,f,togglemaximizescreen"
         "SUPER+SHIFT,f,togglefullscreen"

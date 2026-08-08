@@ -102,9 +102,6 @@
     # --- Browser Automation ---
     agent-browser # Headless browser automation CLI for AI agents (Vercel)
 
-    # --- Parallel Dev Worktrees ---
-    workmux # Git worktrees + tmux windows for zero-friction parallel dev
-
     # --- Usage Tracking ---
     ccusage # Token usage tracker for pi sessions
 
@@ -197,12 +194,7 @@
     # })
   ];
 
-  # --- END FIX ---
-
   hardware-and-gpu = with pkgs; [
-    # For switching between integrated, hybrid, and dedicated NVIDIA graphics modes
-    # inputs.envycontrol.packages.x86_64-linux.default
-
     # GPU monitoring tool that works well with both NVIDIA and AMD
     nvtopPackages.nvidia
 

@@ -23,3 +23,4 @@ keys.txt
 # VPN WireGuard configs contain private keys — never commit
 nixos/config/home/vpn/configs/
 .claude/
+secrets.md

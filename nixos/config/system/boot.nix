@@ -45,30 +45,9 @@
       # kernelModules = ["nvidia" "nvidia_modeset" "nvidia_uvm" "nvidia_drm"];
     };
 
-    # initrd.postDeviceCommands = lib.mkAfter ''
-    #   mkdir /btrfs_tmp
-    #   mount /dev/root_vg/root /btrfs_tmp
-    #   if [[ -e /btrfs_tmp/root ]]; then
-    #       mkdir -p /btrfs_tmp/old_roots
-    #       timestamp=$(date --date="@$(stat -c %Y /btrfs_tmp/root)" "+%Y-%m-%-d_%H:%M:%S")
-    #       mv /btrfs_tmp/root "/btrfs_tmp/old_roots/$timestamp"
-    #   fi
-
-    #   delete_subvolume_recursively() {
-    #       IFS=$'\n'
-    #       for i in $(btrfs subvolume list -o "$1" | cut -f 9- -d ' '); do
-    #           delete_subvolume_recursively "/btrfs_tmp/$i"
-    #       done
-    #       btrfs subvolume delete "$1"
-    #   }
-
-    #   for i in $(find /btrfs_tmp/old_roots/ -maxdepth 1 -mtime +30); do
-    #       delete_subvolume_recursively "$i"
-    #   done
-
-    #   btrfs subvolume create /btrfs_tmp/root
-    #   umount /btrfs_tmp
-    # '';
+    # The impermanence root-rollback service lives in
+    # config/system/persistence.nix (disabled until the disk migration is
+    # done — see README.md).
     # Temporary filesystem configuration
     tmp = {
       # cleanOnBoot = true; # Clean /tmp on boot
