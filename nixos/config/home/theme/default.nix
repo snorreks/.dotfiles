@@ -77,6 +77,10 @@
   #    (rebuild activation + toggle-off)
   theme-apply-static = pkgs.writeShellScriptBin "theme-apply-static" ''
     set -euo pipefail
+    # writeShellScriptBin doesn't set PATH; HM activation runs with a minimal
+    # environment — declare the tools this script needs explicitly.
+    export PATH="${pkgs.coreutils}/bin:$PATH"
+
     mkdir -p ${cacheDir}/yazi "$HOME/.config/zed/themes" "$HOME/.config/vesktop/themes"
     # install -m 644: store files are read-only (444); matugen needs writable outputs
     install -m 644 ${staticWaybarCss} ${cacheDir}/waybar.css
@@ -106,6 +110,10 @@
   # ── Runtime renderer: dynamic (matugen image) or static (theme-apply-static)
   theme-render = pkgs.writeShellScriptBin "theme-render" ''
     set -euo pipefail
+    # writeShellScriptBin doesn't set PATH; HM activation runs with a minimal
+    # environment — declare the tools this script needs explicitly (missing
+    # awk previously caused exit 127 and failed the whole activation).
+    export PATH="${pkgs.gawk}/bin:${pkgs.gnugrep}/bin:${pkgs.coreutils}/bin:$PATH"
 
     THEME_DIR="${cacheDir}"
     MODE_FILE="$THEME_DIR/mode"

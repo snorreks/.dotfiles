@@ -25,4 +25,7 @@
   # Impermanence is OFF (base default). Flip to true to wipe the root
   # subvolume every boot — see docs/impermanence-migration.md.
   enablePersistence = false;
+
+  # GS65 stealth is not powerful enough to run big models
+  enableOllama = false;
 }
