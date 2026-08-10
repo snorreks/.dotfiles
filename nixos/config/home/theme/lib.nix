@@ -20,6 +20,7 @@
     // (import ./apps/zed.nix {inherit lib;})
     // (import ./apps/vesktop.nix {inherit lib;})
     // (import ./apps/pcmanfm.nix {inherit lib;})
+    // (import ./apps/pyroclear.nix {inherit lib;})
     // (import ./apps/spicetify.nix {inherit lib;});
 in
   palette // render // apps

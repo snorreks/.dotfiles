@@ -69,6 +69,12 @@
       url = "github:ogulcancelik/herdr";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Terminal fire animation — clear your terminal with ASCII flames
+    pyroclear = {
+      url = "github:shreyanth-sureshkrishnaa/pyroclear";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
   outputs = {nixpkgs, ...} @ inputs: let
     system = "x86_64-linux";

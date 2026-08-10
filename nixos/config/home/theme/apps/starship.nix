@@ -50,7 +50,6 @@
       "$jobs"
       "$time"
       "$line_break"
-      "$status"
       "$character"
     ];
 
@@ -140,22 +139,9 @@
     };
 
     # ── Exit status ─────────────────────────────────────────────────────
-    # Sits after $line_break, immediately left of ❯, so a failure reads as
-    # part of the prompt character rather than trailing the directory line.
-    status = {
-      disabled = false;
-      symbol = "✘";
-      not_executable_symbol = "🚫";
-      not_found_symbol = "󰍉";
-      # Ctrl+C (SIGINT) is normal usage, not an error — render nothing for it.
-      # $signal_name is dropped from the format so "INT" doesn't appear either;
-      # real signals keep their icon (󰈸), exit codes keep ✘ + common meaning.
-      sigint_symbol = "";
-      signal_symbol = "󰈸";
-      map_symbol = true;
-      style = "bold fg:${wh.base08}";
-      format = "[$symbol$common_meaning$maybe_int]($style) ";
-    };
+    # Intentionally absent: the status module printed NOTFOUND/✘/signals
+    # left of ❯, which stuck around after failed commands. The character
+    # module's error_symbol already colors ❯ red on failure — enough.
 
     jobs = {
       symbol = "󰑮 ";

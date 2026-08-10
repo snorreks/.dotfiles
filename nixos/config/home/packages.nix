@@ -36,6 +36,7 @@
     fzf # A general-purpose command-line fuzzy finder
     entr # Run arbitrary commands when files change
     tomato-c # A simple Pomodoro timer for your terminal
+    inputs.pyroclear.packages.${pkgs.stdenv.hostPlatform.system}.default # Terminal fire animation (pyroclear)
   ];
 
   system-monitoring = with pkgs; [

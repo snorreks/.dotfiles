@@ -181,7 +181,9 @@ async function main(): Promise<void> {
   }
 
   const hr = "─".repeat(52);
-  const activeLimits = data.limits.filter((l) => l.kind && l.group);
+  // Only render limits that are actually enforced (e.g. weekly limits with
+  // no reset are not active — showing them is noise).
+  const activeLimits = data.limits.filter((l) => l.kind && l.group && l.is_active);
 
   console.log();
   console.log(`  ${c.purple}╭── ${c.blue}${c.bold}⚡ CLAUDE USAGE${c.reset} ${c.dim}${hr}${c.reset}`);
@@ -193,7 +195,7 @@ async function main(): Promise<void> {
   for (const limit of activeLimits) {
     const label = padRight(labelForKind(limit.kind), 14);
     const pct = padRight(`${Math.round(limit.percent)}%`, 4);
-    const status = limit.is_active ? formatResetsAt(limit.resets_at) : "not started";
+    const status = formatResetsAt(limit.resets_at);
     console.log(
       `  ${c.purple}│ ${c.cyan}${label}${c.dim}:: ${c.reset}${bar(limit.percent)} ${colorForPercent(
         limit.percent,

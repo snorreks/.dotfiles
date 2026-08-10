@@ -66,9 +66,12 @@
       # ssh alias removed — Foot supports OSC 52 clipboard natively over SSH
 
       fuck = "f";
+      cu = "claude_usage";
       pi-update = "cd $HOME/.pi && bun run update";
 
       where = "curl -s https://ipinfo.io/json | grep -E '\"ip\":|\"country\":|\"city\":'";
+
+      c = "pyroclear";
     };
 
     shellAbbrs = {

@@ -58,6 +58,7 @@
   staticVesktopCss = pkgs.writeText "theme-vesktop.css" (theme.mkVesktopCss stylixColors);
   staticFootColors = pkgs.writeText "theme-foot-colors.ini" (theme.mkFootColors stylixColors);
   staticFootOsc = pkgs.writeText "theme-foot-osc.txt" (theme.mkFootOsc stylixColors);
+  staticPyroclearColors = pkgs.writeText "theme-pyroclear-colors.toml" (theme.mkPyroclearColors stylixColors);
 
   # ── Matugen template inputs (same mkXxx functions, matugen expressions) ──
   templateStarship = tomlFormat.generate "starship.toml" (
@@ -97,6 +98,9 @@
     # foot: colors + OSC recolor payload (no terminal restart needed for OSC)
     install -m 644 ${staticFootColors} ${cacheDir}/foot-colors.ini
     install -m 644 ${staticFootOsc} ${cacheDir}/foot-osc.txt
+
+    # pyroclear: [color] block merged into its config by theme-render
+    install -m 644 ${staticPyroclearColors} ${cacheDir}/pyroclear-colors.toml
   '';
 
   # ── Runtime renderer: dynamic (matugen image) or static (theme-apply-static)
@@ -205,6 +209,26 @@
             fi
         fi
     fi
+
+    # 4. Apply — pyroclear: merge the theme [color] block into its config.
+    #    pyroclear reads config at startup (no live reload), so the next
+    #    `pyroclear` run picks it up. Only the [color] section is replaced;
+    #    [animation] settings from `pyroclear --settings` are preserved.
+    pyroclear_config="$HOME/.config/pyroclear/config.toml"
+    if [ -f "$THEME_DIR/pyroclear-colors.toml" ]; then
+        mkdir -p "$(dirname "$pyroclear_config")"
+        if [ -f "$pyroclear_config" ]; then
+            tmp="$(mktemp)"
+            # drop the existing [color] section (header + keys), keep the rest
+            awk '/^\[color\]/ { skip = 1; next } /^\[/ { skip = 0 } !skip { print }' "$pyroclear_config" > "$tmp"
+            cat "$THEME_DIR/pyroclear-colors.toml" >> "$tmp"
+            mv "$tmp" "$pyroclear_config"
+        else
+            # first run: seed from theme colors + pyroclear's defaults
+            cat "$THEME_DIR/pyroclear-colors.toml" > "$pyroclear_config"
+            printf '\n[animation]\nfps       = 60\nwind      = 0\nheight    = 3\ndirection = false\n' >> "$pyroclear_config"
+        fi
+    fi
   '';
 in {
   imports = [
@@ -271,6 +295,10 @@ in {
     [templates.foot_osc]
     input_path = "${templatesDir}/foot-osc.txt"
     output_path = "${cacheDir}/foot-osc.txt"
+
+    [templates.pyroclear]
+    input_path = "${templatesDir}/pyroclear-colors.toml"
+    output_path = "${cacheDir}/pyroclear-colors.toml"
   '';
 
   # Scheme-check config for wallpaper-add (extract + cache, render nothing)
@@ -304,6 +332,7 @@ in {
   xdg.configFile."matugen/templates/vesktop-theme.css".text = theme.mkVesktopCss mp;
   xdg.configFile."matugen/templates/foot-colors.ini".text = theme.mkFootColors mp;
   xdg.configFile."matugen/templates/foot-osc.txt".text = theme.mkFootOsc mp;
+  xdg.configFile."matugen/templates/pyroclear-colors.toml".text = theme.mkPyroclearColors mp;
 
   # ── Always-populate ~/.cache/theme on rebuild (kills the first-boot race:
   #    waybar starts via systemd before any wallpaper change). Runs the full
