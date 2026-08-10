@@ -37,32 +37,91 @@ filesystem you're currently booted from.
    mkdir -p /mnt && mount LABEL=nixos /mnt
    ```
 4. Create the subvolumes and move existing data into them with reflinks
-   (instant, no extra disk space needed):
+   (instant, no extra disk space needed). `/home` and `/nix` already exist as
+   top-level directories, so move them aside first, then create all four
+   subvolumes:
    ```bash
+   mv /mnt/home /mnt/home.old
+   mv /mnt/nix /mnt/nix.old
    btrfs subvolume create /mnt/root
    btrfs subvolume create /mnt/home
    btrfs subvolume create /mnt/nix
    btrfs subvolume create /mnt/persist
 
-   cp -a --reflink=always /mnt/home/. /mnt/home-new/.   # adjust source paths to
-   # wherever they actually landed after btrfs-convert, verify contents match,
-   # then remove the originals and rename home-new -> home (same for /nix, /etc, /var).
+   # home + nix data → subvolumes (reflink copy is instant, uses no space)
+   cp -a --reflink=always /mnt/home.old/. /mnt/home/
+   cp -a --reflink=always /mnt/nix.old/. /mnt/nix/
+   diff -rq /mnt/home.old /mnt/home && echo "home OK"
+   diff -rq /mnt/nix.old /mnt/nix && echo "nix OK"
+   rm -rf /mnt/home.old /mnt/nix.old
+
+   # everything else (etc, var, usr, …) moves into the root subvolume —
+   # that's the subvolume that gets rolled back to empty on every boot
+   cd /mnt
+   for d in *; do
+     case "$d" in root|home|nix|persist) ;; *) mv "$d" root/ ;; esac
+   done
    ```
-5. Update `hosts/legion/hardware.nix`: keep the existing `/boot` and swap
-   `fileSystems` entries byte-for-byte, replace the `/` entry with the four
-   `LABEL=nixos` + `subvol=` mounts (`root` at `/`, `home` at `/home`, `nix`
-   at `/nix`, `persist` at `/persist`).
-6. Set `enablePersistence = true` in `hosts/<host>/options.nix` (e.g.
+   Sanity-check the result: `ls /mnt/root` (etc, var, usr, …), `ls /mnt/home`
+   (your user dir), `ls /mnt/nix` (store, var, …).
+5. **Seed `/persist` — impermanence does NOT copy existing files for you.**
+   Its activation only creates empty directories and bind mounts, so anything
+   listed in `config/system/persistence.nix` must be copied into `/persist`
+   *now*, or it's gone on the first wiped boot (SSH host keys, `/etc/nixos`,
+   NetworkManager connections, machine-id, …). Do it while the old data is
+   still at the top level:
+   ```bash
+   P=/mnt/persist/system
+   mkdir -p "$P/etc/NetworkManager" "$P/var/log" "$P/var/lib/systemd"
+   for s in /mnt/etc/ssh /mnt/etc/nixos /mnt/etc/machine-id /mnt/var/log \
+            /mnt/var/lib/bluetooth /mnt/var/lib/nixos /mnt/var/lib/docker \
+            /mnt/var/lib/colord; do
+     [ -e "$s" ] && cp -a --reflink=always "$s" "$P${s#/mnt}"
+   done
+   [ -e /mnt/etc/NetworkManager/system-connections ] && \
+     cp -a --reflink=always /mnt/etc/NetworkManager/system-connections "$P/etc/NetworkManager/"
+   [ -e /mnt/var/lib/systemd/coredump ] && \
+     cp -a --reflink=always /mnt/var/lib/systemd/coredump "$P/var/lib/systemd/"
+   ```
+   Keep this list in sync with the `directories`/`files` lists in
+   `config/system/persistence.nix`.
+6. Update `hosts/<host>/hardware.nix` (`legion` or `gs65`): keep the existing
+   `/boot`, `/mnt/shared` and swap entries byte-for-byte, replace the `/`
+   entry with the four `LABEL=nixos` + `subvol=` mounts (`root` at `/`,
+   `home` at `/home`, `nix` at `/nix`, `persist` at `/persist` with
+   `neededForBoot = true`). This edit must be committed **before** the
+   live-USB rebuild in step 8 (the old ext4 generation can't boot the
+   converted partition, so the new one has to be the one that comes up).
+7. Set `enablePersistence = true` in `hosts/<host>/options.nix` (e.g.
    `hosts/legion/options.nix`). `config/system/default.nix` imports
    `./persistence.nix` and the `/persist` mount is gated on that boolean,
    so this is the single switch that turns on the boot-time wipe — do it
    last.
-7. `nixos-install`/chroot and rebuild, reboot, and confirm **both** NixOS and
-   the "Windows 11" boot entry still come up.
-8. Once you're confident it's stable, delete the `ext2_saved` subvolume
+8. Rebuild into the new layout **from the live USB** (the old ext4
+   generation can't boot anymore, so the new config must be built + boot
+   entry installed now). The repo and the sops age key are already preserved
+   in the `home` subvolume (`/mnt/home/<user>/.dotfiles`,
+   `/mnt/home/<user>/.config/sops/age/keys.txt`), so no clone/restore needed:
+   ```bash
+   umount /mnt
+   mount -o subvol=/root,compress=zstd,noatime LABEL=nixos /mnt
+   mount -o subvol=/home,compress=zstd,noatime LABEL=nixos /mnt/home
+   mount -o subvol=/nix,compress=zstd,noatime LABEL=nixos /mnt/nix
+   mount -o subvol=/persist,compress=zstd,noatime LABEL=nixos /mnt/persist
+   mount /dev/nvme0n1p1 /mnt/boot   # the ESP — never reformatted
+
+   nixos-install --no-root-passwd \
+     --flake "/mnt/home/<user>/.dotfiles/nixos#<host>"
+   ```
+   `nixos-install` handles the chroot + nix-daemon + bootloader install
+   itself; networking on the live USB is needed for any store paths that
+   aren't cached yet (e.g. btrfs initrd bits). Then reboot and confirm
+   **both** NixOS and the "Windows 11" boot entry still come up.
+9. Once you're confident it's stable, delete the `ext2_saved` subvolume
    `btrfs-convert` left behind to reclaim its space.
 
-GS65 doesn't have a real `hardware.nix` yet (see
-[GS65 first-time setup](./bootstrap.md#gs65-first-time-setup)), so this
-doesn't apply there until its first real install — at that point it can just
-use `disko.nix` directly instead of this manual procedure.
+The GS65 now has a real `hardware.nix` and a dual-boot Windows install with
+data to keep, so this same manual procedure applies there — use
+`hosts/gs65/hardware.nix` and follow the same steps (its root partition is
+also `/dev/nvme0n1p2`, ESP `/dev/nvme0n1p1`, shared NTFS on `/dev/nvme1n1p4`).
+`disko.nix` remains the path only for a genuinely fresh, wipeable disk.
