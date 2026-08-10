@@ -44,6 +44,7 @@
       conf = "z ~/.config";
       nixos = "z ~/dotfiles/nixos";
       store = "z /nix/store";
+      discord = "z ~/.dotfiles/nixos/config/home/discord";
       # Default: fast offline build — ollama-cuda included
       nswitch = "nh os switch ~/.dotfiles/nixos --offline -- --extra-experimental-features flakes --extra-experimental-features nix-command";
       nswitcho = "nh os switch ~/.dotfiles/nixos -- --extra-experimental-features flakes --extra-experimental-features nix-command";
@@ -115,7 +116,19 @@
               set -gx YAZI_CONFIG_HOME "$HOME/.cache/theme/yazi"
           end
 
-          starship init fish | source
+          # starship init fish | source is owned by home-manager's
+          # enableFishIntegration (appended AFTER interactiveShellInit, so the
+          # runtime STARSHIP_CONFIG export above still wins).
+
+          # Recolor the running terminal from the dynamic theme (OSC 10/11/4).
+          # foot has no live config reload, so emitting the escapes from the
+          # prompt hook makes every open terminal follow a wallpaper change on
+          # the next prompt (theme-render rewrites foot-osc.txt).
+          function _recolor_terminal --on-event fish_prompt
+              if test -s "$HOME/.cache/theme/foot-osc.txt"
+                  printf '%s' (cat "$HOME/.cache/theme/foot-osc.txt")
+              end
+          end
 
           set fish_vi_force_cursor
           set fish_cursor_default block blink

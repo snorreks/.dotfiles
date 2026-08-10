@@ -63,7 +63,11 @@
 
     # ── Left Modules ──────────────────────────────────────────────────
     "custom/power" = {
-      format = "";
+      # 󰐥 = nf-md-power. The old glyph (nf-fa-power_off) is patched into Nerd Fonts
+      # with a different vertical origin than the Material Design block that every other
+      # icon in this bar uses, so it rendered high in the line box while its neighbours
+      # sat centered — that is the "not centered" bug.
+      format = "󰐥";
       tooltip = true;
       tooltip-format = "Power Menu";
       on-click = "wlogout";
@@ -108,7 +112,7 @@
 
     # ── Center Modules ────────────────────────────────────────────────
     "clock" = {
-      format = "󰥔 {:%I:%M %p}";
+      format = "󰥔 {:%H:%M}";
       tooltip-format = "<tt>{calendar}</tt>";
       calendar = {
         mode = "month";
@@ -135,17 +139,29 @@
 
     # ── Music (native MPRIS via D-Bus — no polling) ─────────────────────
     "mpris" = {
-      format = "{player_icon} {artist} - {title}";
-      format-paused = "{status_icon} <i>{artist} - {title}</i>";
+      # Pango markup: artist stays full-weight (short, scannable), title is
+      # deliberately dimmed. Previously the entire 42-char string competed
+      # for attention at 1.12:1 contrast.
+      format = "{player_icon} {artist}  <span alpha='62%'>{title}</span>";
+      format-paused = "{status_icon} <span alpha='70%'>{artist}  {title}</span>";
+      format-stopped = "";
       player-icons = {
-        default = "▶";
-        spotify = "";
+        default = "󰐐";
+        spotify = "󰓇";
+        firefox = "󰈹";
+        mpv = "󰐐";
       };
       status-icons = {
-        paused = "⏸";
+        paused = "󰏤";
+        playing = "󰐐";
+        stopped = "󰓛";
       };
       tooltip-format = "Album: {album}\nArtist: {artist}\nLength: {length}";
-      max-length = 42;
+      # The old ▶ / ⏸ are Unicode geometric/misc-technical characters, not
+      # Nerd Font glyphs — they fell back to a different face at a different weight
+      # and size, the same class of problem as the old power button.
+      max-length = 46;
+      ellipsize = "end";
       on-click = "playerctl play-pause";
       on-scroll-up = "playerctl next";
       on-scroll-down = "playerctl previous";
@@ -230,6 +246,9 @@
       exec = "sys-daemon waybar light";
       return-type = "json";
       restart-interval = 10;
+      # tooltip was previously unset → waybar defaulted to showing the raw
+      # text; make it explicit so the pill can stay terse.
+      tooltip = true;
       smooth-scrolling-threshold = 6;
       on-scroll-up = "change_brightness up";
       on-scroll-down = "change_brightness down";

@@ -1,0 +1,310 @@
+/* nixos/config/home/theme/css/waybar.css
+ *
+ * Placeholders `@base00@ … @base0F@` are substituted by apps/waybar.nix
+ * (builtins.replaceStrings) for BOTH instantiations:
+ *   • static  → tokyo-night hex from stylix
+ *   • dynamic → matugen base16 template expressions (lowercase names,
+ *               see mkExpr in palette.nix) substituted at render time
+ *
+ * ── Why the color math lives here and not in Nix ──────────────────────────
+ * On the dynamic path the palette values are *template strings*, not hex, so
+ * Nix cannot compute luminance. GTK's own CSS color functions (alpha/shade/
+ * mix) evaluate AFTER matugen substitutes real colors, so every derived token
+ * below is correct for an arbitrary wallpaper palette without any Nix-side
+ * color math. That is the whole trick: push contrast repair into GTK CSS.
+ */
+
+/* ══ Semantic tokens ═══════════════════════════════════════════════════ */
+@define-color bg       #@base00@;
+@define-color surface  #@base01@;
+@define-color overlay  #@base02@;
+@define-color muted    #@base03@;
+@define-color subtle   #@base04@;
+@define-color fg       #@base05@;
+@define-color red      #@base08@;
+@define-color orange   #@base09@;
+@define-color yellow   #@base0A@;
+@define-color green    #@base0B@;
+@define-color cyan     #@base0C@;
+@define-color blue     #@base0D@;
+@define-color magenta  #@base0E@;
+
+/* ── Derived, contrast-safe ────────────────────────────────────────────
+ * shade(c, f): f<1 darkens, f>1 lightens. Runs on the resolved color, so a
+ * muddy matugen accent gets lifted the same way a tokyo-night one does.
+ *
+ * pill-bg is DARKENED base00 at high alpha. The old value —
+ * alpha(base00, 0.85) — let 15% of a bright wallpaper through, which is what
+ * collapsed mpris/brightness to ~1.1:1 contrast. 0.94 over a darkened base
+ * makes the pill interior effectively wallpaper-independent. */
+@define-color pill-bg     alpha(shade(@bg, 0.72), 0.94);
+@define-color pill-bg-hi  alpha(shade(@bg, 1.45), 0.96);
+@define-color pill-line   alpha(shade(@fg, 1.3), 0.10);
+
+/* ── Derived tokens ───────────────────────────────────────────────────
+ * The palette now guarantees readability by construction (MD3 roles: on_surface
+ * T90, accents T80, outline T60 — see palette.nix), so the heavy shade() lifts
+ * are gone: @txt is the raw on_surface, and accent tokens are near-identity so
+ * they keep their semantic hue. Never use @subtle/@muted for text. */
+@define-color txt      @fg;
+@define-color txt-dim  alpha(@fg, 0.62);
+@define-color icon     @fg;
+
+@define-color ok       shade(@green, 1.05);
+@define-color warn     shade(@yellow, 1.05);
+@define-color crit     shade(@red, 1.05);
+@define-color hi       shade(@blue, 1.05);
+@define-color pop      shade(@magenta, 1.05);
+
+* {
+    border: none;
+    border-radius: 0px;
+    font-family: "JetBrainsMono Nerd Font", sans-serif;
+    font-weight: bold;
+    font-size: 11px;
+    min-height: 0px;
+    /* kill GTK's default focus/active tint on every module */
+    box-shadow: none;
+    text-shadow: none;
+}
+
+/* ── Bar scrim ─────────────────────────────────────────────────────────
+ * The bar was fully transparent, so every pill's legibility depended on
+ * whatever pixels the wallpaper happened to put behind it. A short gradient
+ * anchored at the screen edge decouples the two at basically zero visual
+ * cost — you still see the wallpaper, the text stops fighting it. */
+window#waybar {
+    background: linear-gradient(to top,
+                alpha(shade(@bg, 0.6), 0.55) 0%,
+                alpha(shade(@bg, 0.6), 0.18) 65%,
+                transparent 100%);
+}
+
+tooltip {
+    background: alpha(shade(@bg, 0.8), 0.97);
+    color: @txt;
+    border-radius: 10px;
+    border: 1px solid @pill-line;
+    padding: 6px 10px;
+}
+tooltip label { color: @txt; }
+
+/* ── Transparent main containers ───────────────────────────────────── */
+.modules-left,
+.modules-center,
+.modules-right,
+#window-info {
+    background: transparent;
+    margin: 0;
+    padding: 0;
+}
+
+/* ── Shared pill ───────────────────────────────────────────────────── */
+#custom-power,
+#launcher-bar,
+#center-clock,
+#sys-status,
+#hardware,
+#quick-controls,
+#workspaces,
+#mpris {
+    background: @pill-bg;
+    border: 1px solid @pill-line;
+    border-radius: 11px;
+    padding: 2px 8px;
+    margin: 3px 4px;
+    transition: background 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+#launcher-bar:hover,
+#center-clock:hover,
+#sys-status:hover,
+#hardware:hover,
+#quick-controls:hover,
+#workspaces:hover,
+#mpris:hover {
+    background: @pill-bg-hi;
+    box-shadow: 0 0 0 1px alpha(@hi, 0.35);
+}
+
+/* ── Power button ──────────────────────────────────────────────────────
+ * Two separate bugs were stacked here:
+ *
+ * 1. CENTERING. `` (U+F011) is a FontAwesome glyph; every other icon in
+ *    this bar (󰍉 󰥔 󰤨 󰈀 󰝟 󰂄) is Material Design. In Nerd Fonts the FA block
+ *    is patched with a different vertical origin than the MDI block, so an FA
+ *    glyph sits high in the line box while its MDI neighbours sit centered —
+ *    which reads exactly as "the power button isn't centered". settings.nix
+ *    now uses `󰐥` (nf-md-power) so it shares metrics with the rest of the bar.
+ *    min-width + symmetric padding pins the horizontal center.
+ *
+ * 2. VISIBILITY. Raw base08 on a 0.85-alpha pill measured 1.29:1 against the
+ *    wallpaper-bleached background (WCAG wants 3:1 for icons) — @crit fixed
+ *    that. It now matches the volume/brightness/@txt family per request
+ *    (the red hover stays as a subtle destructive-action affordance). */
+#custom-power {
+    font-size: 15px;
+    color: @txt;
+    min-width: 22px;
+    padding: 2px 8px;
+}
+#custom-power:hover {
+    color: shade(@txt, 1.25);
+    background: alpha(@txt, 0.12);
+    box-shadow: 0 0 0 1px alpha(@txt, 0.3);
+}
+
+/* ── Workspaces ────────────────────────────────────────────────────── */
+#workspaces button {
+    color: @txt-dim;
+    background: transparent;
+    border: none;
+    padding: 0 6px;
+    margin: 0 1px;
+    border-radius: 7px;
+    font-size: 13px;
+    transition: all 0.15s ease-in-out;
+}
+#workspaces button:hover {
+    background: alpha(@fg, 0.10);
+    color: @txt;
+}
+#workspaces button.occupied { color: @txt; }
+#workspaces button.active,
+#workspaces button.focused {
+    background: alpha(@hi, 0.28);
+    color: @hi;
+    box-shadow: inset 0 -2px 0 0 @hi;
+}
+#workspaces button.urgent {
+    background: alpha(@crit, 0.28);
+    color: @crit;
+}
+
+/* ── Window title ──────────────────────────────────────────────────── */
+#window {
+    background: @pill-bg;
+    border: 1px solid @pill-line;
+    color: @hi;
+    padding: 2px 10px;
+    margin: 3px 4px;
+    border-radius: 11px;
+    font-style: italic;
+}
+window#waybar.empty #window,
+#window.empty {
+    background: transparent;
+    border: none;
+    margin: 0px;
+    padding: 0px;
+}
+
+/* ── Menu ──────────────────────────────────────────────────────────── */
+#custom-menu {
+    font-size: 15px;
+    color: @icon;
+    padding: 0 4px;
+}
+#custom-menu:hover { color: @hi; }
+
+/* ── Hardware ──────────────────────────────────────────────────────── */
+#network, #bluetooth, #pulseaudio {
+    color: @txt;
+    font-size: 12px;
+    padding: 0 4px;
+}
+#network   { font-size: 13px; margin-right: 6px; }
+#bluetooth { margin-right: 6px; }
+
+#network.disconnected { color: @crit; }
+#bluetooth.disabled,
+#bluetooth.off        { color: @txt-dim; }
+#bluetooth.connected  { color: @ok; } /* same green as battery.charging / custom-light.eye-on */
+#pulseaudio.muted     { color: @txt-dim; }
+
+/* ── Quick controls ────────────────────────────────────────────────── */
+/* Brightness measured 1.19:1 — the label was there, just not visible. The
+ * eye-off (i.e. normal) state now uses the lifted @txt rather than raw
+ * base05, and the whole pill sits on the opaque @pill-bg. */
+#custom-light {
+    color: @txt;
+    font-size: 12px;
+    padding: 0 4px;
+    margin-right: 6px;
+}
+#custom-light.eye-off    { color: @txt; }
+#custom-light.eye-on     { color: @ok; }
+#custom-light.eye-forced { color: @warn; }
+
+#battery { color: @txt; font-size: 12px; padding: 0 4px; }
+#battery.charging, #battery.plugged { color: @ok; }
+#battery.warning:not(.charging)     { color: @warn; }
+#battery.critical:not(.charging) {
+    color: @crit;
+    animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* ── Clock / tray / misc ───────────────────────────────────────────── */
+#clock, #tray, #custom-vpn, #custom-tomato {
+    color: @txt;
+    background: transparent;
+    padding: 0 5px;
+    font-size: 12px;
+}
+#clock { color: @txt; font-weight: bold; }
+#tray menu { background: shade(@bg, 0.85); color: @txt; }
+
+@keyframes pulse {
+    0%   { opacity: 0.25; }
+    50%  { opacity: 1.0; }
+    100% { opacity: 0.25; }
+}
+
+/* ── VPN ───────────────────────────────────────────────────────────── */
+#custom-vpn {
+    padding: 0 6px;
+    margin: 0 2px;
+    border-radius: 8px;
+    transition: all 0.2s ease-in-out;
+}
+#custom-vpn.vpn-on     { color: @ok; }
+#custom-vpn.vpn-off    { color: @txt-dim; }
+#custom-vpn.vpn-failed { color: @crit; }
+#custom-vpn.vpn-loading {
+    color: @warn;
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
+/* ── Dev ports ─────────────────────────────────────────────────────── */
+#custom-dev-ports {
+    color: @txt-dim;
+    padding: 0 6px;
+    margin: 0 2px;
+    border-radius: 8px;
+    transition: all 0.2s ease-in-out;
+}
+#custom-dev-ports.dev-active { color: @ok; }
+#custom-dev-ports.dev-idle   { color: @txt-dim; }
+#custom-dev-ports.dev-off    { color: @muted; opacity: 0.65; }
+
+/* ── Tomato ────────────────────────────────────────────────────────── */
+#custom-tomato.tomato-active { color: @warn; }
+#custom-tomato.tomato-idle   { color: @txt-dim; }
+
+/* ── MPRIS ─────────────────────────────────────────────────────────────
+ * Measured 1.12:1 — the worst offender. Three causes, all fixed:
+ *   • pill was 15% wallpaper (now @pill-bg)
+ *   • `.paused` used base04, a dim/comment tone that is ~2:1 by definition
+ *     on any base16 background (now @txt-dim, an alpha of the lifted fg)
+ *   • italic 12px over a photo is the hardest possible case — italic is now
+ *     reserved for the paused state only, where it carries meaning.
+ * settings.nix additionally splits artist/title with pango markup so the
+ * bright half of the string is short and the long half is deliberately dim. */
+#mpris {
+    color: @txt;
+    font-size: 12px;
+    font-style: normal;
+}
+#mpris.playing { color: @txt; }
+#mpris.paused  { color: @txt-dim; font-style: italic; }
+#mpris.stopped { color: @txt-dim; }

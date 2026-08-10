@@ -52,8 +52,11 @@ filesystem you're currently booted from.
    `fileSystems` entries byte-for-byte, replace the `/` entry with the four
    `LABEL=nixos` + `subvol=` mounts (`root` at `/`, `home` at `/home`, `nix`
    at `/nix`, `persist` at `/persist`).
-6. Uncomment `./persistence.nix` in `config/system/default.nix` — this is
-   the step that actually turns on the boot-time wipe, so do it last.
+6. Set `enablePersistence = true` in `hosts/<host>/options.nix` (e.g.
+   `hosts/legion/options.nix`). `config/system/default.nix` imports
+   `./persistence.nix` and the `/persist` mount is gated on that boolean,
+   so this is the single switch that turns on the boot-time wipe — do it
+   last.
 7. `nixos-install`/chroot and rebuild, reboot, and confirm **both** NixOS and
    the "Windows 11" boot entry still come up.
 8. Once you're confident it's stable, delete the `ext2_saved` subvolume

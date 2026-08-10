@@ -24,3 +24,4 @@ keys.txt
 nixos/config/home/vpn/configs/
 .claude/
 secrets.md
+tmp/

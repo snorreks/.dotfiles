@@ -68,23 +68,28 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
         let sunset = wlsunset_running();
         let is_forced = forced();
 
+        // Icon + percentage share one color, driven entirely by the
+        // `eye-*` waybar CSS class (theme/lib.nix mkWaybarCss) — no
+        // hardcoded hex here, so this follows the active palette (static
+        // tokyo-night or the wallpaper-derived dynamic one) instead of
+        // silently staying tokyo-night-colored forever.
         let (text, tooltip, class) = if sunset {
             if is_forced {
                 (
-                    format!("<span color='#e0af68'>󱩌</span> {pct}%"),
+                    format!("󱩌 {pct}%"),
                     format!("<b>Eye Protection (FORCED 3500K)</b>\nBrightness: <b>{pct}%</b>"),
                     "eye-forced",
                 )
             } else {
                 (
-                    format!("<span color='#9ece6a'>󱩌</span> {pct}%"),
+                    format!("󱩌 {pct}%"),
                     format!("<b>Eye Protection (AUTO)</b>\nBrightness: <b>{pct}%</b>"),
                     "eye-on",
                 )
             }
         } else {
             (
-                format!("<span color='#f7768e'>󱩍</span> {pct}%"),
+                format!("󱩍 {pct}%"),
                 format!("<b>Eye Protection (OFF)</b>\nBrightness: <b>{pct}%</b>"),
                 "eye-off",
             )

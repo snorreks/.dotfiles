@@ -1,5 +1,7 @@
 # nixos/config/system/default.nix
-{...}: {
+# persistence.nix is imported only when opts.enablePersistence is true
+# (see nixos/options.nix / hosts/<host>/options.nix).
+{lib, opts, ...}: {
   imports = [
     ./boot.nix
     ./display-manager.nix
@@ -11,14 +13,12 @@
     ./power-management.nix
     ./security.nix
     ./services.nix
+    ./ssh.nix
     ./sound.nix
     ./user.nix
     ./gaming.nix
     ./hardware.nix
     ./docker.nix
     ./cache-cleanup.nix
-    # ./persistence.nix — enable after the impermanence disk migration is
-    # done (needs /persist to exist). See README.md "Migrating an existing
-    # install to impermanence".
-  ];
+  ] ++ lib.optionals opts.enablePersistence [./persistence.nix];
 }

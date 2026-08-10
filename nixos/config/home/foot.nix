@@ -18,11 +18,21 @@
         font-bold = "JetBrainsMono Nerd Font Mono:style=Bold:size=12";
         font-italic = "JetBrainsMono Nerd Font Mono:style=Italic:size=12";
         font-bold-italic = "JetBrainsMono Nerd Font Mono:style=Bold Italic:size=12";
-        pad = "10x10";
+        pad = "12x10 center";
+        font-size-adjustment = "0.5";
+        # Dynamic theme: [colors-dark] comes from the wallpaper-rendered file
+        # (theme/apps/foot.nix) via include — NOT from stylix (its foot target
+        # is disabled in theme/stylix.nix so the include isn't shadowed).
+        # foot reads this at server start only; running terminals recolor
+        # live via the OSC hook in fish/default.nix.
+        include = "~/.cache/theme/foot-colors.ini";
+        dpi-aware = "no";
+        initial-color-theme = "dark";
       };
 
       scrollback = {
-        lines = 10000;
+        lines = 20000;
+        multiplier = "3.0";
       };
 
       bell = {
@@ -30,9 +40,16 @@
       };
 
       cursor = {
-        style = "block";
-        blink = "no";
+        style = "beam";
+        blink = "yes";
+        beam-thickness = "1.5";
       };
+
+      # NOTE: no [colors] section here on purpose — stylix owns the palette via
+      # [colors-dark] (stylix.opacity.terminal = 0.95). A legacy [colors] block
+      # would be ignored at runtime AND log a deprecation warning on every foot
+      # start. If the terminal ever needs more opacity, change
+      # stylix.opacity.terminal in theme/stylix.nix instead.
 
       url = {
         launch = "${pkgs.xdg-utils}/bin/xdg-open \${url}";

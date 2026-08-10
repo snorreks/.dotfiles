@@ -15,7 +15,14 @@
   # against this machine.
   deviceName = "nvme0n1";
 
-  # The GS65 travels standalone most of the time — default to laptop-only.
-  # Flip to true (or override via local.nix) when it's docked to externals.
-  enableExternalMonitors = false;
+  # The GS65 travels standalone — laptop panel only. The rule is name+position
+  # only (no forced width/height) so mango uses the panel's native mode.
+  # Override via local.nix when docked to externals.
+  monitorrule = [
+    "name:^eDP-1$,x:0,y:0,rr:0,vrr:1"
+  ];
+
+  # Impermanence is OFF (base default). Flip to true to wipe the root
+  # subvolume every boot — see docs/impermanence-migration.md.
+  enablePersistence = false;
 }

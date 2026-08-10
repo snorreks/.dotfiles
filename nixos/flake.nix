@@ -63,6 +63,12 @@
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Terminal multiplexer for AI coding agents — same upstream source as aikami
+    herdr = {
+      url = "github:ogulcancelik/herdr";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
   outputs = {nixpkgs, ...} @ inputs: let
     system = "x86_64-linux";
@@ -81,7 +87,7 @@
     # The host's own hardware + any host-only extra modules live in
     # ./hosts/<key>/default.nix.
     hosts = {
-      legion.optsOverrides = {};
+      legion.optsOverrides = import ./hosts/legion/options.nix;
       gs65.optsOverrides = import ./hosts/gs65/options.nix;
     };
 

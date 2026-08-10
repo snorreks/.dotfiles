@@ -1,4 +1,4 @@
-# nixos/config/home/mango/default.nix
+# nixos/config/home/mango.nix
 {
   pkgs,
   lib,
@@ -101,22 +101,10 @@ in {
       default_mfact = 0.55;
 
       # ── Monitor Rules ─────────────────────────────────────────────────
+      # Per-host rules from opts.monitorrule (default: laptop-only; see
+      # hosts/legion/options.nix for the 3-monitor desktop setup).
       # rr:0 = normal (0°), rr:1 = 90° rotation (portrait)
-      monitorrule =
-        [
-          "name:^eDP-1$,width:2560,height:1600,refresh:240,x:0,y:0,scale:1,rr:0,vrr:1"
-        ]
-        ++ (
-          if opts.enableExternalMonitors
-          then [
-            # Acer VG272U V — 1440p @ 144Hz (HDMI-A-1)
-            "name:^HDMI-A-1$,width:2560,height:1440,refresh:144,x:2560,y:0,scale:1,rr:0,vrr:1"
-
-            # ASUS MB16AC — 1080p @ 60Hz Portrait (DP-1, rotated 90° via rr:1)
-            "name:^DP-1$,width:1920,height:1080,refresh:60,x:5120,y:0,scale:1,rr:1,vrr:0"
-          ]
-          else []
-        );
+      monitorrule = opts.monitorrule;
 
       # ── Tag Layout Rules ──────────────────────────────────────────────
       tagrule = [

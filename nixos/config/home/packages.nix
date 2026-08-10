@@ -27,7 +27,7 @@
   ];
 
   terminal-enhancements = with pkgs; [
-    herdr # Terminal multiplexer — essential for pi multi-pane workflow
+    inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default # Terminal multiplexer — essential for pi multi-pane workflow
     zoxide # A smarter `cd` command that learns your habits
     bluetuith # Bluetooth TUI manager
     stow # Symlink farm manager, useful for dotfiles

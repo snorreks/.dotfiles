@@ -30,7 +30,14 @@ in {
     spotifyLaunchFlags = "--disable-gpu";
     # Palette-driven theme (static baseline — see note above)
     customColorScheme = theme.mkSpicetifyColorScheme config.lib.stylix.colors;
-    enabledCustomApps = with spicePkgs.apps; [];
-    enabledExtensions = with spicePkgs.extensions; [];
+    # marketplace gives an in-app browser for more themes/extensions later
+    # without touching Nix again.
+    enabledCustomApps = with spicePkgs.apps; [marketplace lyricsPlus newReleases];
+    enabledExtensions = with spicePkgs.extensions; [
+      # adblock # I have premium
+      fullAppDisplay
+      shuffle
+      volumePercentage
+    ];
   };
 }

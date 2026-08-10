@@ -1,6 +1,7 @@
 # nixos/config/home/theme/default.nix
 #
-# Dynamic wallpaper theming layer.
+# Theming entry point: stylix base (palette source, cursor, fonts — see
+# ./stylix.nix) + the dynamic wallpaper theming layer below.
 #
 # Two worlds, one palette source (`./lib.nix`):
 #   • Static (default): HM/stylix configs — tokyo-night, exactly today's look.
@@ -36,7 +37,10 @@
     theme.renderFuzzelColors (theme.mkFuzzelColors stylixColors)
   );
   staticSwaylock = pkgs.writeText "theme-swaylock.conf" (
-    theme.renderSwaylock (theme.mkSwaylockSettings {c = stylixColors; inherit font;})
+    theme.renderSwaylock (theme.mkSwaylockSettings {
+      c = stylixColors;
+      inherit font;
+    })
   );
   tomlFormat = pkgs.formats.toml {};
 
@@ -52,6 +56,8 @@
     builtins.toJSON (theme.mkZedTheme stylixColors)
   );
   staticVesktopCss = pkgs.writeText "theme-vesktop.css" (theme.mkVesktopCss stylixColors);
+  staticFootColors = pkgs.writeText "theme-foot-colors.ini" (theme.mkFootColors stylixColors);
+  staticFootOsc = pkgs.writeText "theme-foot-osc.txt" (theme.mkFootOsc stylixColors);
 
   # ── Matugen template inputs (same mkXxx functions, matugen expressions) ──
   templateStarship = tomlFormat.generate "starship.toml" (
@@ -87,6 +93,10 @@
     # zed + vesktop: written to their own (non-HM-managed) config dirs
     install -m 644 ${staticZedTheme} "$HOME/.config/zed/themes/dynamic.json"
     install -m 644 ${staticVesktopCss} "$HOME/.config/vesktop/themes/dynamic.theme.css"
+
+    # foot: colors + OSC recolor payload (no terminal restart needed for OSC)
+    install -m 644 ${staticFootColors} ${cacheDir}/foot-colors.ini
+    install -m 644 ${staticFootOsc} ${cacheDir}/foot-osc.txt
   '';
 
   # ── Runtime renderer: dynamic (matugen image) or static (theme-apply-static)
@@ -105,13 +115,54 @@
     # 1. Render palette + templates
     if [ "$mode" = "dynamic" ] && [ -n "$wall" ] && [ -f "$wall" ]; then
         # --source-color-index 0: pick the most dominant color non-interactively.
+        # --contrast 0.5: matugen's MD3 roles are pinned to fixed HCT tones
+        # (on_surface T90, accents T80 — see palette.nix), so contrast is
+        # already guaranteed by construction; 0.5 pushes on_surface toward
+        # white for extra crispness on arbitrary wallpapers.
+        # NOTE: --lightness-dark is NOT used — it was inert for the base16
+        # backend and is unnecessary for roles.
         # On any matugen failure, degrade to the static palette so a rebuild
         # (which runs this via the activation hook) never breaks.
-        ${matugen}/bin/matugen image "$wall" -m dark --source-color-index 0 \
+        ${matugen}/bin/matugen image "$wall" -m dark --source-color-index 0 --contrast 0.5 \
             || {
                 echo "theme-render: matugen failed, falling back to static palette" >&2
                 ${theme-apply-static}/bin/theme-apply-static
             }
+
+        # Contrast assertion: roles make the palette readable by construction
+        # (see palette.nix), so this should never fire — but if matugen version
+        # drift or a new wallpaper ever produces an unreadable palette, bail to
+        # static instead of silently shipping invisible text.
+        if [ -f "$THEME_DIR/foot-colors.ini" ]; then
+            if ! awk '
+                function lum(h,   i, c, v) {
+                    v = 0
+                    for (i = 1; i <= 3; i++) {
+                        c = strtonum("0x" substr(h, 2*i-1, 2)) / 255
+                        c = (c <= 0.03928) ? c/12.92 : ((c+0.055)/1.055)^2.4
+                        v += (i==1 ? 0.2126 : i==2 ? 0.7152 : 0.0722) * c
+                    }
+                    return v
+                }
+                function cr(a, b,   r1, r2) {
+                    r1 = (lum(a)+0.05) / (lum(b)+0.05)
+                    r2 = (lum(b)+0.05) / (lum(a)+0.05)
+                    return (r1 > r2) ? r1 : r2
+                }
+                /^foreground[ =]/ { fg = $NF }
+                /^background[ =]/ { bg = $NF }
+                /^regular[1-6][ =]/ { reg[n++] = $NF }
+                END {
+                    if (fg == "" || bg == "" || n < 6) exit 1
+                    if (cr(fg, bg) < 4.5) exit 1
+                    for (i = 0; i < n; i++) if (cr(reg[i], bg) < 3.5) exit 1
+                    exit 0
+                }
+            ' "$THEME_DIR/foot-colors.ini"; then
+                echo "theme-render: rendered palette fails contrast check, falling back to static" >&2
+                ${theme-apply-static}/bin/theme-apply-static
+            fi
+        fi
     else
         ${theme-apply-static}/bin/theme-apply-static
     fi
@@ -156,6 +207,10 @@
     fi
   '';
 in {
+  imports = [
+    ./stylix.nix
+  ];
+
   home.packages = [
     matugen
     theme-apply-static
@@ -208,6 +263,14 @@ in {
     [templates.vesktop]
     input_path = "${templatesDir}/vesktop-theme.css"
     output_path = "/home/${opts.username}/.config/vesktop/themes/dynamic.theme.css"
+
+    [templates.foot]
+    input_path = "${templatesDir}/foot-colors.ini"
+    output_path = "${cacheDir}/foot-colors.ini"
+
+    [templates.foot_osc]
+    input_path = "${templatesDir}/foot-osc.txt"
+    output_path = "${cacheDir}/foot-osc.txt"
   '';
 
   # Scheme-check config for wallpaper-add (extract + cache, render nothing)
@@ -228,8 +291,10 @@ in {
   xdg.configFile."matugen/templates/waybar.css".text = theme.mkWaybarCss mp;
   xdg.configFile."matugen/templates/fuzzel-colors.ini".text =
     theme.renderFuzzelColors (theme.mkFuzzelColors mp);
-  xdg.configFile."matugen/templates/swaylock.conf".text =
-    theme.renderSwaylock (theme.mkSwaylockSettings {c = mp; inherit font;});
+  xdg.configFile."matugen/templates/swaylock.conf".text = theme.renderSwaylock (theme.mkSwaylockSettings {
+    c = mp;
+    inherit font;
+  });
   xdg.configFile."matugen/templates/starship.toml".source = templateStarship;
   xdg.configFile."matugen/templates/pcmanfm.qss".text = theme.mkPcmanfmQss mp;
   xdg.configFile."matugen/templates/mango-colors.conf".text =
@@ -237,6 +302,8 @@ in {
   xdg.configFile."matugen/templates/yazi-theme.toml".text = theme.mkYaziTheme mp;
   xdg.configFile."matugen/templates/zed-theme.json".source = templateZed;
   xdg.configFile."matugen/templates/vesktop-theme.css".text = theme.mkVesktopCss mp;
+  xdg.configFile."matugen/templates/foot-colors.ini".text = theme.mkFootColors mp;
+  xdg.configFile."matugen/templates/foot-osc.txt".text = theme.mkFootOsc mp;
 
   # ── Always-populate ~/.cache/theme on rebuild (kills the first-boot race:
   #    waybar starts via systemd before any wallpaper change). Runs the full

@@ -17,6 +17,10 @@ in {
     enable = true;
 
     enableBashIntegration = true;
+    # No fish_prompt override to protect any more — the right-hand block is
+    # native now ($fill in theme/apps/starship.nix), so let HM own the init.
+    # (HM appends `starship init fish | source` AFTER interactiveShellInit,
+    # which picks up the runtime STARSHIP_CONFIG from fish/default.nix.)
     enableFishIntegration = true;
     enableNushellIntegration = true;
 

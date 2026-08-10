@@ -85,6 +85,10 @@
     targets.zed.enable = false;
     targets.waybar.enable = false;
     targets.starship.enable = false;
+    # foot colors are owned by the dynamic theme (theme/apps/foot.nix — the
+    # include in programs.foot would otherwise be shadowed by stylix's own
+    # [colors-dark]). Fonts are set explicitly in foot.nix.
+    targets.foot.enable = false;
     # yazi theme is owned by the dynamic theme module (theme/lib.nix mkYaziTheme)
     targets.yazi.enable = false;
     polarity = "dark";

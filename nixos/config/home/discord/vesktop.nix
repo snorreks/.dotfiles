@@ -13,13 +13,25 @@
 #   applies its own read-only settings fix.
 # • The custom ozone wrapProgram is redundant — nixpkgs passes Wayland ozone
 #   flags when NIXOS_OZONE_WL is set (it is, in environment.nix).
-{
-  pkgs,
-  ...
-}: {
+{pkgs, ...}: {
   home.packages = [
     pkgs.vesktop
   ];
+
+  # Alias desktop entry so fuzzel app search (SUPER+a) matches "discord" —
+  # the upstream entry is only named "Vesktop" (fuzzy match on its Keywords
+  # line doesn't reliably surface it). Adds a second entry, "Discord", that
+  # launches the same client. Also satisfies xdg.nix's
+  # "x-scheme-handler/discord" -> discord.desktop default.
+  xdg.desktopEntries."discord" = {
+    name = "Discord";
+    genericName = "Internet Messenger";
+    exec = "vesktop %U";
+    icon = "vesktop";
+    comment = "Discord client with Vencord (Vesktop)";
+    categories = ["Network" "InstantMessaging" "Chat"];
+    mimeType = ["x-scheme-handler/discord"];
+  };
 
   # Directly specify the Discord settings
   xdg.configFile."vesktop/settings.json".text = builtins.toJSON {

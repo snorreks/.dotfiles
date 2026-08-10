@@ -1,6 +1,44 @@
 function fish_greeting
-    # Skip greeting in popup/floating terminals
+    # ── Skip greeting entirely in non-interactive / CI / agent contexts ──
+    # Only greet in real interactive terminals. (fish only invokes the
+    # greeting for interactive shells, but guard anyway.)
+    if not status is-interactive
+        return
+    end
+
+    # Popup/floating terminals — foot spawns these with FISH_NO_GREETING=1
     if set -q FISH_NO_GREETING
+        return
+    end
+
+    # CI runners (GitHub Actions, GitLab CI, Jenkins, Travis, ...)
+    if set -q CI
+        or set -q GITHUB_ACTIONS
+        or set -q GITLAB_CI
+        or set -q CIRCLECI
+        or set -q TRAVIS
+        or set -q JENKINS_URL
+        or set -q BUILDKITE
+        or set -q TF_BUILD
+        or set -q GITEA_ACTIONS
+        or set -q DRONE
+        or set -q TEAMCITY_VERSION
+        return
+    end
+
+    # herdr dev-environment shells (herdr sets HERDR_ENV for its children)
+    if set -q HERDR_ENV
+        return
+    end
+
+    # Inside pi — PI_CODING_AGENT is the canonical marker inherited by
+    # every process spawned by the agent.
+    if set -q PI_CODING_AGENT
+        return
+    end
+
+    # Dumb/headless terminals (serial consoles, editors, log capture)
+    if test "$TERM" = dumb
         return
     end
 
@@ -79,7 +117,11 @@ function fish_greeting
     set -l nix_stack_link (__link "https://nixos.org" "󰏗 Nix")
 
     # ── Fetch Zen Quote ─────────────────────────────────────────────────
-    set -l zen_data (get_zen_quote 2>/dev/null)
+    # get_zen_quote only reads the local cache — refills are double-forked
+    # into the background by the script itself (never blocks on the network;
+    # offline fetches abort after 10s and retry on the next session).
+    # `timeout` is a hard cap so a pathological hang can never stall startup.
+    set -l zen_data (timeout 2 get_zen_quote 2>/dev/null)
     set -l quote_text   "Action is the foundational key to all success."
     set -l quote_author "Pablo Picasso"
 
