@@ -45,10 +45,10 @@
       nixos = "z ~/dotfiles/nixos";
       store = "z /nix/store";
       discord = "z ~/.dotfiles/nixos/config/home/discord";
-      # Default: fast offline build — ollama-cuda included
+      # Default offline build — ollama-cuda only if host enables it (options.nix)
       nswitch = "nh os switch ~/.dotfiles/nixos --offline -- --extra-experimental-features flakes --extra-experimental-features nix-command";
       nswitcho = "nh os switch ~/.dotfiles/nixos -- --extra-experimental-features flakes --extra-experimental-features nix-command";
-      # Update all flake inputs + switch (ollama-cuda included)
+      # Update all flake inputs + switch (ollama-cuda only if host enables it)
       nswitchu = "nh os switch ~/.dotfiles/nixos --update -- --extra-experimental-features flakes --extra-experimental-features nix-command";
       # Fast build WITHOUT ollama-cuda (targets whichever host you're on)
       nswitch-fast = "nh os switch ~/.dotfiles/nixos#(hostname)-fast -- --extra-experimental-features flakes --extra-experimental-features nix-command";

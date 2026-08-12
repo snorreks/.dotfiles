@@ -155,16 +155,17 @@
     formatter.${system} = inputs.alejandra.defaultPackage.${system};
 
     # Builds two flake outputs per host:
-    #   <hostname>       — default build, ollama-cuda included
+    #   <hostname>       — follows the host's enableOllama (hosts/<host>/options.nix)
     #   <hostname>-fast  — skips ollama-cuda for quick rebuilds (nswitch-fast)
     nixosConfigurations = nixpkgs.lib.foldl' (
       acc: hostKey: let
         hostCfg = hosts.${hostKey};
-        hostname = (baseOpts // hostCfg.optsOverrides // localOverrides).hostname;
+        mergedOpts = baseOpts // hostCfg.optsOverrides // localOverrides;
+        hostname = mergedOpts.hostname;
       in
         acc
         // {
-          ${hostname} = mkHost hostKey hostCfg true;
+          ${hostname} = mkHost hostKey hostCfg mergedOpts.enableOllama;
           "${hostname}-fast" = mkHost hostKey hostCfg false;
         }
     ) {} (builtins.attrNames hosts);
