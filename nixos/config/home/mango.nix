@@ -58,20 +58,23 @@ in {
       # Try syncobj_enable=1 in your mango settings block as a separate experiment from the gamescope fixes above — mango's own docs note it fixes flicker/hangs in some Electron/game surfaces, though it's occasionally the opposite problem on other GPUs, so test it both ways:
       syncobj_enable = 1;
 
-      # Opacity & Eye-Candy
-      focused_opacity = 0.98;
-      unfocused_opacity = 0.92;
+      # Opacity: fully opaque allows direct-scanout on one output, eliminating
+      # recomposition and slashing CPU usage. Per-app overrides below set opacity
+      # for specific windows (e.g., transparency for editors/terminals if desired).
+      focused_opacity = 1.0;
+      unfocused_opacity = 1.0;
 
       # ── Animations ────────────────────────────────────────────────────
       animations = 1;
       animation_type_open = "zoom";
       layer_animations = 0; # Keep disabled for performance
 
-      blur = 1;
+      # Blur disabled for performance: recomposites every frame, inflates clock_gettime calls.
+      blur = 0;
       blur_layer = 0;
-      blur_optimized = 1; # Cache wallpaper blur background
-      blur_params_radius = 3; # Low kernel size = fast execution
-      blur_params_num_passes = 1; # 1 pass cuts GPU load by ~60% vs 3 passes
+      blur_optimized = 1;
+      blur_params_radius = 3;
+      blur_params_num_passes = 1;
       shadows = 0; # Keep off for smooth high-Hz rendering
 
       # ── Keyboard & Input ──────────────────────────────────────────────

@@ -118,7 +118,7 @@ fn render(state: &State) -> (String, String, &'static str) {
 /// `sys-daemon waybar vpn` — long-lived stream; emits JSON on change only.
 pub async fn waybar_stream() -> anyhow::Result<()> {
     // D-Bus is non-fatal: without it we fall back to a 2s poll.
-    let conn = match zbus::connection::Builder::system() {
+    let query_conn = match zbus::connection::Builder::system() {
         Ok(builder) => match builder.build().await {
             Ok(conn) => Some(conn),
             Err(e) => {
@@ -136,35 +136,42 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
     // Keep the channel open even if every watcher task exits.
     let _keepalive = tx.clone();
 
-    if let Some(conn) = &conn {
-        let conn = conn.clone();
-        let tx = tx.clone();
-        tokio::spawn(async move {
-            let rules = [
-                // PropertiesChanged on unit objects (ActiveState transitions)
-                "interface='org.freedesktop.DBus.Properties',path_namespace='/org/freedesktop/systemd1/unit'",
-                // JobRemoved (start/stop jobs complete)
-                "interface='org.freedesktop.systemd1.Manager',member='JobRemoved',path='/org/freedesktop/systemd1'",
-            ];
-            if let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await {
-                for rule_str in rules {
-                    match zbus::OwnedMatchRule::try_from(rule_str) {
-                        Ok(rule) => {
+    // Cache the unit path to avoid re-resolving it on every iteration.
+    let cached_unit_path = if let Some(conn) = &query_conn {
+        unit_path(conn).await
+    } else {
+        None
+    };
+
+    // Use a separate connection for signals to avoid loop-back.
+    if let Ok(builder) = zbus::connection::Builder::system() {
+        if let Ok(signal_conn) = builder.build().await {
+            let signal_conn = signal_conn.clone();
+            let tx = tx.clone();
+            let unit_path = cached_unit_path.clone();
+            tokio::spawn(async move {
+                if let Ok(proxy) = zbus::fdo::DBusProxy::new(&signal_conn).await {
+                    // Only watch PropertiesChanged on the specific unit object.
+                    if let Some(path) = unit_path {
+                        let rule_str = format!(
+                            "interface='org.freedesktop.DBus.Properties',path='{}'",
+                            path.as_str()
+                        );
+                        if let Ok(rule) = zbus::OwnedMatchRule::try_from(rule_str.as_str()) {
                             if proxy.add_match_rule(rule.into()).await.is_err() {
-                                eprintln!("sys-daemon vpn: failed to add match rule {rule_str}");
+                                eprintln!("sys-daemon vpn: failed to add match rule");
                             }
                         }
-                        Err(e) => eprintln!("sys-daemon vpn: bad match rule: {e}"),
                     }
                 }
-            }
-            let mut stream = MessageStream::from(&conn);
-            while stream.next().await.is_some() {
-                if tx.send(()).is_err() {
-                    break;
+                let mut stream = MessageStream::from(&signal_conn);
+                while stream.next().await.is_some() {
+                    if tx.send(()).is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            });
+        }
     }
 
     // Watch XDG_RUNTIME_DIR for the toggle scripts' marker files.
@@ -205,7 +212,7 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
         });
     }
 
-    let safety_interval = if conn.is_some() {
+    let safety_interval = if query_conn.is_some() {
         Duration::from_secs(30)
     } else {
         Duration::from_secs(2)
@@ -213,7 +220,7 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
     let mut tick = tokio::time::interval(safety_interval);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    let mut state = query_state(conn.as_ref()).await;
+    let mut state = query_state(query_conn.as_ref()).await;
     let (text, tooltip, class) = render(&state);
     emit(&text, &tooltip, class);
 
@@ -222,7 +229,7 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
             _ = rx.recv() => {}
             _ = tick.tick() => {}
         }
-        let next = query_state(conn.as_ref()).await;
+        let next = query_state(query_conn.as_ref()).await;
         if next != state {
             state = next;
             let (text, tooltip, class) = render(&state);

@@ -44,10 +44,6 @@
     # A common and safe workaround for NVIDIA cursor rendering issues.
     # WLR_NO_HARDWARE_CURSORS = "1";
 
-    # Disable G-Sync/VRR to prevent flickering issues.
-    __GL_GSYNC_ALLOWED = "0";
-    __GL_VRR_ALLOWED = "0";
-
     # --- User Preferences ---
     EDITOR = opts.defaultEditor;
     BROWSER = opts.defaultBrowser;

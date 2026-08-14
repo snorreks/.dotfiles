@@ -9,7 +9,6 @@
 in {
   # --- Global Package Configuration ---
   nixpkgs.config = {
-    cudaSupport = true;
     packageOverrides = pkgs: {
       vaapi-intel = pkgs.vaapi-intel.override {enableHybridCodec = true;};
     };

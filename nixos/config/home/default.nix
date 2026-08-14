@@ -33,7 +33,6 @@
     ./mpv.nix # video player
     ./yazi.nix # file manager in terminal
     ./lsd.nix # better ls command
-    ./brave.nix
     ./eye-protection.nix
     ./xdg.nix
     ./variables.nix

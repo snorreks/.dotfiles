@@ -141,23 +141,7 @@
     imagemagick # Command-line image manipulation suite
     gimp # Powerful image editor
     imv # A simple and scriptable image viewer for Wayland
-    (inputs.curd.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs (old: {
-      # Fix: upstream vendored deps are missing golang.org/x/term
-      # See: https://github.com/Wraient/curd
-      postPatch =
-        (old.postPatch or "")
-        + ''
-          mkdir -p vendor/golang.org/x/term
-          term_src="${pkgs.fetchzip {
-            url = "https://proxy.golang.org/golang.org/x/term/@v/v0.29.0.zip";
-            hash = "sha256-kQtk+HldEEfsbnBOw6b3E7NO5Ess6yy9fJjlK2gp66c=";
-          }}"
-          shopt -s dotglob
-          for f in "$term_src"/x/term@v0.29.0/*; do
-            cp -r "$f" vendor/golang.org/x/term/
-          done
-        '';
-    })) # Command-line anime streaming
+    inputs.curd.packages.${pkgs.stdenv.hostPlatform.system}.default # Command-line anime streaming
   ];
 
   wayland-utilities = with pkgs; [
