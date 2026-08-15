@@ -3,12 +3,12 @@
 //! swayidle fires `sys-daemon idle-guard` once the seat has been idle for
 //! the configured timeout (see `idle.nix`). Seat idle only means "no
 //! keyboard/mouse input" — it says nothing about whether a herdr agent is
-//! mid-turn, a build is compiling, or a download is in flight, all of which
-//! happen with zero input. So this doesn't suspend on the first call: it
-//! re-checks on a retry interval until herdr, CPU load, and network
-//! throughput all clear, then suspends. swayidle's `resume` handler kills
-//! this process on real user activity, so a slow retry loop never races a
-//! manual wake-up.
+//! mid-turn, a movie is playing, a build is compiling, or a download is in
+//! flight, all of which happen with zero input. So this doesn't suspend on
+//! the first call: it re-checks on a retry interval until herdr, media
+//! playback, CPU load, network throughput, and disk I/O all clear, then
+//! suspends. swayidle's `resume` handler kills this process on real user
+//! activity, so a slow retry loop never races a manual wake-up.
 
 use serde::Deserialize;
 use std::time::Duration;
@@ -44,12 +44,14 @@ struct AgentListResult {
 
 #[derive(Deserialize)]
 struct AgentEntry {
+    agent: String,
     agent_status: String,
 }
 
 #[derive(Debug)]
 enum Blocker {
     HerdrAgent,
+    Media,
     Cpu,
     Network,
     Disk,
@@ -59,6 +61,7 @@ impl Blocker {
     fn reason(&self) -> &'static str {
         match self {
             Blocker::HerdrAgent => "a herdr agent is actively working",
+            Blocker::Media => "media is actively playing (movie/video/music)",
             Blocker::Cpu => "sustained CPU load (looks like a build/render/compile job)",
             Blocker::Network => "sustained network throughput (looks like a download)",
             Blocker::Disk => "active disk I/O (something is reading/writing right now)",
@@ -66,24 +69,76 @@ impl Blocker {
     }
 }
 
-/// Only `working` blocks sleep. `blocked` means the agent is paused waiting
-/// on you — nothing is being computed, so suspending costs nothing. `idle`
-/// and `done` are obviously fine.
-async fn herdr_busy() -> bool {
+async fn herdr_agents() -> Vec<AgentEntry> {
     let Ok(output) = Command::new("herdr").args(["agent", "list"]).output().await else {
-        return false; // herdr not installed/running: nothing to block on
+        return Vec::new(); // herdr not installed/running
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    serde_json::from_slice::<AgentListReply>(&output.stdout)
+        .map(|reply| reply.result.agents)
+        .unwrap_or_default()
+}
+
+/// Counts processes whose `/proc/<pid>/comm` is exactly `pi` — the LLM CLI
+/// this setup runs everything through, not just an abbreviation.
+fn count_pi_processes() -> usize {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().parse::<u32>().is_ok())
+        .filter(|entry| {
+            std::fs::read_to_string(entry.path().join("comm"))
+                .map(|comm| comm.trim() == "pi")
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/// `working` blocks sleep directly. `blocked` means the agent is paused
+/// waiting on you — nothing is being computed, so suspending costs nothing.
+/// `idle`/`done` are obviously fine too.
+///
+/// But herdr only knows about panes it manages (`herdr tab create` etc).
+/// A pipeline can also run `pi` as a raw detached subprocess with no herdr
+/// pane at all — invisible to `agent_status`, but still doing real work
+/// (this actually happened: a contract-pipeline background implementer run
+/// went unnoticed and idle-guard blanked the screen mid-task). herdr's PID
+/// isn't exposed, so PID-level correlation isn't possible — instead, count
+/// live `pi` processes system-wide and compare against how many herdr
+/// tracks. Any excess is an untracked run; block for as long as it exists
+/// since there's no way to ask it whether it's actually mid-turn.
+async fn herdr_busy() -> bool {
+    let agents = herdr_agents().await;
+    if agents.iter().any(|a| a.agent_status == "working") {
+        return true;
+    }
+    let tracked = agents.iter().filter(|a| a.agent == "pi").count();
+    count_pi_processes() > tracked
+}
+
+/// Same MPRIS query waybar's own `mpris` module reads (D-Bus, no polling
+/// there — this is a one-shot check, not a subscription, so `playerctl` is
+/// the simpler fit here). Neither CPU nor network reliably catches "a movie
+/// is playing": hardware decode is cheap, and streaming bitrate is bursty
+/// enough to duck under the network threshold in a given sample window.
+async fn media_playing() -> bool {
+    let Ok(output) = Command::new("playerctl")
+        .args(["-a", "status"])
+        .output()
+        .await
+    else {
+        return false; // no players / playerctl unavailable: nothing to block on
     };
     if !output.status.success() {
         return false;
     }
-    let Ok(reply) = serde_json::from_slice::<AgentListReply>(&output.stdout) else {
-        return false;
-    };
-    reply
-        .result
-        .agents
-        .iter()
-        .any(|a| a.agent_status == "working")
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim() == "Playing")
 }
 
 /// Suspend just freezes/resumes a CPU-bound process untouched, so this isn't
@@ -172,6 +227,9 @@ async fn blocker() -> Option<Blocker> {
     // than paying 2x the wall-clock time.
     if herdr_busy().await {
         return Some(Blocker::HerdrAgent);
+    }
+    if media_playing().await {
+        return Some(Blocker::Media);
     }
     if cpu_busy() {
         return Some(Blocker::Cpu);
