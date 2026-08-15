@@ -42,9 +42,12 @@
   ];
 
   # --- Power Management ---
-  # TLP is your primary power manager, so other conflicting services are disabled.
+  # power-profiles-daemon is the primary power manager (see power-management.nix);
+  # conflicting auto-tuners are disabled here.
+  # NOTE: `systemd.packages = []` used to live here with a comment about removing
+  # auto-cpufreq. It never removed anything — the option is a merged list, so
+  # setting it to [] is a no-op. Dropped.
   services.auto-cpufreq.enable = false;
-  systemd.packages = []; # auto-cpufreq removed from here.
 
   # --- Graphical & Desktop Environment ---
 
@@ -143,8 +146,10 @@
     };
   };
 
-  # For mouse and keyboard configuration
-  services.ratbagd.enable = true;
+  # ratbagd (libratbag) is deliberately OFF: nothing here uses it — piper isn't
+  # installed — and it contends with Solaar for the same Logitech HID++ device.
+  # Mouse configuration is handled declaratively in config/home/mouse.nix.
+  services.ratbagd.enable = false;
 
   # --- System Performance ---
 

@@ -34,4 +34,12 @@
   boot.extraModprobeConfig = ''
     options snd_hda_intel power_save=0
   '';
+
+  # Suspend fix: systemd >=256 freezes user.slice via cgroups before handing
+  # off to the kernel's own suspend freezer. That cgroup freeze is known to
+  # hang/time out with the NVIDIA proprietary driver (NixOS/nixpkgs#371058),
+  # burning ~60s on "Failed to freeze unit 'user.slice': Connection timed
+  # out" before suspend even reaches the real freezer. Disabling it skips
+  # straight to the kernel freezer, which is what actually matters.
+  systemd.services.systemd-suspend.environment.SYSTEMD_SLEEP_FREEZE_USER_SESSIONS = "false";
 }

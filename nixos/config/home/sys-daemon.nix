@@ -13,30 +13,9 @@
 # Modes:
 #   sys-daemon serve               → systemd user service; dashboard on :3333
 #   sys-daemon waybar <module>     → waybar exec stream; JSON only on change
-{
-  pkgs,
-  lib,
-  ...
-}: let
-  sys-daemon = pkgs.rustPlatform.buildRustPackage {
-    pname = "sys-daemon";
-    version = "0.1.0";
-    src = lib.fileset.toSource {
-      root = ./sys-daemon;
-      fileset = lib.fileset.unions [
-        ./sys-daemon/Cargo.toml
-        ./sys-daemon/Cargo.lock
-        ./sys-daemon/ports.json
-        ./sys-daemon/src
-      ];
-    };
-    cargoLock.lockFile = ./sys-daemon/Cargo.lock;
-    doCheck = false;
-    meta = {
-      description = "Event-driven system status daemon (waybar streaming + dev-ports dashboard)";
-      mainProgram = "sys-daemon";
-    };
-  };
+#   sys-daemon idle-guard          → run by swayidle; see idle.nix
+{pkgs, ...}: let
+  sys-daemon = pkgs.callPackage ./sys-daemon/package.nix {};
 in {
   home.packages = [sys-daemon];
 

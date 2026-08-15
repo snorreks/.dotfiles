@@ -30,13 +30,5 @@ in {
     };
   };
 
-  home.packages = [
-    (pkgs.writeShellScriptBin "swaylock-runtime" ''
-      cfg="$HOME/.cache/theme/swaylock.conf"
-      if [ -f "$cfg" ]; then
-        exec swaylock --config "$cfg" "$@"
-      fi
-      exec swaylock "$@"
-    '')
-  ];
+  home.packages = [(import ./swaylock-runtime.nix {inherit pkgs;})];
 }

@@ -14,15 +14,23 @@
 //!     bash + brightnessctl + pgrep / 2s       sysfs + /proc reads / 1s
 //!   waybar custom/tomato (interval=1)        sys-daemon waybar tomato
 //!     tomato -t spawn / 1s                    ~/.local/share/tomato read
+//!   (nothing — no idle/sleep automation)      sys-daemon idle-guard
+//!                                              swayidle timeout, event-driven retry
 //! ```
 //!
 //! Every `waybar` subcommand is a long-lived process that only writes a JSON
 //! line to stdout when the state actually changed. Waybar's custom module
 //! `exec` reads those lines as updates ("if no interval or signal is defined,
 //! it is assumed that the out script loops itself").
+//!
+//! `idle-guard` is run once by swayidle when the seat goes idle past its
+//! timeout; it re-checks on its own retry interval (not a tight poll) rather
+//! than suspending blindly, since seat idle says nothing about whether a
+//! herdr agent or a download is still active. See `idle.rs`.
 
 mod config;
 mod http;
+mod idle;
 mod light;
 mod ports;
 mod tomato;
@@ -36,6 +44,8 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
         Some("serve") => http::serve().await,
+        Some("idle-guard") => idle::guard().await,
+        Some("idle-check") => idle::check().await,
         Some("waybar") => match args.get(2).map(|s| s.as_str()) {
             Some("ports") => ports::waybar_stream().await,
             Some("vpn") => vpn::waybar_stream().await,
@@ -49,11 +59,15 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         Some(other) => {
-            eprintln!("sys-daemon: unknown subcommand {other:?} (expected serve | waybar)");
+            eprintln!(
+                "sys-daemon: unknown subcommand {other:?} (expected serve | idle-guard | idle-check | waybar)"
+            );
             std::process::exit(2);
         }
         None => {
-            eprintln!("usage: sys-daemon <serve | waybar <ports | vpn | light | tomato>>");
+            eprintln!(
+                "usage: sys-daemon <serve | idle-guard | idle-check | waybar <ports | vpn | light | tomato>>"
+            );
             std::process::exit(2);
         }
     }

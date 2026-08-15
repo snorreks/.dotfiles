@@ -30,6 +30,30 @@ rec {
     "name:^eDP-1$,width:2560,height:1600,refresh:240,x:0,y:0,scale:1,rr:0,vrr:1"
   ];
 
+  # ── Logitech mouse (MX Master 3S) ──
+  # Applied declaratively by config/home/mouse.nix via `solaar config` — the
+  # Solaar GUI/tray is NOT required for these to take effect. `settings` keys
+  # are Solaar setting names; run `solaar config 1` to list what this device
+  # supports. Hosts override the whole `mouse` attrset (shallow merge).
+  mouse = {
+    enable = true;
+    # Device selector: a device number (1..6), serial, or name substring.
+    device = "MX Master 3S";
+    # Run the tray applet too (battery indicator only — not needed for settings).
+    tray = true;
+    # Bind the thumb wheel to volume in mango (see config/home/mango.nix).
+    # NOTE: this consumes horizontal scroll globally — see the comment there.
+    thumbWheelVolume = true;
+    settings = {
+      dpi = 4000;
+      # Wheel stays ratcheted; switches to freespin above this speed.
+      smart-shift = 10;
+      scroll-ratchet = "Ratcheted";
+      thumb-scroll-invert = "False";
+      hires-smooth-invert = "False";
+    };
+  };
+
   # ── Large / slow-to-build packages ──
   # Ollama-cuda is included by default.
   # Use nswitch-fast (or build sonny-laptop-fast) to skip it for quick rebuilds.

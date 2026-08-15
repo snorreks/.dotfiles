@@ -23,6 +23,7 @@
     ./discord # discord with catppuccino theme
     ./waybar # status bar
     ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
+    ./idle.nix # swayidle + sys-daemon idle-guard: auto-suspend, gated on herdr/network activity
     ./zen-browser.nix # zen browser
     ./wlogout.nix
     ./fuzzel.nix # launcher
@@ -40,5 +41,6 @@
     ./direnv.nix
     ./swaylock.nix
     ./clipboard.nix
+    ./mouse.nix # logitech mouse (MX Master 3S) declarative settings
   ];
 }
