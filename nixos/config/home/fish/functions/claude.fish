@@ -5,6 +5,10 @@
 #              still fresh (no conversation yet), otherwise opens a new
 #              numbered tab (claude, claude-2, claude-3, ...). Attaches the
 #              herdr TUI (detach with ctrl+b q; claude keeps running).
+#
+#   Any extra args are passed through to claude (`claude --resume <id>`, a
+#   direct prompt, ...). With args a fresh tab is always started — reuse
+#   would drop them.
 #   claudeb  → plain claude, bypasses herdr entirely (escape hatch).
 #
 # Running inside a herdr pane already (HERDR_ENV=1) just runs claude here —

@@ -7,6 +7,11 @@
 #   pi, pi-2, pi-3 ... / claude, claude-2, claude-3 ...
 #
 # Usage: __herdr_launch_agent <kind> [args...]   (kind is also the base name)
+#
+# Extra args are passed through to the agent process (`pi --resume`, `claude
+# -c`, a direct prompt, ...). When args are present the fresh-tab reuse is
+# skipped — reusing would silently drop them, and flags like --resume only
+# make sense on a freshly started agent.
 
 function __herdr_launch_agent -a kind
     # 1. Make sure the herdr server is up — the CLI talks over its socket.
@@ -65,7 +70,9 @@ function __herdr_launch_agent -a kind
             if test "$n" -gt "$max_n"
                 set max_n $n
             end
-            if test -z "$agent_name"; and __herdr_agent_is_fresh "$kind" "$sess" "$cwd"
+            # Only reuse a fresh tab when there is nothing to pass through —
+            # args (`--resume`, a prompt, ...) need a fresh agent process.
+            if test -z "$agent_name"; and test (count $argv) -le 1; and __herdr_agent_is_fresh "$kind" "$sess" "$cwd"
                 set agent_name $aname
                 set reuse_tab $tab
             end
@@ -101,7 +108,15 @@ function __herdr_launch_agent -a kind
     end
 
     if test -n "$pane"
-        if not herdr agent start "$agent_name" --kind "$kind" --pane "$pane" --timeout 45000 >/dev/null 2>&1
+        # Pass the caller's args through to the agent after `--` (pi --resume,
+        # claude -c, direct prompts, ...). This path is only reached with args
+        # when no tab was reused, so the agent process starts fresh with them.
+        set -l cmd herdr agent start "$agent_name" --kind "$kind" --pane "$pane" --timeout 45000
+        if test (count $argv) -gt 1
+            set -a cmd --
+            set -a cmd $argv[2..-1]
+        end
+        if not $cmd >/dev/null 2>&1
             echo "herdr: agent start failed — attached to a shell pane, start $kind manually" >&2
         end
     else

@@ -5,6 +5,9 @@
 #           fresh (no conversation yet), otherwise opens a new numbered tab
 #           (pi, pi-2, pi-3, ...). Attaches the herdr TUI (detach with
 #           ctrl+b q; pi keeps running).
+#
+#   Any extra args are passed through to pi (`pi --resume`, `pi "prompt"`,
+#   ...). With args a fresh tab is always started — reuse would drop them.
 #   pib   → plain pi, bypasses herdr entirely (escape hatch).
 #
 # Running inside a herdr pane already (HERDR_ENV=1) just runs pi here — the

@@ -13,6 +13,7 @@
     gh # GitHub CLI
     git # Version control system
     bitwarden-cli # Bitwarden CLI (bw) — for sops-nix bootstrap on new machines
+    sops # CLI for editing/encrypting secrets.yaml — used by add_env_secret
     # jujutsu # Jujutsu (jj) — modern, Git-compatible VCS
     # jjui # Terminal UI for Jujutsu
     curl # Tool for transferring data with URLs
