@@ -23,7 +23,7 @@
     ./discord # discord with catppuccino theme
     ./waybar # status bar
     ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
-    ./idle.nix # swayidle + sys-daemon idle-guard: auto-suspend, gated on herdr/network activity
+    ./idle.nix # swayidle: dim + lock on real seat idleness, gated on herdr/media/CPU/net/disk
     ./zen-browser.nix # zen browser
     ./wlogout.nix
     ./fuzzel.nix # launcher

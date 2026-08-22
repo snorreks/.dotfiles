@@ -245,7 +245,8 @@ window#waybar.empty #window,
 }
 
 /* ── Clock / tray / misc ───────────────────────────────────────────── */
-#clock, #tray, #custom-vpn, #custom-tomato {
+#clock, #tray, #custom-vpn, #custom-tomato,
+#custom-agenda, #custom-weather {
     color: @txt;
     background: transparent;
     padding: 0 5px;
@@ -275,17 +276,49 @@ window#waybar.empty #window,
     animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* ── Dev ports ─────────────────────────────────────────────────────── */
-#custom-dev-ports {
+/* ── Agenda (next calendar event) ──────────────────────────────────────
+ * Colour is the only signal here — the module is text-only and sits inside
+ * the clock pill, so a background would split the pill in two. Escalation is
+ * dim → warn → ok: "later today" recedes, "starts in minutes" pulls the eye,
+ * "happening now" reads as an active state rather than an alarm. */
+#custom-agenda {
     color: @txt-dim;
+    background: transparent;
     padding: 0 6px;
     margin: 0 2px;
+    font-size: 12px;
     border-radius: 8px;
-    transition: all 0.2s ease-in-out;
+    transition: color 0.2s ease-in-out;
 }
-#custom-dev-ports.dev-active { color: @ok; }
-#custom-dev-ports.dev-idle   { color: @txt-dim; }
-#custom-dev-ports.dev-off    { color: @muted; opacity: 0.65; }
+#custom-agenda.upcoming,
+#custom-agenda.allday { color: @txt-dim; }
+#custom-agenda.soon   { color: @warn; font-weight: bold; }
+#custom-agenda.now    { color: @ok;   font-weight: bold; }
+#custom-agenda.setup  { color: @muted; opacity: 0.7; }
+#custom-agenda.error  { color: @crit; }
+
+/* ── Weather ───────────────────────────────────────────────────────────
+ * Classes are OpenWeatherMap's condition groups, lowercased. Everything
+ * stays close to @txt-dim: a permanently coloured pill next to the clock
+ * competes with the status icons on the right for no informational gain —
+ * only genuinely notable weather (storm, snow, rain) gets a hue. */
+#custom-weather {
+    color: @txt-dim;
+    background: transparent;
+    padding: 0 6px;
+    margin: 0 2px;
+    font-size: 12px;
+    border-radius: 8px;
+    transition: color 0.2s ease-in-out;
+}
+#custom-weather.clear        { color: @warn; }
+#custom-weather.clouds       { color: @txt-dim; }
+#custom-weather.rain,
+#custom-weather.drizzle      { color: @hi; }
+#custom-weather.thunderstorm { color: @pop; font-weight: bold; }
+#custom-weather.snow         { color: shade(@cyan, 1.05); }
+#custom-weather.setup        { color: @muted; opacity: 0.7; }
+#custom-weather.error        { color: @crit; }
 
 /* ── Tomato ────────────────────────────────────────────────────────── */
 #custom-tomato.tomato-active { color: @warn; }

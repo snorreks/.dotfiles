@@ -172,7 +172,7 @@
     gamescope # Micro-compositor from Valve for games
     winetricks # Helper script to install runtime libraries for Wine
     mangohud # Vulkan and OpenGL overlay for monitoring FPS, temperatures, CPU/GPU load and more
-    # shadps4 # PlayStation 4 emulator for Linux
+    shadps4 # PlayStation 4 emulator for Linux
     prismlauncher # Minecraft launcher
     # System wine conflicts with Proton. Use Proton/Proton-GE for all Windows games.
     # (wineWow64Packages.staging.override {
@@ -188,6 +188,36 @@
     brightnessctl # Control backlight brightness from CLI
   ];
 in {
+  # MangoHud overlay config (used by the bloodborne fish function)
+  xdg.configFile."MangoHud/MangoHud.conf".text = ''
+    # MangoHud config for shadPS4 / Bloodborne
+    # Toggle overlay with Shift+F12 (default)
+
+    # --- Performance monitoring ---
+    fps
+    frametime
+    gpu_stats
+    gpu_temp
+    gpu_power
+    gpu_core_clock
+    gpu_mem_clock
+    cpu_stats
+    cpu_temp
+    cpu_power
+    ram
+    vram
+    engine_version
+    vulkan_driver
+    # --- Presentation ---
+    position=top-left
+    font_size=20
+    background_alpha=0.4
+    # --- Behavior ---
+    toggle_hud=Shift_R+F12
+    fps_limit=0
+    vsync=0
+  '';
+
   # The final list of packages is a concatenation of all the categories defined above.
   # This makes it easy to add/remove packages from their logical group.
   home.packages =

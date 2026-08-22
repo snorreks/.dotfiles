@@ -194,11 +194,40 @@ Default terminal. Features:
 
 Bottom bar showing:
 
-- **Left**: Power menu, workspaces, launcher, taskbar
-- **Center**: Clock, pomodoro timer
-- **Right**: System tray, battery, VPN, network, Bluetooth, audio
+- **Left**: Power menu, workspaces, launcher, taskbar, now playing
+- **Center**: Next calendar event, clock, weather, pomodoro timer
+- **Right**: System tray, VPN, network, Bluetooth, audio, brightness, battery
 
 `SUPER` + `Shift` + `b` restarts it if it ever gets into a bad state.
+
+#### Center pill — calendar & weather
+
+| Module  | Interaction | What happens                                                        |
+| ------- | ----------- | ------------------------------------------------------------------- |
+| Agenda  | Hover       | Month grid with busy days marked, then the next 8 days of events     |
+| Agenda  | Left click  | Opens Thunderbird's calendar tab (`calendar-open`)                   |
+| Agenda  | Right click | Re-fetches the calendar right now                                    |
+| Clock   | Hover       | Month calendar, Monday-first with ISO week numbers                   |
+| Clock   | Left click  | Opens Thunderbird's calendar tab                                     |
+| Clock   | Right click | Toggles the month ↔ year grid                                        |
+| Clock   | Scroll      | Walks backwards/forwards through months                              |
+| Weather | Hover       | Now, the next ~15 h in 3-hourly steps, and a 4-day outlook           |
+| Weather | Left click  | Opens the OpenWeatherMap page for the location                       |
+| Weather | Right click | Re-fetches the forecast right now                                    |
+
+The agenda shows the next event and turns amber ~15 minutes before it starts,
+green while it's running, and disappears entirely when nothing is coming up.
+
+Both halves need one secret each — add them once with `add_env_secret`:
+
+| Secret                     | Where it comes from                                                                 |
+| -------------------------- | ----------------------------------------------------------------------------------- |
+| `GOOGLE_CALENDAR_ICS_URL`  | Google Calendar → Settings → the calendar → Integrate calendar → *Secret address in iCal format* |
+| `OPENWEATHER_API_KEY`      | A free key from openweathermap.org/api (new keys take a while to activate)           |
+
+Until a secret exists the module shows a "setup" hint with these instructions in
+its tooltip instead of failing. Coordinates for the weather come from
+`nixos/options.nix` (`latitude` / `longitude`), the same ones wlsunset uses.
 
 ### Wallpaper
 
@@ -220,6 +249,7 @@ your default — restored on every login. The saved path lives in
 | `show-keybinds`        | Display keybinding cheatsheet                  |
 | `toggle_keyboard`      | Switch US ↔ Norwegian layout                   |
 | `toggle_vpn`           | Toggle WireGuard VPN                            |
+| `calendar-open`        | Jump to Thunderbird's calendar tab              |
 | `kill-switch`          | Emergency process killer — see [Emergency / Kill Switch](#emergency--kill-switch) |
 | `hs-skip`              | Hearthstone combat-skip network drop           |
 | `shutdown-script`      | Shutdown/reboot/logout menu                    |

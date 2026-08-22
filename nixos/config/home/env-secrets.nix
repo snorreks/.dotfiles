@@ -39,4 +39,6 @@
   {name = "CONTEXT7_API_KEY";}
   {name = "NPM_PRIVATE_TOKEN";}
   {name = "DEEPINFRA_API_KEY";}
+  {name = "GOOGLE_CALENDAR_ICS_URL";}
+  {name = "OPENWEATHER_API_KEY";}
 ]

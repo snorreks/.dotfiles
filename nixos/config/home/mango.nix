@@ -361,8 +361,8 @@ in {
           # 5% steps rather than the 2% used by the media keys: mango throttles
           # axis binds to one per `axis_bind_apply_timeout` (default 100ms), so
           # a quick flick only fires a handful of times.
-          "NONE,RIGHT,spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%+"
-          "NONE,LEFT,spawn,wpctl set-volume @DEFAULT_SINK@ 5%-"
+          "NONE,RIGHT,spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%-"
+          "NONE,LEFT,spawn,wpctl set-volume @DEFAULT_SINK@ 5%+"
         ];
     };
 
