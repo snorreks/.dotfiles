@@ -28,7 +28,8 @@
   ];
 
   terminal-enhancements = with pkgs; [
-    inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default # Terminal multiplexer — essential for pi multi-pane workflow
+    # herdr lives in ./herdr.nix — the package and its systemd user service
+    # belong together (see the comment there on why it must not be a shell job).
     zoxide # A smarter `cd` command that learns your habits
     bluetuith # Bluetooth TUI manager
     stow # Symlink farm manager, useful for dotfiles

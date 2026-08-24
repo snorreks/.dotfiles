@@ -15,8 +15,21 @@
 
 function __herdr_launch_agent -a kind
     # 1. Make sure the herdr server is up — the CLI talks over its socket.
+    #
+    # Never start it as a shell job. A backgrounded `herdr server` stays in
+    # THIS foot window's session with its pty as controlling terminal, and
+    # herdr's signal handler treats SIGHUP as "quit" (it links ctrlc with the
+    # `termination` feature, which overrides nohup's SIG_IGN). Closing that one
+    # window then took the server down and every agent pane and contract
+    # pipeline run with it. See config/home/herdr.nix for the full write-up.
     if not herdr status server 2>/dev/null | string match -q 'status: running'
-        nohup herdr server >/dev/null 2>&1 &
+        # Supervised unit first — it owns the server's lifecycle.
+        if not systemctl --user start herdr.service 2>/dev/null
+            # No user unit (non-NixOS shell, masked service, ...). setsid -f
+            # forks and puts the server in its own session with no controlling
+            # terminal, which is what herdr's own daemon spawn does.
+            setsid -f herdr server >/dev/null 2>&1
+        end
         for i in (seq 1 50)
             herdr status server 2>/dev/null | string match -q 'status: running'; and break
             sleep 0.2

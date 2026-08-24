@@ -23,6 +23,7 @@
     ./discord # discord with catppuccino theme
     ./waybar # status bar
     ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
+    ./herdr.nix # herdr headless server as a supervised user service (never a shell job)
     ./idle.nix # swayidle: dim + lock on real seat idleness, gated on herdr/media/CPU/net/disk
     ./zen-browser.nix # zen browser
     ./wlogout.nix
