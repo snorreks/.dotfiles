@@ -277,7 +277,11 @@ ShellRoot {
         margins {
             top: 10
             right: 10
-            bottom: 10
+            // waybar sits at the bottom (position "bottom", height 38 in
+            // waybar/settings.nix) and this panel's exclusionMode is
+            // Ignore, so without this the panel's own bottom edge would
+            // render straight over the bar instead of stopping above it.
+            bottom: 48
         }
         implicitWidth: 400
 
@@ -541,7 +545,7 @@ ShellRoot {
                                     },
                                     {
                                         id: "balanced",
-                                        icon: "󰖣"
+                                        icon: "󰌪"
                                     },
                                     {
                                         id: "power-saver",

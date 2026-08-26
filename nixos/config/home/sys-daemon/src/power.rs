@@ -127,7 +127,7 @@ fn render(profile: &str) -> (String, String, &'static str) {
             "power-saver",
         ),
         _ => (
-            "󰖣".into(), // nf-md-leaf (balanced)
+            "󰌪".into(), // nf-md-leaf (balanced)
             "Power Mode: Balanced".into(),
             "power-balanced",
         ),

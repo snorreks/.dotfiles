@@ -31,7 +31,7 @@
     label =
       {
         performance = "󰓅";
-        balanced = "󰖣";
+        balanced = "󰌪";
         power-saver = "󰾆";
       }
       .${profile};
