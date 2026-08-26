@@ -18,17 +18,23 @@ const PPD_PATH: &str = "/net/hadess/PowerProfiles";
 const PPD_IFACE: &str = "net.hadess.PowerProfiles";
 
 /// Read the current active profile via D-Bus Properties.Get.
+/// Times out after 3s so we never block waybar startup.
 async fn read_active_profile(conn: &Connection) -> Option<String> {
-    let reply = conn
-        .call_method(
+    let reply = match tokio::time::timeout(
+        Duration::from_secs(3),
+        conn.call_method(
             Some(PPD_DEST),
             PPD_PATH,
             Some("org.freedesktop.DBus.Properties"),
             "Get",
             &(PPD_IFACE, "ActiveProfile"),
-        )
-        .await
-        .ok()?;
+        ),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => reply,
+        _ => return None,
+    };
     let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
     if let zbus::zvariant::Value::Str(s) = &*value {
         Some(s.to_string())
@@ -39,31 +45,46 @@ async fn read_active_profile(conn: &Connection) -> Option<String> {
 
 /// Read the list of available profile IDs.
 ///
-/// PPD's Profiles property is `a(sss)` — array of (id, description, icon).
+/// PPD's Profiles property is `aa{sv}` — array of dicts, each with a
+/// "Profile" key (plus CpuDriver/PlatformDriver/Degraded, which we ignore).
 /// We deserialize the variant body, then downcast to the inner type.
 async fn read_profiles(conn: &Connection) -> Option<Vec<String>> {
-    let reply = conn
-        .call_method(
+    let reply = match tokio::time::timeout(
+        Duration::from_secs(3),
+        conn.call_method(
             Some(PPD_DEST),
             PPD_PATH,
             Some("org.freedesktop.DBus.Properties"),
             "Get",
             &(PPD_IFACE, "Profiles"),
-        )
-        .await
-        .ok()?;
+        ),
+    )
+    .await
+    {
+        Ok(Ok(reply)) => reply,
+        _ => return None,
+    };
     let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
-    // Walk the Value tree: Array -> each element is a Structure -> first field is the ID.
+    // Walk the Value tree: Array -> each element is a Dict -> "Profile" key is the ID.
     if let zbus::zvariant::Value::Array(arr) = &*value {
         let ids: Vec<String> = arr
             .iter()
             .filter_map(|v| {
-                if let zbus::zvariant::Value::Structure(st) = v {
-                    if let Some(zbus::zvariant::Value::Str(s)) = st.fields().first() {
-                        Some(s.to_string())
-                    } else {
-                        None
-                    }
+                if let zbus::zvariant::Value::Dict(dict) = v {
+                    // Values in an a{sv} dict arrive variant-boxed (Value::Value),
+                    // one extra layer to unwrap before hitting the inner Str.
+                    dict.iter().find_map(|(k, v)| match (k, v) {
+                        (zbus::zvariant::Value::Str(k), zbus::zvariant::Value::Value(inner))
+                            if k.as_str() == "Profile" =>
+                        {
+                            if let zbus::zvariant::Value::Str(s) = inner.as_ref() {
+                                Some(s.to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    })
                 } else {
                     None
                 }
@@ -76,15 +97,20 @@ async fn read_profiles(conn: &Connection) -> Option<Vec<String>> {
 }
 
 /// Write the ActiveProfile property (used by `power set` and `power cycle`).
+/// Times out after 3s.
 async fn set_active_profile(conn: &Connection, profile: &str) -> anyhow::Result<()> {
-    conn.call_method(
-        Some(PPD_DEST),
-        PPD_PATH,
-        Some("org.freedesktop.DBus.Properties"),
-        "Set",
-        &(PPD_IFACE, "ActiveProfile", zbus::zvariant::Value::Str(profile.into())),
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        conn.call_method(
+            Some(PPD_DEST),
+            PPD_PATH,
+            Some("org.freedesktop.DBus.Properties"),
+            "Set",
+            &(PPD_IFACE, "ActiveProfile", zbus::zvariant::Value::Str(profile.into())),
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow::anyhow!("PPD D-Bus call timed out"))??;
     Ok(())
 }
 
@@ -108,23 +134,31 @@ fn render(profile: &str) -> (String, String, &'static str) {
     }
 }
 
+/// Every await on the startup path gets a hard timeout: `restart-interval`
+/// only re-runs the module once the process *exits*, so a hang here (e.g. a
+/// cold/idled-out power-profiles-daemon taking its time to bus-activate)
+/// would otherwise blank the waybar pill forever instead of just degrading.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// `sys-daemon waybar power` — long-lived stream; emits JSON on change only.
 pub async fn waybar_stream() -> anyhow::Result<()> {
-    let conn = match zbus::connection::Builder::system() {
-        Ok(builder) => match builder.build().await {
-            Ok(conn) => conn,
-            Err(e) => {
-                eprintln!("sys-daemon power: system bus unavailable ({e}); falling back to poll");
-                let mut tick = tokio::time::interval(Duration::from_secs(10));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                emit("󰚩", "Power Profiles: Bus unavailable", "power-unknown");
-                loop {
-                    tick.tick().await;
-                }
-            }
-        },
-        Err(e) => {
+    let build = async {
+        let builder = zbus::connection::Builder::system()?;
+        builder.build().await
+    };
+    let conn = match tokio::time::timeout(CONNECT_TIMEOUT, build).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(e)) => {
             eprintln!("sys-daemon power: system bus unavailable ({e}); falling back to poll");
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            emit("󰚩", "Power Profiles: Bus unavailable", "power-unknown");
+            loop {
+                tick.tick().await;
+            }
+        }
+        Err(_) => {
+            eprintln!("sys-daemon power: system bus connect timed out; falling back to poll");
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             emit("󰚩", "Power Profiles: Bus unavailable", "power-unknown");
@@ -137,15 +171,19 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     let _keepalive = tx.clone();
 
-    // Subscribe to PropertiesChanged on the PPD path.
-    if let Ok(proxy) = zbus::fdo::DBusProxy::new(&conn).await {
+    // Subscribe to PropertiesChanged on the PPD path. Best-effort: if this
+    // stalls or fails, the 30s safety tick below still keeps the pill live.
+    if let Ok(Ok(proxy)) =
+        tokio::time::timeout(CONNECT_TIMEOUT, zbus::fdo::DBusProxy::new(&conn)).await
+    {
         let rule_str = format!(
             "interface='org.freedesktop.DBus.Properties',path='{}'",
             PPD_PATH
         );
         if let Ok(rule) = zbus::OwnedMatchRule::try_from(rule_str.as_str()) {
-            if proxy.add_match_rule(rule.into()).await.is_err() {
-                eprintln!("sys-daemon power: failed to add match rule");
+            match tokio::time::timeout(CONNECT_TIMEOUT, proxy.add_match_rule(rule.into())).await {
+                Ok(Ok(())) => {}
+                _ => eprintln!("sys-daemon power: failed to add match rule"),
             }
         }
         let tx = tx.clone();

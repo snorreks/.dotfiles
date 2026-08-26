@@ -33,6 +33,7 @@ mod http;
 mod idle;
 mod light;
 mod ports;
+mod power;
 mod tomato;
 mod vpn;
 mod waybar;
@@ -46,27 +47,42 @@ async fn main() -> anyhow::Result<()> {
         Some("serve") => http::serve().await,
         Some("idle-guard") => idle::guard().await,
         Some("idle-check") => idle::check().await,
+        Some("power") => match args.get(2).map(|s| s.as_str()) {
+            Some("set") => power::set(&args).await,
+            Some("cycle") => power::cycle().await,
+            Some(other) => {
+                eprintln!(
+                    "sys-daemon power: unknown subcommand {other:?} (expected set | cycle)"
+                );
+                std::process::exit(2);
+            }
+            None => {
+                eprintln!("usage: sys-daemon power <set <profile> | cycle>");
+                std::process::exit(2);
+            }
+        },
         Some("waybar") => match args.get(2).map(|s| s.as_str()) {
             Some("ports") => ports::waybar_stream().await,
             Some("vpn") => vpn::waybar_stream().await,
             Some("light") => light::waybar_stream().await,
             Some("tomato") => tomato::waybar_stream().await,
+            Some("power") => power::waybar_stream().await,
             other => {
                 eprintln!(
-                    "sys-daemon waybar: unknown module {other:?} (expected ports | vpn | light | tomato)"
+                    "sys-daemon waybar: unknown module {other:?} (expected ports | vpn | light | tomato | power)"
                 );
                 std::process::exit(2);
             }
         },
         Some(other) => {
             eprintln!(
-                "sys-daemon: unknown subcommand {other:?} (expected serve | idle-guard | idle-check | waybar)"
+                "sys-daemon: unknown subcommand {other:?} (expected serve | idle-guard | idle-check | waybar | power)"
             );
             std::process::exit(2);
         }
         None => {
             eprintln!(
-                "usage: sys-daemon <serve | idle-guard | idle-check | waybar <ports | vpn | light | tomato>>"
+                "usage: sys-daemon <serve | idle-guard | idle-check | waybar <ports | vpn | light | tomato | power> | power <set <profile> | cycle>>"
             );
             std::process::exit(2);
         }

@@ -1,5 +1,5 @@
 # nixos/config/home/default.nix
-{opts, ...}: {
+{opts, lib, ...}: {
   home = {
     username = opts.username;
     homeDirectory = "/home/${opts.username}";
@@ -16,7 +16,8 @@
     ./theme # gtk theme, stylix base, dynamic wallpaper theming (matugen render layer)
     ./mango.nix # window manager (mangowm)
     ./foot.nix # terminal (foot)
-    ./mako.nix # notification daemon
+    ./swaync.nix # notification daemon + control center (replaces mako)
+    ./dashboard # quickshell dashboard panel (toggleable, SUPER+D)
     ./packages.nix # other packages
     ./scripts/scripts.nix # personal scripts
     ./starship.nix # shell prompt
@@ -43,5 +44,9 @@
     ./swaylock.nix
     ./clipboard.nix
     ./mouse.nix # logitech mouse (MX Master 3S) declarative settings
+  ]
+  # GS65-only: sync nbfc-linux fan profile to PPD power profile.
+  ++ lib.optionals (opts.hostname == "gs65") [
+    ../../hosts/gs65/power-hook.nix
   ];
 }

@@ -33,6 +33,8 @@
 
   # ── Static outputs (writeText derivations → copied to ~/.cache/theme) ──
   staticWaybarCss = pkgs.writeText "theme-waybar.css" (theme.mkWaybarCss stylixColors);
+  staticSwayncCss = pkgs.writeText "theme-swaync.css" (theme.mkSwayncCss stylixColors);
+  staticDashboardJson = pkgs.writeText "theme-dashboard.json" (builtins.toJSON (theme.mkDashboardTheme stylixColors));
   staticFuzzelColors = pkgs.writeText "theme-fuzzel-colors.ini" (
     theme.renderFuzzelColors (theme.mkFuzzelColors stylixColors)
   );
@@ -67,6 +69,9 @@
   templateZed = pkgs.writeText "zed-theme.json" (
     builtins.toJSON (theme.mkZedTheme mp)
   );
+  templateDashboard = pkgs.writeText "dashboard.json" (
+    builtins.toJSON (theme.mkDashboardTheme mp)
+  );
 
   matugen = inputs.matugen.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
@@ -84,6 +89,8 @@
     mkdir -p ${cacheDir}/yazi "$HOME/.config/zed/themes" "$HOME/.config/vesktop/themes"
     # install -m 644: store files are read-only (444); matugen needs writable outputs
     install -m 644 ${staticWaybarCss} ${cacheDir}/waybar.css
+    install -m 644 ${staticSwayncCss} ${cacheDir}/swaync.css
+    install -m 644 ${staticDashboardJson} ${cacheDir}/dashboard.json
     install -m 644 ${staticFuzzelColors} ${cacheDir}/fuzzel-colors.ini
     install -m 644 ${staticSwaylock} ${cacheDir}/swaylock.conf
     install -m 644 ${staticStarship} ${cacheDir}/starship.toml
@@ -185,6 +192,13 @@
     #    would do a full reset (surface rebuild) and SIGUSR1 would TOGGLE
     #    the bar's visibility — both wrong for a color-only change.
 
+    # 2b. Apply — swaync has no file watcher, so it needs an explicit nudge.
+    #     `-sw`/--skip-wait keeps this from blocking theme-render if swaync
+    #     hasn't started yet (e.g. first-boot race, same one waybar has);
+    #     `timeout` + `|| true` are the same "never hang, never fail the
+    #     render" guard the rest of this script uses throughout.
+    timeout 2 ${pkgs.swaynotificationcenter}/bin/swaync-client -rs -sw >/dev/null 2>&1 || true
+
     # 3. Apply — mango (fixed config path, no include: swap the color block)
     mango_config="$HOME/.config/mango/config.conf"
     if [ -f "$mango_config" ] && [ -f "$THEME_DIR/mango-colors.conf" ]; then
@@ -264,6 +278,14 @@ in {
     input_path = "${templatesDir}/waybar.css"
     output_path = "${cacheDir}/waybar.css"
 
+    [templates.swaync]
+    input_path = "${templatesDir}/swaync.css"
+    output_path = "${cacheDir}/swaync.css"
+
+    [templates.dashboard]
+    input_path = "${templatesDir}/dashboard.json"
+    output_path = "${cacheDir}/dashboard.json"
+
     [templates.fuzzel_colors]
     input_path = "${templatesDir}/fuzzel-colors.ini"
     output_path = "${cacheDir}/fuzzel-colors.ini"
@@ -325,6 +347,8 @@ in {
 
   # ── Matugen template inputs (HM-managed, read-only — inputs, not outputs) ──
   xdg.configFile."matugen/templates/waybar.css".text = theme.mkWaybarCss mp;
+  xdg.configFile."matugen/templates/swaync.css".text = theme.mkSwayncCss mp;
+  xdg.configFile."matugen/templates/dashboard.json".source = templateDashboard;
   xdg.configFile."matugen/templates/fuzzel-colors.ini".text =
     theme.renderFuzzelColors (theme.mkFuzzelColors mp);
   xdg.configFile."matugen/templates/swaylock.conf".text = theme.renderSwaylock (theme.mkSwaylockSettings {
@@ -361,7 +385,7 @@ in {
     Unit = {
       Description = "Render dynamic theme from the active wallpaper";
       After = ["graphical-session-pre.target"];
-      Before = ["waybar.service"];
+      Before = ["waybar.service" "swaync.service"];
       PartOf = ["graphical-session.target"];
     };
     Service = {

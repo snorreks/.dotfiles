@@ -222,6 +222,7 @@ in {
         "SUPER,a,spawn,fuzzel-drun"
         "SUPER,v,spawn,fuzzel-clipboard"
         "SUPER,w,spawn,wallpaper-picker"
+        "SUPER,d,spawn,qs -c dashboard ipc call dash toggle"
         "SUPER+SHIFT,b,spawn,pkill -SIGUSR1 .waybar-wrapped"
 
         # Declarative App Launches

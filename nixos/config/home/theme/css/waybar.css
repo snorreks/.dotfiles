@@ -169,9 +169,7 @@ tooltip label { color: @txt; }
     background: alpha(@fg, 0.10);
     color: @txt;
 }
-#workspaces button.occupied { color: @txt; }
-#workspaces button.active,
-#workspaces button.focused {
+#workspaces button.active {
     background: alpha(@hi, 0.28);
     color: @hi;
     box-shadow: inset 0 -2px 0 0 @hi;
@@ -179,6 +177,10 @@ tooltip label { color: @txt; }
 #workspaces button.urgent {
     background: alpha(@crit, 0.28);
     color: @crit;
+}
+#workspaces button.hidden {
+    color: @txt-dim;
+    opacity: 0.6;
 }
 
 /* ── Window title ──────────────────────────────────────────────────── */
@@ -221,6 +223,19 @@ window#waybar.empty #window,
 #bluetooth.off        { color: @txt-dim; }
 #bluetooth.connected  { color: @ok; } /* same green as battery.charging / custom-light.eye-on */
 #pulseaudio.muted     { color: @txt-dim; }
+
+/* ── Power mode ────────────────────────────────────────────────────── */
+#custom-powermode {
+    color: @txt;
+    font-size: 12px;
+    padding: 0 4px;
+    margin-right: 6px;
+    transition: color 0.2s ease-in-out;
+}
+#custom-powermode.power-performance { color: @crit; }  /* red — performance burns power */
+#custom-powermode.power-balanced    { color: @ok; }    /* green — efficient */
+#custom-powermode.power-saver       { color: @warn; }  /* yellow — saving power */
+#custom-powermode.power-unknown     { color: @txt-dim; }
 
 /* ── Quick controls ────────────────────────────────────────────────── */
 /* Brightness measured 1.19:1 — the label was there, just not visible. The
@@ -275,6 +290,27 @@ window#waybar.empty #window,
     color: @warn;
     animation: pulse 1.2s ease-in-out infinite;
 }
+
+/* ── Notification bell (swaync) ────────────────────────────────────────
+ * `alt` from `swaync-client -swb` is one of exactly these 8 strings; each
+ * gets its own rule rather than grouped selectors so cascade order can't
+ * silently pick the wrong one for a class that would otherwise match two
+ * groups (e.g. dnd-notification is both "has unread" and "dnd is on"). */
+#custom-notification {
+    padding: 0 6px;
+    margin: 0 2px;
+    border-radius: 8px;
+    font-size: 12px;
+    transition: all 0.2s ease-in-out;
+}
+#custom-notification.notification,
+#custom-notification.inhibited-notification { color: @hi; }
+#custom-notification.none,
+#custom-notification.dnd-none,
+#custom-notification.inhibited-none,
+#custom-notification.dnd-inhibited-none { color: @txt-dim; }
+#custom-notification.dnd-notification,
+#custom-notification.dnd-inhibited-notification { color: @warn; }
 
 /* ── Agenda (next calendar event) ──────────────────────────────────────
  * Colour is the only signal here — the module is text-only and sits inside
