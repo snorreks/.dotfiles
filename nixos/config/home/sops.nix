@@ -72,16 +72,26 @@ in {
 
     templates =
       {
+        # Honours `sessionVariable = false` the same way variables.nix does.
+        # Without that guard a secret marked "don't expose" still landed in the
+        # environment of every process: this file is sourced by ~/.profile, by
+        # fish's interactiveShellInit, and by sops-import-environment.service
+        # (which `systemctl --user import-environment`s it into the whole user
+        # session). ANTHROPIC_API_KEY leaking that way made the Claude Agent SDK
+        # bill a $0-credit console account instead of the Pro OAuth token.
         "secrets-env" = {
           path = "${config.home.homeDirectory}/.config/sops/secrets-env";
           content =
             lib.concatMapStrings (
               s:
-                lib.concatMapStrings (
-                  varName: ''
-                    export ${varName}="${config.sops.placeholder.${s.name}}"
-                  ''
-                ) ([s.name] ++ (s.aliases or []))
+                if s.sessionVariable or true
+                then
+                  lib.concatMapStrings (
+                    varName: ''
+                      export ${varName}="${config.sops.placeholder.${s.name}}"
+                    ''
+                  ) ([s.name] ++ (s.aliases or []))
+                else ""
             )
             envSecrets;
         };

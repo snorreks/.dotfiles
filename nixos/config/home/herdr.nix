@@ -52,6 +52,10 @@
   ...
 }: let
   herdr = inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default;
+
+  # The repo whose contract pipeline the resume unit watches. Only aikami runs
+  # the pipeline today; the CLI takes --root repeatably if that ever changes.
+  repoRoot = "/home/sonny/Development/Projects/passion/aikami";
 in {
   # Single owner of the package: `__herdr_launch_agent` and the contract
   # pipeline both resolve `herdr` from PATH, and the unit pins the store path.
@@ -79,6 +83,16 @@ in {
 
       ExecStart = "${herdr}/bin/herdr server";
 
+      # herdr panicked once in 14h of pipeline use with
+      #   src/app/ids.rs:16 — index out of bounds: the len is 7 but the index is 7
+      # (a workspace index held across a workspace-list shrink; `pane move`
+      # auto-closes a workspace it empties, so the list moves under whoever is
+      # still holding an index into it). The message asks for RUST_BACKTRACE to
+      # name the call site — ids.rs:16 is reached from a dozen places and the
+      # bare message cannot tell them apart. Costs nothing until a panic, and
+      # the next one arrives report-ready for upstream.
+      Environment = "RUST_BACKTRACE=1";
+
       # `herdr server stop` (and ctrl+b quit) exit 0 on purpose — only restart
       # on an actual crash, otherwise a deliberate stop would come straight
       # back up and there would be no way to stop the server at all.
@@ -98,5 +112,51 @@ in {
     };
 
     Install.WantedBy = ["graphical-session.target"];
+  };
+
+  # ── Contract-run resume after a restart ───────────────────────────────────
+  #
+  # herdr's session restore rebuilds workspaces, tabs, panes and their cwd, but
+  # NOT their commands — session.json has no command field, so every pane comes
+  # back a bare shell. The contract orchestrator runs *inside* one of those
+  # panes, so a restart leaves a run with a complete manifest on disk, a
+  # worktree still checked out, a pipeline tab showing nothing, and nothing
+  # driving it. This unit is the missing trigger; the pipeline already knows how
+  # to continue (`bun run contract --resume <runId>`).
+  #
+  # WantedBy=herdr.service (not a target) is what makes it fire on every herdr
+  # START, restarts included — which is the only moment it has anything to do.
+  # After= only orders it behind the process launching, so the script waits for
+  # `herdr status server` before touching anything.
+  #
+  # 🔴 The unit is deliberately dumb; ALL the judgement lives in
+  # resume_orphaned.ts, and it is the load-bearing part. Auto-resume is only
+  # safe because a run must have a LIVE heartbeat to qualify — see the header
+  # there for why "non-terminal + dead pid" would have relaunched nine
+  # review-stage runs at once, the oldest two days old.
+  systemd.user.services.herdr-contract-resume = {
+    Unit = {
+      Description = "Resume contract pipeline runs orphaned by a herdr restart";
+      After = ["herdr.service"];
+      # Not PartOf/Requires: if herdr is down there is simply nothing to do,
+      # and this must never be able to hold herdr's own start up.
+      Wants = ["herdr.service"];
+    };
+
+    Service = {
+      Type = "oneshot";
+      WorkingDirectory = repoRoot;
+      ExecStart = "${pkgs.bun}/bin/bun run contract:resume-orphaned --root ${repoRoot}";
+
+      # A failed scan must never mark the session unhealthy — the runs are still
+      # on disk and still resumable by hand, and the log says which.
+      SuccessExitStatus = "0 1";
+
+      # Long enough for herdr readiness (up to 120s) plus the 3s stagger between
+      # relaunches; short enough that a wedged scan does not linger.
+      TimeoutStartSec = 600;
+    };
+
+    Install.WantedBy = ["herdr.service"];
   };
 }

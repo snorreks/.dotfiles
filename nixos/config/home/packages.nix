@@ -66,6 +66,9 @@
     alejandra
     nixd # Nix language server
 
+    go
+    rustc
+
     # Tools
     appimage-run # For running .AppImage files
   ];

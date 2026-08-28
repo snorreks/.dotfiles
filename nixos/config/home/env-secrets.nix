@@ -12,8 +12,11 @@
 # Fields per entry:
 #   name            - sops secret name / primary env var name (required)
 #   aliases         - extra env var names that resolve to the same value
-#   sessionVariable - set to false to skip exposing it as a Home Manager
-#                     session variable (it's still a sops secret + export)
+#   sessionVariable - set to false to keep it out of the environment entirely:
+#                     no Home Manager session variable and no line in the
+#                     secrets-env template (so ~/.profile, fish, and
+#                     sops-import-environment never export it). The value is
+#                     still a sops secret, readable at /run/secrets/<name>.
 [
   {
     name = "ANTHROPIC_API_KEY";
