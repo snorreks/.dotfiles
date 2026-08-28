@@ -2,10 +2,12 @@
 {
   config,
   inputs,
+  lib,
   pkgs,
   ...
 }: let
   protonServers = import ./vpn/proton-servers.nix;
+  envSecrets = import ./env-secrets.nix;
 
   mkVpnTemplate = server: {
     name = "vpn-${server.name}.conf";
@@ -36,63 +38,62 @@ in {
     age.keyFile = "${config.home.homeDirectory}/.config/sops/age/keys.txt";
     defaultSopsFile = ../../secrets.yaml;
 
-    # Declare all secrets used in templates
-    secrets = {
-      # API keys
-      ANTHROPIC_API_KEY = {};
-      GOOGLE_AI_API_KEY = {};
-      OPENROUTER_API_KEY = {};
-      SUPABASE_ACCESS_TOKEN = {};
-      DEEPSEEK_API_KEY = {};
-      OPENCODE_API_KEY = {};
-      OPENAI_API_KEY = {};
-      GITHUB_ACCESS_TOKEN = {};
-      MOONSHOT_API_KEY = {};
-      CONTEXT7_API_KEY = {};
-      NPM_PRIVATE_TOKEN = {};
+    # Declare all secrets used in templates.
+    # Simple string secrets come from env-secrets.nix (see add_env_secret);
+    # file-based / one-off secrets are declared here directly.
+    secrets =
+      (builtins.listToAttrs (map (s: {
+          name = s.name;
+          value = {};
+        })
+        envSecrets))
+      // {
+        # Proton VPN WireGuard private key
+        PROTON_VPN_PRIVATE_KEY = {};
 
-      # Proton VPN WireGuard private key
-      PROTON_VPN_PRIVATE_KEY = {};
+        # File-based secrets
+        "github_ssh_key" = {
+          path = "${config.home.homeDirectory}/.ssh/github_snorreks";
+          mode = "0600";
+        };
+        "aws_credentials" = {
+          path = "${config.home.homeDirectory}/.aws/credentials";
+          mode = "0600";
+        };
 
-      # File-based secrets
-      "github_ssh_key" = {
-        path = "${config.home.homeDirectory}/.ssh/github_snorreks";
-        mode = "0600";
+        # base64 tar.gz of Thunderbird account/auth files (prefs.js, logins,
+        # OpenPGP keys, address book) — NOT the mail store. See
+        # backup_thunderbird_profile / restore_thunderbird_profile.
+        "thunderbird_profile_bundle" = {
+          path = "${config.home.homeDirectory}/.config/sops/thunderbird-profile-bundle.b64";
+          mode = "0600";
+        };
       };
-      "aws_credentials" = {
-        path = "${config.home.homeDirectory}/.aws/credentials";
-        mode = "0600";
-      };
-
-      # base64 tar.gz of Thunderbird account/auth files (prefs.js, logins,
-      # OpenPGP keys, address book) — NOT the mail store. See
-      # backup_thunderbird_profile / restore_thunderbird_profile.
-      "thunderbird_profile_bundle" = {
-        path = "${config.home.homeDirectory}/.config/sops/thunderbird-profile-bundle.b64";
-        mode = "0600";
-      };
-    };
 
     templates =
       {
+        # Honours `sessionVariable = false` the same way variables.nix does.
+        # Without that guard a secret marked "don't expose" still landed in the
+        # environment of every process: this file is sourced by ~/.profile, by
+        # fish's interactiveShellInit, and by sops-import-environment.service
+        # (which `systemctl --user import-environment`s it into the whole user
+        # session). ANTHROPIC_API_KEY leaking that way made the Claude Agent SDK
+        # bill a $0-credit console account instead of the Pro OAuth token.
         "secrets-env" = {
           path = "${config.home.homeDirectory}/.config/sops/secrets-env";
-          content = ''
-            export ANTHROPIC_API_KEY="${config.sops.placeholder.ANTHROPIC_API_KEY}"
-            export GOOGLE_AI_API_KEY="${config.sops.placeholder.GOOGLE_AI_API_KEY}"
-            export GEMINI_API_KEY="${config.sops.placeholder.GOOGLE_AI_API_KEY}"
-            export OPENROUTER_API_KEY="${config.sops.placeholder.OPENROUTER_API_KEY}"
-            export SUPABASE_ACCESS_TOKEN="${config.sops.placeholder.SUPABASE_ACCESS_TOKEN}"
-            export DEEPSEEK_API_KEY="${config.sops.placeholder.DEEPSEEK_API_KEY}"
-            export OPENCODE_API_KEY="${config.sops.placeholder.OPENCODE_API_KEY}"
-            export OPENAI_API_KEY="${config.sops.placeholder.OPENAI_API_KEY}"
-            export GITHUB_ACCESS_TOKEN="${config.sops.placeholder.GITHUB_ACCESS_TOKEN}"
-            export GH_TOKEN="${config.sops.placeholder.GITHUB_ACCESS_TOKEN}"
-            export MOONSHOT_API_KEY="${config.sops.placeholder.MOONSHOT_API_KEY}"
-            export KIMI_API_KEY="${config.sops.placeholder.MOONSHOT_API_KEY}"
-            export CONTEXT7_API_KEY="${config.sops.placeholder.CONTEXT7_API_KEY}"
-            export NPM_PRIVATE_TOKEN="${config.sops.placeholder.NPM_PRIVATE_TOKEN}"
-          '';
+          content =
+            lib.concatMapStrings (
+              s:
+                if s.sessionVariable or true
+                then
+                  lib.concatMapStrings (
+                    varName: ''
+                      export ${varName}="${config.sops.placeholder.${s.name}}"
+                    ''
+                  ) ([s.name] ++ (s.aliases or []))
+                else ""
+            )
+            envSecrets;
         };
 
         "nix-access-tokens".content = ''

@@ -57,7 +57,8 @@
     flake = "${opts.flakeDir}";
   };
 
-  powerManagement.cpuFreqGovernor = "schedutil";
+  # powerManagement.cpuFreqGovernor = "schedutil" conflicts with power-profiles-daemon, which manages the governor per-profile itself. PPD wins at runtime, so it's redundant rather than broken, but it makes boot-time governor state confusing.
+  # powerManagement.cpuFreqGovernor = "schedutil";
 
   system = {
     stateVersion = "25.05";

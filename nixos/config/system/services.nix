@@ -29,6 +29,24 @@
     package = pkgs.ollama-cuda;
     # This makes it listen on all interfaces (0.0.0.0) instead of just localhost
     host = "0.0.0.0";
+
+    # Tuned for the 4090 Laptop's 16GB VRAM. The desktop renders on the Intel
+    # iGPU, so effectively all 16GB is available to models — the budget is
+    # weights + KV cache, and the cache is the part we can shrink.
+    environmentVariables = {
+      # Halves KV cache VRAM vs f16. At 16GB of weights (Qwen3.8 iq4_xs) this
+      # is the difference between a ~2GB spill to CPU and a ~5GB one.
+      OLLAMA_FLASH_ATTENTION = "1";
+      OLLAMA_KV_CACHE_TYPE = "q8_0";
+
+      # pi leaves gaps between turns; the default 5m reloads weights mid-task.
+      OLLAMA_KEEP_ALIVE = "30m";
+
+      # One model owns the GPU. Loading a second evicts layers of the first
+      # into system RAM, which is worse than just swapping models.
+      OLLAMA_MAX_LOADED_MODELS = "1";
+      OLLAMA_NUM_PARALLEL = "1";
+    };
   };
 
   # direct instruction to systemd to never start gdm.service, regardless of where it came from.
@@ -42,9 +60,12 @@
   ];
 
   # --- Power Management ---
-  # TLP is your primary power manager, so other conflicting services are disabled.
+  # power-profiles-daemon is the primary power manager (see power-management.nix);
+  # conflicting auto-tuners are disabled here.
+  # NOTE: `systemd.packages = []` used to live here with a comment about removing
+  # auto-cpufreq. It never removed anything — the option is a merged list, so
+  # setting it to [] is a no-op. Dropped.
   services.auto-cpufreq.enable = false;
-  systemd.packages = []; # auto-cpufreq removed from here.
 
   # --- Graphical & Desktop Environment ---
 
@@ -143,8 +164,10 @@
     };
   };
 
-  # For mouse and keyboard configuration
-  services.ratbagd.enable = true;
+  # ratbagd (libratbag) is deliberately OFF: nothing here uses it — piper isn't
+  # installed — and it contends with Solaar for the same Logitech HID++ device.
+  # Mouse configuration is handled declaratively in config/home/mouse.nix.
+  services.ratbagd.enable = false;
 
   # --- System Performance ---
 

@@ -20,17 +20,29 @@ in {
 
     # ── Autostart ─────────────────────────────────────────────────────────
     autostart_sh = ''
-      # 0. Sync Wayland environment with D-Bus/Systemd (CRITICAL for XDG Portals)
-      dbus-update-activation-environment --systemd WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE
-      systemctl --user restart xdg-desktop-portal &
+      # 0. XDG Portals (CRITICAL for screen sharing / file pickers)
+      # home-manager's autostart header already runs
+      #   dbus-update-activation-environment --systemd --all
+      # before this script, so a second, narrower export here is redundant.
+      # What IS needed is restarting the portal *backends* too, not just the
+      # frontend: the user systemd manager survives logout, so on a re-login the
+      # already-running wlr/gtk backends would keep the previous session's
+      # WAYLAND_DISPLAY and screencasting silently breaks. Backends first, then
+      # the frontend, so it re-discovers them.
+      (
+        systemctl --user restart xdg-desktop-portal-wlr.service xdg-desktop-portal-gtk.service
+        systemctl --user restart xdg-desktop-portal.service
+      ) &
 
       # 1. Background Daemons (Notifications & Wallpapers)
       # wall-change restores the saved default wallpaper (see wall-change.sh)
       wall-change &
 
       # 3. Declarative Silent Apps
+      # NOTE: solaar used to be launched here. It now runs as a supervised
+      # systemd user service (config/home/mouse.nix) — and, more importantly,
+      # device settings no longer depend on it being up at all.
       ${_ pkgs.thunderbird} &
-      ${_ pkgs.solaar} --window=hide &
     '';
 
     # ── Settings ──────────────────────────────────────────────────────────
@@ -58,20 +70,23 @@ in {
       # Try syncobj_enable=1 in your mango settings block as a separate experiment from the gamescope fixes above — mango's own docs note it fixes flicker/hangs in some Electron/game surfaces, though it's occasionally the opposite problem on other GPUs, so test it both ways:
       syncobj_enable = 1;
 
-      # Opacity & Eye-Candy
-      focused_opacity = 0.98;
-      unfocused_opacity = 0.92;
+      # Opacity: fully opaque allows direct-scanout on one output, eliminating
+      # recomposition and slashing CPU usage. Per-app overrides below set opacity
+      # for specific windows (e.g., transparency for editors/terminals if desired).
+      focused_opacity = 1.0;
+      unfocused_opacity = 1.0;
 
       # ── Animations ────────────────────────────────────────────────────
       animations = 1;
       animation_type_open = "zoom";
       layer_animations = 0; # Keep disabled for performance
 
-      blur = 1;
+      # Blur disabled for performance: recomposites every frame, inflates clock_gettime calls.
+      blur = 0;
       blur_layer = 0;
-      blur_optimized = 1; # Cache wallpaper blur background
-      blur_params_radius = 3; # Low kernel size = fast execution
-      blur_params_num_passes = 1; # 1 pass cuts GPU load by ~60% vs 3 passes
+      blur_optimized = 1;
+      blur_params_radius = 3;
+      blur_params_num_passes = 1;
       shadows = 0; # Keep off for smooth high-Hz rendering
 
       # ── Keyboard & Input ──────────────────────────────────────────────
@@ -207,6 +222,7 @@ in {
         "SUPER,a,spawn,fuzzel-drun"
         "SUPER,v,spawn,fuzzel-clipboard"
         "SUPER,w,spawn,wallpaper-picker"
+        "SUPER,d,spawn,qs -c dashboard ipc call dash toggle"
         "SUPER+SHIFT,b,spawn,pkill -SIGUSR1 .waybar-wrapped"
 
         # Declarative App Launches
@@ -325,14 +341,30 @@ in {
       ];
 
       # ── Axis Bindings ─────────────────────────────────────────────────
-      axisbind = [
-        "SUPER,UP,viewtoleft_have_client"
-        "SUPER,DOWN,viewtoright_have_client"
-        "SUPER+CTRL,UP,focusmon,left"
-        "SUPER+CTRL,DOWN,focusmon,right"
-        "ALT,UP,spawn,brightnessctl s +2%"
-        "ALT,DOWN,spawn,brightnessctl s 2%-"
-      ];
+      # UP/DOWN are the vertical wheel; LEFT/RIGHT are horizontal scroll —
+      # which on the MX Master 3S is the thumb wheel (it emits REL_HWHEEL).
+      # mango maps a horizontal axis event to LEFT/RIGHT in axisnotify(), so no
+      # Solaar diversion rule is needed; the wheel works as a plain axis bind.
+      axisbind =
+        [
+          "SUPER,UP,viewtoleft_have_client"
+          "SUPER,DOWN,viewtoright_have_client"
+          "SUPER+CTRL,UP,focusmon,left"
+          "SUPER+CTRL,DOWN,focusmon,right"
+          "ALT,UP,spawn,brightnessctl s +2%"
+          "ALT,DOWN,spawn,brightnessctl s 2%-"
+        ]
+        # Thumb wheel → volume. A matched axisbind is CONSUMED (mango returns
+        # without forwarding to the client), so with the NONE modifier this
+        # takes horizontal scroll away from every app. That is the intent here;
+        # to keep horizontal scrolling, change NONE to a modifier such as SUPER.
+        ++ lib.optionals opts.mouse.thumbWheelVolume [
+          # 5% steps rather than the 2% used by the media keys: mango throttles
+          # axis binds to one per `axis_bind_apply_timeout` (default 100ms), so
+          # a quick flick only fires a handful of times.
+          "NONE,RIGHT,spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%-"
+          "NONE,LEFT,spawn,wpctl set-volume @DEFAULT_SINK@ 5%+"
+        ];
     };
 
     # Static WM colors (tokyo-night) — appended after settings. The dynamic

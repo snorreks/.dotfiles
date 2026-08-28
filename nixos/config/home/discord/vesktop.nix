@@ -75,7 +75,13 @@
       ServerListAPI.enabled = false;
       ShowTimeouts.enabled = true;
       SettingsStoreAPI.enabled = false;
-      "WebRichPresence (arRPC)".enabled = true;
+      # WebRichPresence (arRPC) is intentionally DISABLED: in Vesktop the plugin is
+      # redundant — Vesktop's built-in arRPC worker + renderer bridge (rpc:activity
+      # IPC → plugin.handleEvent) already feed rich presence to Discord. The plugin's
+      # own start() tries to connect to ws://127.0.0.1:1337, but arrpc (built-in AND
+      # standalone) serves its WebSocket on 127.0.0.1:6463-6472 — so it can never
+      # connect and always shows the spurious "Failed to connect to arRPC" notice.
+      "WebRichPresence (arRPC)".enabled = false;
       BANger.enabled = false;
       BetterFolders.enabled = false;
       BetterGifAltText.enabled = true;

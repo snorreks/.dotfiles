@@ -26,6 +26,7 @@
 in {
   imports = [
     ./settings.nix
+    ./modules.nix # waybar-agenda + waybar-weather (center of the bar)
   ];
 
   programs.waybar = {

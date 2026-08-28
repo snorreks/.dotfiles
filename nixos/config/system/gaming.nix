@@ -2,25 +2,20 @@
 #
 # This file configures SYSTEM-LEVEL programs and settings for gaming.
 {pkgs, ...}: let
-  # Native ACPI platform profile switching for Lenovo Legion hardware.
-  # Uses the kernel's standard interface instead of NBFC which writes
-  # vendor-specific EC register maps (MSI map on Lenovo = dangerous).
+  # Switch to performance profile during gameplay via power-profiles-daemon.
+  # This drives the firmware's ACPI platform_profile (performance/balanced/power-saver)
+  # and adjusts CPU/GPU power limits without requiring direct sysfs access.
   gamemode-start-script = pkgs.writeShellScriptBin "gamemode-start-system" ''
-    if [ -w /sys/firmware/acpi/platform_profile ]; then
-      echo "performance" > /sys/firmware/acpi/platform_profile
-    fi
+    powerprofilesctl set performance 2>/dev/null || true
   '';
 
   gamemode-end-script = pkgs.writeShellScriptBin "gamemode-end-system" ''
-    if [ -w /sys/firmware/acpi/platform_profile ]; then
-      echo "balanced" > /sys/firmware/acpi/platform_profile
-    fi
+    powerprofilesctl set balanced 2>/dev/null || true
   '';
 
   steam-patched = pkgs.steam.override {
     # CEF sandbox breaks pipes in pressure-vessel on NixOS
-    # GPU accelerated webview fails GetVSyncParameters on Wayland+Nvidia Xwayland
-    extraArgs = "-no-cef-sandbox -cef-disable-gpu";
+    extraArgs = "-no-cef-sandbox";
   };
 in {
   # Steam's internal scripts (and some games) shell out to pactl.

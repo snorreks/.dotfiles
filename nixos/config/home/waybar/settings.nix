@@ -3,7 +3,7 @@
   programs.waybar.settings.mainBar = {
     position = "bottom";
     layer = "top";
-    height = 36;
+    height = 38; # was 36 — below the 38px module minimum, forcing a bar reconfigure that leaked a duplicate generation of every custom exec module
     exclusive = true;
     passthrough = false;
     gtk-layer-shell = true;
@@ -33,7 +33,7 @@
     # ── Group Definitions ──────────────────────────────────────────────
     "group/window-info" = {
       orientation = "horizontal";
-      modules = ["mango/workspaces" "mango/window"];
+      modules = ["ext/workspaces"];
     };
 
     "group/launcher-bar" = {
@@ -43,12 +43,12 @@
 
     "group/center-clock" = {
       orientation = "horizontal";
-      modules = ["clock" "custom/tomato"];
+      modules = ["custom/agenda" "clock" "custom/weather" "custom/tomato"];
     };
 
     "group/sys-status" = {
       orientation = "horizontal";
-      modules = ["tray" "custom/vpn" "custom/dev-ports"];
+      modules = ["custom/notification" "tray" "custom/vpn"];
     };
 
     "group/hardware" = {
@@ -58,7 +58,7 @@
 
     "group/quick-controls" = {
       orientation = "horizontal";
-      modules = ["custom/light" "battery"];
+      modules = ["custom/powermode" "custom/light" "battery"];
     };
 
     # ── Left Modules ──────────────────────────────────────────────────
@@ -95,36 +95,89 @@
       };
     };
 
-    "mango/workspaces" = {
-      format = "{icon}";
-      hide-empty = true;
-      on-click = "activate";
-      on-click-right = "toggle";
-      overview-label = "OVERVIEW";
+    # Mango is dwl-derived: workspaces come over the generic ext-workspace-v1
+    # protocol. There is no "mango/workspaces" waybar module — that name was a
+    # leftover guess that waybar silently no-op'd (logged as "Unknown module").
+    #
+    # waybar's "dwl/window" module (for the active window title) was tried
+    # here too, but its constructor calls into a dwl-ipc-unstable-v1 global
+    # mango doesn't advertise — waybar dereferences the null proxy and
+    # SIGSEGVs on startup. Left out until either waybar or mango closes that
+    # gap; window title just isn't shown right now.
+    "ext/workspaces" = {
+      format = "{name}";
+      ignore-hidden = true;
       all-outputs = false;
+      sort-by-id = true;
+      on-click = "activate";
     };
 
-    "mango/window" = {
-      format = "{}";
-      icon-size = 20;
+    "dwl/window" = {
+      format = "{title}";
       max-length = 25;
     };
 
     # ── Center Modules ────────────────────────────────────────────────
+    # The center pill reads left→right as "what's next / what time / what's it
+    # like outside": agenda, clock, weather, pomodoro. The agenda and weather
+    # halves are streaming JSON modules (waybar/modules.nix), so nothing here
+    # polls on a timer.
+
+    "custom/agenda" = {
+      format = "{}";
+      # Google Calendar (secret iCal URL from sops) → next event.
+      # Hidden entirely when nothing is coming up, so the pill stays quiet.
+      exec = "waybar-agenda";
+      return-type = "json";
+      restart-interval = 30;
+      hide-empty-text = true;
+      tooltip = true;
+      max-length = 44;
+      on-click = "calendar-open";
+      on-click-right = "waybar-agenda --refresh";
+    };
+
     "clock" = {
       format = "󰥔 {:%H:%M}";
-      tooltip-format = "<tt>{calendar}</tt>";
+      # Line 1 spells the date out (the grid alone makes you count columns),
+      # line 2 is the calendar in a monospace face so the columns line up.
+      tooltip-format = "<big>{:%A %d %B %Y}</big>\n<tt>{calendar}</tt>";
       calendar = {
         mode = "month";
         mode-mon-col = 3;
+        # ISO 8601: Monday-first weeks and real week numbers — the way dates
+        # are written here, and what "uke 34" in a Norwegian calendar means.
+        iso8601 = true;
+        weeks-pos = "left";
         on-scroll = 1;
-        on-click-right = "mode";
         format = {
           months = "<span color='#89b4fa'><b>{}</b></span>";
           weekdays = "<span color='#f9e2af'><b>{}</b></span>";
-          today = "<span color='#f38ba8'><b>{}</b></span>";
+          weeks = "<span color='#94e2d5'><i>{}</i></span>";
+          today = "<span color='#f38ba8'><b><u>{}</u></b></span>";
         };
       };
+      # Left click opens Thunderbird's calendar tab; the calendar's own
+      # navigation lives on the other buttons (right click toggles the
+      # month/year grid, scroll walks months).
+      on-click = "calendar-open";
+      actions = {
+        on-click-right = "mode";
+        on-scroll-up = "shift_up";
+        on-scroll-down = "shift_down";
+      };
+    };
+
+    "custom/weather" = {
+      format = "{}";
+      # OpenWeatherMap (coordinates from nixos/options.nix, key from sops).
+      # Tooltip carries the 3-hourly window and the next few days.
+      exec = "waybar-weather";
+      return-type = "json";
+      restart-interval = 30;
+      tooltip = true;
+      on-click = "waybar-weather --open";
+      on-click-right = "waybar-weather --refresh";
     };
 
     "custom/tomato" = {
@@ -171,6 +224,46 @@
     };
 
     # ── Right Modules ─────────────────────────────────────────────────
+
+    "custom/powermode" = {
+      format = "{}";
+      # Event-driven stream from the Rust daemon (PPD D-Bus subscription) —
+      # no interval polling, no script spawns. Waybar reads each JSON line.
+      exec = "sys-daemon waybar power";
+      return-type = "json";
+      restart-interval = 10;
+      on-click = "sys-daemon power cycle";
+      on-click-right = "sys-daemon power set performance";
+      on-scroll-up = "sys-daemon power set performance";
+      on-scroll-down = "sys-daemon power set power-saver";
+    };
+
+    "custom/notification" = {
+      # swaync's own event stream — not sys-daemon, it already pushes JSON
+      # on every add/close with no polling of its own.
+      format = "{} {icon}";
+      format-icons = {
+        notification = "󱅫";
+        none = "";
+        dnd-notification = "";
+        dnd-none = "󰂛";
+        inhibited-notification = "";
+        inhibited-none = "";
+        dnd-inhibited-notification = "";
+        dnd-inhibited-none = "";
+      };
+      # No exec-if guard: swaync.nix unconditionally installs swaync-client
+      # on this machine, unlike the portable dotfiles this module config
+      # pattern is usually copied from.
+      return-type = "json";
+      exec = "swaync-client -swb";
+      # sleep first: clicking waybar while the panel is opening/closing races
+      # swaync's own animation and can otherwise re-toggle mid-transition.
+      on-click = "sleep 0.1 && swaync-client -t -sw";
+      on-click-right = "sleep 0.1 && swaync-client -d -sw";
+      escape = true;
+    };
+
     "tray" = {
       icon-size = 18;
       spacing = 6;
@@ -185,18 +278,6 @@
       restart-interval = 10;
       on-click = "toggle_vpn &"; # & so Waybar updates asynchronously
       on-click-right = "toggle_vpn --rotate &";
-    };
-
-    "custom/dev-ports" = {
-      format = "{}";
-      # Port state streamed from the daemon's /proc/net/tcp watcher. Shows a
-      # dim 🔌 when the dashboard is stopped — click to toggle it on/off.
-      exec = "sys-daemon waybar ports";
-      return-type = "json";
-      restart-interval = 10;
-      tooltip = true;
-      on-click = "toggle-dev-ports";
-      on-click-middle = "xdg-open http://localhost:3333";
     };
 
     "network" = {

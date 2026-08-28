@@ -2,7 +2,13 @@
   # Install & Configure Git
   programs.git = {
     enable = true;
-    signing.format = null;
+    # Sign commits with the SSH key that GitHub already has for this account.
+    # (Key must also be registered as an SSH *signing* key on GitHub.)
+    signing = {
+      format = "ssh";
+      key = "/home/sonny/.ssh/github_snorreks.pub";
+      signByDefault = true;
+    };
 
     settings = {
       user = {

@@ -13,30 +13,10 @@
 # Modes:
 #   sys-daemon serve               → systemd user service; dashboard on :3333
 #   sys-daemon waybar <module>     → waybar exec stream; JSON only on change
-{
-  pkgs,
-  lib,
-  ...
-}: let
-  sys-daemon = pkgs.rustPlatform.buildRustPackage {
-    pname = "sys-daemon";
-    version = "0.1.0";
-    src = lib.fileset.toSource {
-      root = ./sys-daemon;
-      fileset = lib.fileset.unions [
-        ./sys-daemon/Cargo.toml
-        ./sys-daemon/Cargo.lock
-        ./sys-daemon/ports.json
-        ./sys-daemon/src
-      ];
-    };
-    cargoLock.lockFile = ./sys-daemon/Cargo.lock;
-    doCheck = false;
-    meta = {
-      description = "Event-driven system status daemon (waybar streaming + dev-ports dashboard)";
-      mainProgram = "sys-daemon";
-    };
-  };
+#   sys-daemon idle-check          → run by swayidle's idle-dim; see idle.nix
+#   sys-daemon idle-guard          → auto-suspend loop, currently unused; see idle.nix
+{pkgs, ...}: let
+  sys-daemon = pkgs.callPackage ./sys-daemon/package.nix {};
 in {
   home.packages = [sys-daemon];
 
@@ -44,8 +24,10 @@ in {
   xdg.configFile."sys-daemon/ports.json".source = ./sys-daemon/ports.json;
 
   # The dashboard server is intentionally NOT auto-started: it only runs while
-  # you're developing. Toggle it with `toggle-dev-ports` (or the waybar
-  # custom/dev-ports icon). systemd still manages its lifecycle once started.
+  # you're developing. Toggle it with `toggle-dev-ports` (aliased to `portcheck`);
+  # systemd still manages its lifecycle once started. The waybar custom/dev-ports
+  # pill that used to toggle it is gone — the center of the bar is calendar and
+  # weather now — so `sys-daemon waybar ports` is kept but unused by the bar.
   systemd.user.services.sys-daemon = {
     Unit = {
       Description = "sys-daemon — dev-ports dashboard server (toggle while developing)";

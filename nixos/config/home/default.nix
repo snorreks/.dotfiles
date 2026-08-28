@@ -1,5 +1,5 @@
 # nixos/config/home/default.nix
-{opts, ...}: {
+{opts, lib, ...}: {
   home = {
     username = opts.username;
     homeDirectory = "/home/${opts.username}";
@@ -16,13 +16,16 @@
     ./theme # gtk theme, stylix base, dynamic wallpaper theming (matugen render layer)
     ./mango.nix # window manager (mangowm)
     ./foot.nix # terminal (foot)
-    ./mako.nix # notification daemon
+    ./swaync.nix # notification daemon + control center (replaces mako)
+    ./dashboard # quickshell dashboard panel (toggleable, SUPER+D)
     ./packages.nix # other packages
     ./scripts/scripts.nix # personal scripts
     ./starship.nix # shell prompt
     ./discord # discord with catppuccino theme
     ./waybar # status bar
     ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
+    ./herdr.nix # herdr headless server as a supervised user service (never a shell job)
+    ./idle.nix # swayidle: dim + lock on real seat idleness, gated on herdr/media/CPU/net/disk
     ./zen-browser.nix # zen browser
     ./wlogout.nix
     ./fuzzel.nix # launcher
@@ -33,7 +36,6 @@
     ./mpv.nix # video player
     ./yazi.nix # file manager in terminal
     ./lsd.nix # better ls command
-    ./brave.nix
     ./eye-protection.nix
     ./xdg.nix
     ./variables.nix
@@ -41,5 +43,10 @@
     ./direnv.nix
     ./swaylock.nix
     ./clipboard.nix
+    ./mouse.nix # logitech mouse (MX Master 3S) declarative settings
+  ]
+  # GS65-only: sync nbfc-linux fan profile to PPD power profile.
+  ++ lib.optionals (opts.hostname == "gs65") [
+    ../../hosts/gs65/power-hook.nix
   ];
 }

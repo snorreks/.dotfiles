@@ -51,8 +51,6 @@
       # Tells the system firmware that it's running Linux. This can help with
       # compatibility and expose correct ACPI features for things like hotkeys.
       "acpi_osi=Linux"
-      #  force a lower polling rate for all USB mice
-      "usbhid.mousepoll=8"
     ];
 
     # --- Kernel System Controls (Sysctl) ---

@@ -13,6 +13,7 @@
     gh # GitHub CLI
     git # Version control system
     bitwarden-cli # Bitwarden CLI (bw) — for sops-nix bootstrap on new machines
+    sops # CLI for editing/encrypting secrets.yaml — used by add_env_secret
     # jujutsu # Jujutsu (jj) — modern, Git-compatible VCS
     # jjui # Terminal UI for Jujutsu
     curl # Tool for transferring data with URLs
@@ -27,7 +28,8 @@
   ];
 
   terminal-enhancements = with pkgs; [
-    inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default # Terminal multiplexer — essential for pi multi-pane workflow
+    # herdr lives in ./herdr.nix — the package and its systemd user service
+    # belong together (see the comment there on why it must not be a shell job).
     zoxide # A smarter `cd` command that learns your habits
     bluetuith # Bluetooth TUI manager
     stow # Symlink farm manager, useful for dotfiles
@@ -63,6 +65,9 @@
     # Nix
     alejandra
     nixd # Nix language server
+
+    go
+    rustc
 
     # Tools
     appimage-run # For running .AppImage files
@@ -141,23 +146,7 @@
     imagemagick # Command-line image manipulation suite
     gimp # Powerful image editor
     imv # A simple and scriptable image viewer for Wayland
-    (inputs.curd.packages.${pkgs.stdenv.hostPlatform.system}.default.overrideAttrs (old: {
-      # Fix: upstream vendored deps are missing golang.org/x/term
-      # See: https://github.com/Wraient/curd
-      postPatch =
-        (old.postPatch or "")
-        + ''
-          mkdir -p vendor/golang.org/x/term
-          term_src="${pkgs.fetchzip {
-            url = "https://proxy.golang.org/golang.org/x/term/@v/v0.29.0.zip";
-            hash = "sha256-kQtk+HldEEfsbnBOw6b3E7NO5Ess6yy9fJjlK2gp66c=";
-          }}"
-          shopt -s dotglob
-          for f in "$term_src"/x/term@v0.29.0/*; do
-            cp -r "$f" vendor/golang.org/x/term/
-          done
-        '';
-    })) # Command-line anime streaming
+    inputs.curd.packages.${pkgs.stdenv.hostPlatform.system}.default # Command-line anime streaming
   ];
 
   wayland-utilities = with pkgs; [
@@ -187,7 +176,7 @@
     gamescope # Micro-compositor from Valve for games
     winetricks # Helper script to install runtime libraries for Wine
     mangohud # Vulkan and OpenGL overlay for monitoring FPS, temperatures, CPU/GPU load and more
-    # shadps4 # PlayStation 4 emulator for Linux
+    shadps4 # PlayStation 4 emulator for Linux
     prismlauncher # Minecraft launcher
     # System wine conflicts with Proton. Use Proton/Proton-GE for all Windows games.
     # (wineWow64Packages.staging.override {
@@ -203,6 +192,36 @@
     brightnessctl # Control backlight brightness from CLI
   ];
 in {
+  # MangoHud overlay config (used by the bloodborne fish function)
+  xdg.configFile."MangoHud/MangoHud.conf".text = ''
+    # MangoHud config for shadPS4 / Bloodborne
+    # Toggle overlay with Shift+F12 (default)
+
+    # --- Performance monitoring ---
+    fps
+    frametime
+    gpu_stats
+    gpu_temp
+    gpu_power
+    gpu_core_clock
+    gpu_mem_clock
+    cpu_stats
+    cpu_temp
+    cpu_power
+    ram
+    vram
+    engine_version
+    vulkan_driver
+    # --- Presentation ---
+    position=top-left
+    font_size=20
+    background_alpha=0.4
+    # --- Behavior ---
+    toggle_hud=Shift_R+F12
+    fps_limit=0
+    vsync=0
+  '';
+
   # The final list of packages is a concatenation of all the categories defined above.
   # This makes it easy to add/remove packages from their logical group.
   home.packages =
