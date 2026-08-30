@@ -33,7 +33,6 @@
 
   # ── Static outputs (writeText derivations → copied to ~/.cache/theme) ──
   staticWaybarCss = pkgs.writeText "theme-waybar.css" (theme.mkWaybarCss stylixColors);
-  staticSwayncCss = pkgs.writeText "theme-swaync.css" (theme.mkSwayncCss stylixColors);
   staticDashboardJson = pkgs.writeText "theme-dashboard.json" (builtins.toJSON (theme.mkDashboardTheme stylixColors));
   staticFuzzelColors = pkgs.writeText "theme-fuzzel-colors.ini" (
     theme.renderFuzzelColors (theme.mkFuzzelColors stylixColors)
@@ -89,7 +88,6 @@
     mkdir -p ${cacheDir}/yazi "$HOME/.config/zed/themes" "$HOME/.config/vesktop/themes"
     # install -m 644: store files are read-only (444); matugen needs writable outputs
     install -m 644 ${staticWaybarCss} ${cacheDir}/waybar.css
-    install -m 644 ${staticSwayncCss} ${cacheDir}/swaync.css
     install -m 644 ${staticDashboardJson} ${cacheDir}/dashboard.json
     install -m 644 ${staticFuzzelColors} ${cacheDir}/fuzzel-colors.ini
     install -m 644 ${staticSwaylock} ${cacheDir}/swaylock.conf
@@ -192,12 +190,11 @@
     #    would do a full reset (surface rebuild) and SIGUSR1 would TOGGLE
     #    the bar's visibility — both wrong for a color-only change.
 
-    # 2b. Apply — swaync has no file watcher, so it needs an explicit nudge.
-    #     `-sw`/--skip-wait keeps this from blocking theme-render if swaync
-    #     hasn't started yet (e.g. first-boot race, same one waybar has);
-    #     `timeout` + `|| true` are the same "never hang, never fail the
-    #     render" guard the rest of this script uses throughout.
-    timeout 2 ${pkgs.swaynotificationcenter}/bin/swaync-client -rs -sw >/dev/null 2>&1 || true
+    # 2b. Apply — the quickshell dashboard needs no nudge at all: its palette
+    #     lives in ${cacheDir}/dashboard.json and qml/Theme.qml holds a
+    #     watched FileView over it, so the panel and its toasts re-color live.
+    #     (swaync used to need an explicit `swaync-client -rs` here; it had no
+    #     file watcher. It is gone — see dashboard/qml/Notifs.qml.)
 
     # 3. Apply — mango (fixed config path, no include: swap the color block)
     mango_config="$HOME/.config/mango/config.conf"
@@ -278,10 +275,6 @@ in {
     input_path = "${templatesDir}/waybar.css"
     output_path = "${cacheDir}/waybar.css"
 
-    [templates.swaync]
-    input_path = "${templatesDir}/swaync.css"
-    output_path = "${cacheDir}/swaync.css"
-
     [templates.dashboard]
     input_path = "${templatesDir}/dashboard.json"
     output_path = "${cacheDir}/dashboard.json"
@@ -347,7 +340,6 @@ in {
 
   # ── Matugen template inputs (HM-managed, read-only — inputs, not outputs) ──
   xdg.configFile."matugen/templates/waybar.css".text = theme.mkWaybarCss mp;
-  xdg.configFile."matugen/templates/swaync.css".text = theme.mkSwayncCss mp;
   xdg.configFile."matugen/templates/dashboard.json".source = templateDashboard;
   xdg.configFile."matugen/templates/fuzzel-colors.ini".text =
     theme.renderFuzzelColors (theme.mkFuzzelColors mp);
@@ -385,7 +377,7 @@ in {
     Unit = {
       Description = "Render dynamic theme from the active wallpaper";
       After = ["graphical-session-pre.target"];
-      Before = ["waybar.service" "swaync.service"];
+      Before = ["waybar.service" "quickshell-dashboard.service"];
       PartOf = ["graphical-session.target"];
     };
     Service = {

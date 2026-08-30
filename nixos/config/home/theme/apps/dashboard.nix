@@ -4,7 +4,7 @@
 # apps/zed.nix uses: static writes real hex, the matugen instantiation writes
 # `{{ colors.xxx.dark.hex }}` template text as the JSON string values, which
 # matugen then substitutes in place. No alpha()/shade() math here (unlike
-# waybar/swaync's GTK CSS) — QML applies its own opacity at the Rectangle
+# waybar’s GTK CSS) — QML applies its own opacity at the Rectangle
 # level, so the JSON only needs to carry flat colors.
 {lib}: {
   mkDashboardTheme = c: {

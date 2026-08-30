@@ -1,9 +1,69 @@
 # nixos/config/home/waybar/settings.nix
-{pkgs, ...}: {
-  programs.waybar.settings.mainBar = {
+#
+# TWO bars, not one.
+#
+# Waybar creates one bar per output unless `output` says otherwise, and each
+# bar instantiates its own copy of every module it lists. For native modules
+# that is free. For `custom/*` modules with an `exec` it means one subprocess
+# per bar per module — on a 2-monitor session this setup was running two
+# `sys-daemon waybar power`, two `light`, two `vpn`, two `tomato`, and two
+# Python interpreters each for weather and agenda.
+#
+# Only ONE of those was actually expensive: `sys-daemon waybar power` was
+# independently spinning at ~40% of a core from a self-feeding D-Bus message
+# loop (fixed in sys-daemon/src/power.rs — 0% at idle now, measured). power,
+# light and vpn are all long-lived-but-idle streams (a handful of bytes on
+# actual state changes), so duplicating THEM across bars costs ~nothing.
+# Weather/agenda/tomato are Python interpreters — heavier at rest — and
+# nothing on a second monitor needs its own copy of the weather.
+#
+# So: `common` holds every module definition and the full layout, and the two
+# bars differ only in `output` and in which modules they lay out. The
+# secondary bar gets everything except the Python-backed center-clock trio
+# (custom/agenda, custom/weather, custom/tomato) and the single-instance
+# status row (custom/notification + tray, which must not visually duplicate —
+# two trays would show every SNI icon twice, and the bell's unread count is
+# global, not per-screen). Power mode, brightness and VPN all stay.
+#
+# Group *ids* are reused rather than renamed so both bars share one
+# stylesheet: `group/center-clock` simply has different members on each.
+#
+# ── Why `output` is a positive whitelist, never `["!name"]` ────────────────
+# Tried negation first — `output = ["!eDP-1"]` on the secondary bar, meaning
+# "every output except the primary". It silently never fires: confirmed live
+# by toggling the laptop panel on and off while running `waybar -l debug`.
+# With eDP-1 enabled, `output = ["eDP-1"]` gets "Bar configured" instantly,
+# every time. With eDP-1 disabled, the negated bar sits forever after "Output
+# detection done" for the remaining outputs — no bar, no error, on a totally
+# clean environment. Whitelisting eDP-1 by name works; negating it does not.
+# So the secondary bar whitelists every OTHER monitor by name instead, built
+# from `opts.monitorrule` below — never negation.
+{
+  pkgs,
+  lib,
+  opts,
+  ...
+}: let
+  primary = opts.primaryMonitor;
+
+  # Pull the monitor name out of each monitorrule string ("name:^eDP-1$,...")
+  # — same format on every host (see options.nix / hosts/*/options.nix).
+  monitorNames =
+    map (
+      rule: builtins.head (builtins.match "name:\\^([^$]+)\\$.*" rule)
+    )
+    opts.monitorrule;
+
+  secondaryNames = builtins.filter (n: n != primary) monitorNames;
+
+  common = {
     position = "bottom";
     layer = "top";
-    height = 38; # was 36 — below the 38px module minimum, forcing a bar reconfigure that leaked a duplicate generation of every custom exec module
+    # 38, not 36: below the 38px module minimum waybar forces a bar
+    # reconfigure on startup. (That reconfigure was once blamed for the
+    # duplicated exec modules — it was not the cause. The duplication was one
+    # bar per output, which is what the two-bar split above actually fixes.)
+    height = 38;
     exclusive = true;
     passthrough = false;
     gtk-layer-shell = true;
@@ -48,12 +108,12 @@
 
     "group/sys-status" = {
       orientation = "horizontal";
-      modules = ["custom/notification" "tray" "custom/vpn"];
+      modules = ["tray" "custom/notification"];
     };
 
     "group/hardware" = {
       orientation = "horizontal";
-      modules = ["network" "bluetooth" "pulseaudio"];
+      modules = ["network" "custom/vpn" "bluetooth" "pulseaudio"];
     };
 
     "group/quick-controls" = {
@@ -239,28 +299,30 @@
     };
 
     "custom/notification" = {
-      # swaync's own event stream — not sys-daemon, it already pushes JSON
-      # on every add/close with no polling of its own.
       format = "{} {icon}";
       format-icons = {
+        # `none` was an empty string, so a quiet bar showed no bell at all and
+        # the pill silently vanished — there was nothing to click to open the
+        # panel. Outline bell for quiet, filled for unread.
         notification = "󱅫";
-        none = "";
-        dnd-notification = "";
-        dnd-none = "󰂛";
-        inhibited-notification = "";
-        inhibited-none = "";
-        dnd-inhibited-notification = "";
-        dnd-inhibited-none = "";
+        none = "󰂚";
+        "dnd-notification" = "󰂛";
+        "dnd-none" = "󰂛";
       };
-      # No exec-if guard: swaync.nix unconditionally installs swaync-client
-      # on this machine, unlike the portable dotfiles this module config
-      # pattern is usually copied from.
       return-type = "json";
-      exec = "swaync-client -swb";
-      # sleep first: clicking waybar while the panel is opening/closing races
-      # swaync's own animation and can otherwise re-toggle mid-transition.
-      on-click = "sleep 0.1 && swaync-client -t -sw";
-      on-click-right = "sleep 0.1 && swaync-client -d -sw";
+      # The quickshell dashboard is the notification daemon now (swaync is
+      # gone — see dashboard/qml/Notifs.qml). It has no `-swb`-style stream to
+      # inherit, so it writes this module's own JSON to a file and raises
+      # SIGRTMIN+7; waybar re-runs the exec on that signal. Still fully
+      # event-driven: `interval = "once"` means no polling between signals.
+      #
+      # RTMIN+7 because +8 (toggle_vpn.sh) and +9 (change_brightness.sh) are
+      # already spoken for.
+      exec = "cat $HOME/.cache/dashboard/notify.json 2>/dev/null";
+      interval = "once";
+      signal = 7;
+      on-click = "qs -c dashboard ipc call dash open notifications";
+      on-click-right = "qs -c dashboard ipc call dash dnd";
       escape = true;
     };
 
@@ -345,4 +407,62 @@
       interval = 30;
     };
   };
+in {
+  programs.waybar.settings =
+    {
+      # Full bar, primary output only. Everything with an `exec` lives here
+      # and therefore exists exactly once, no matter how many monitors are
+      # attached.
+      mainBar =
+        common
+        // {
+          output = [primary];
+        };
+    }
+    # Laptop-only hosts (gs65's monitorrule has just eDP-1) have nothing left
+    # to whitelist once primary is excluded — omit the bar entirely rather
+    # than pass `output = []`, which waybar would likely read as "no
+    # restriction" and duplicate every exec module right back onto eDP-1.
+    // lib.optionalAttrs (secondaryNames != []) {
+      # Every other output, named explicitly. Same styling, same layout
+      # skeleton, native modules only — so attaching a third monitor adds
+      # pixels, not processes.
+      secondaryBar =
+        common
+        // {
+          output = secondaryNames;
+
+          # Drops custom/agenda, custom/weather and custom/tomato — the three
+          # Python-interpreter modules. `group/quick-controls` is NOT
+          # overridden here: it inherits `common`'s definition unchanged
+          # (custom/powermode, custom/light, battery), so power mode and
+          # brightness show on every screen, not just the primary one.
+          "group/center-clock" = {
+            orientation = "horizontal";
+            modules = ["clock"];
+          };
+
+          # `group/quick-controls` is likewise NOT overridden — it inherits
+          # `common` unchanged (custom/powermode, custom/light, battery).
+          #
+          # `group/sys-status` (notification bell + tray + VPN) is ALSO left
+          # unoverridden, i.e. fully shared with the primary bar. Originally
+          # dropped here on the theory that a second tray would duplicate
+          # every SNI icon (Discord, qBittorrent, Steam, …) — true, but that
+          # theory assumed the primary bar (eDP-1) is always up to show them
+          # somewhere. On this machine eDP-1 is routinely OFF (docked/lid
+          # closed), and the mainBar output filter means it renders nowhere
+          # at all when eDP-1 is disabled — so dropping the tray from the
+          # secondary bar made every background app's icon disappear
+          # whenever the laptop panel was off, which is most of the time.
+          # A tray icon shown on two screens at once is a redundant glance;
+          # a tray icon shown on zero screens is a missing one — the second
+          # is the actual bug.
+          modules-right = [
+            "group/sys-status"
+            "group/hardware"
+            "group/quick-controls"
+          ];
+        };
+    };
 }

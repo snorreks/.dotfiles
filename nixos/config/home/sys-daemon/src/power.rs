@@ -168,37 +168,51 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
         }
     };
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    let _keepalive = tx.clone();
-
-    // Subscribe to PropertiesChanged on the PPD path. Best-effort: if this
-    // stalls or fails, the 30s safety tick below still keeps the pill live.
-    if let Ok(Ok(proxy)) =
-        tokio::time::timeout(CONNECT_TIMEOUT, zbus::fdo::DBusProxy::new(&conn)).await
-    {
-        let rule_str = format!(
-            "interface='org.freedesktop.DBus.Properties',path='{}'",
-            PPD_PATH
-        );
-        if let Ok(rule) = zbus::OwnedMatchRule::try_from(rule_str.as_str()) {
-            match tokio::time::timeout(CONNECT_TIMEOUT, proxy.add_match_rule(rule.into())).await {
-                Ok(Ok(())) => {}
-                _ => eprintln!("sys-daemon power: failed to add match rule"),
+    // Subscribe to PropertiesChanged on the PPD path.
+    //
+    // ── The runaway this replaces ─────────────────────────────────────────
+    // This used to be `MessageStream::from(&conn)`, which yields EVERY message
+    // the connection sees — the AddMatch rule filters what the bus forwards,
+    // but it does nothing about our own traffic on that same socket. So each
+    // wakeup ran read_active_profile(), whose method-return came back down the
+    // very stream that was being awaited, which woke the loop, which issued
+    // another Get. A self-sustaining spin: three of these were measured at
+    // ~40% of a core each, and the Get storm drove power-profiles-daemon
+    // itself to 117% (killing the streams dropped PPD to ~19%).
+    //
+    // Two independent fixes, either of which breaks the cycle:
+    //   1. `for_match_rule` yields only messages matching the rule. A method
+    //      return has no interface member, so our own replies never match.
+    //   2. The profile is read straight out of the signal body. In steady
+    //      state there is now no Get at all — nothing to feed back.
+    // A dedicated connection would be a third, but with 1+2 in place the
+    // shared one carries no traffic that can retrigger anything.
+    let signals = {
+        let rule: zbus::OwnedMatchRule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface("org.freedesktop.DBus.Properties")?
+            .member("PropertiesChanged")?
+            .path(PPD_PATH)?
+            .build()
+            .into();
+        match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            MessageStream::for_match_rule(rule, &conn, Some(16)),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => Some(stream),
+            _ => {
+                // Best-effort: the 30s safety tick below still keeps the pill
+                // live, just not instantly.
+                eprintln!("sys-daemon power: failed to subscribe to PropertiesChanged");
+                None
             }
         }
-        let tx = tx.clone();
-        let signal_conn = conn.clone();
-        tokio::spawn(async move {
-            let mut stream = MessageStream::from(&signal_conn);
-            while stream.next().await.is_some() {
-                if tx.send(()).is_err() {
-                    break;
-                }
-            }
-        });
-    }
+    };
 
-    // Safety tick: re-read every 30s in case a signal was missed.
+    // Safety tick: re-read every 30s in case a signal was missed. Deliberately
+    // the ONLY thing that issues a Get once running.
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -206,18 +220,51 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
     let (text, tooltip, class) = render(&current);
     emit(&text, &tooltip, class);
 
+    let mut signals = signals;
     loop {
-        tokio::select! {
-            _ = rx.recv() => {}
-            _ = tick.tick() => {}
-        }
-        if let Some(next) = read_active_profile(&conn).await {
+        // `next` on an Option<Stream> that is None must never resolve, or the
+        // select! would spin on it; hence the pending() arm.
+        let next_profile = tokio::select! {
+            msg = async {
+                match signals.as_mut() {
+                    Some(s) => s.next().await,
+                    None => std::future::pending().await,
+                }
+            } => msg.and_then(|m| m.ok()).and_then(|m| active_profile_from_signal(&m)),
+            _ = tick.tick() => read_active_profile(&conn).await,
+        };
+
+        // A PropertiesChanged that didn't carry ActiveProfile (PPD also emits
+        // for PerformanceDegraded and friends) yields None — that is not a
+        // reason to go ask the bus, it is a reason to do nothing.
+        if let Some(next) = next_profile {
             if next != current {
                 current = next;
                 let (text, tooltip, class) = render(&current);
                 emit(&text, &tooltip, class);
             }
         }
+    }
+}
+
+/// Pull `ActiveProfile` out of a `PropertiesChanged` body — signature
+/// `sa{sv}as`: (interface, changed, invalidated). Returns None when the signal
+/// is for another interface or doesn't mention ActiveProfile at all, which is
+/// the common case and must stay a no-op.
+fn active_profile_from_signal(msg: &zbus::Message) -> Option<String> {
+    let body = msg.body();
+    let (iface, changed, _invalidated): (
+        String,
+        std::collections::HashMap<String, zbus::zvariant::OwnedValue>,
+        Vec<String>,
+    ) = body.deserialize().ok()?;
+
+    if iface != PPD_IFACE {
+        return None;
+    }
+    match &**changed.get("ActiveProfile")? {
+        zbus::zvariant::Value::Str(s) => Some(s.to_string()),
+        _ => None,
     }
 }
 

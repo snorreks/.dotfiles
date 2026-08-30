@@ -84,7 +84,6 @@
     targets.nixvim.enable = false;
     targets.zed.enable = false;
     targets.waybar.enable = false;
-    targets.swaync.enable = false;
     targets.starship.enable = false;
     # foot colors are owned by the dynamic theme (theme/apps/foot.nix — the
     # include in programs.foot would otherwise be shadowed by stylix's own

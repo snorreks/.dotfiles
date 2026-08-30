@@ -80,7 +80,7 @@ KEEP_PATTERNS=(
   "dbus" "systemd" "polkit" "upowerd" "greetd"
   "swaylock" "gtklock" "hyprlock"
   "fuzzel" "rofi" "wofi"
-  "mako" "dunst" "swaync"
+  "mako" "dunst" "swaync" "quickshell"
   "wl-clip" "wl-paste"
   "xdg-desktop-portal" "xdg-document-portal" "xdg-permission-store"
   "kill-switch"

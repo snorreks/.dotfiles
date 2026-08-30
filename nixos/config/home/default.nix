@@ -16,8 +16,7 @@
     ./theme # gtk theme, stylix base, dynamic wallpaper theming (matugen render layer)
     ./mango.nix # window manager (mangowm)
     ./foot.nix # terminal (foot)
-    ./swaync.nix # notification daemon + control center (replaces mako)
-    ./dashboard # quickshell dashboard panel (toggleable, SUPER+D)
+    ./dashboard # quickshell shell: dashboard panel + notification daemon (SUPER+D)
     ./packages.nix # other packages
     ./scripts/scripts.nix # personal scripts
     ./starship.nix # shell prompt

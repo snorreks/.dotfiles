@@ -291,11 +291,10 @@ window#waybar.empty #window,
     animation: pulse 1.2s ease-in-out infinite;
 }
 
-/* ── Notification bell (swaync) ────────────────────────────────────────
- * `alt` from `swaync-client -swb` is one of exactly these 8 strings; each
- * gets its own rule rather than grouped selectors so cascade order can't
- * silently pick the wrong one for a class that would otherwise match two
- * groups (e.g. dnd-notification is both "has unread" and "dnd is on"). */
+/* ── Notification bell (quickshell dashboard) ──────────────────────────
+ * `class` comes from qml/Notifs.qml and is one of exactly these 4 strings.
+ * They are listed in specificity-safe order: dnd-notification matches both
+ * "has unread" and "dnd is on", so it is stated last and wins. */
 #custom-notification {
     padding: 0 6px;
     margin: 0 2px;
@@ -303,14 +302,10 @@ window#waybar.empty #window,
     font-size: 12px;
     transition: all 0.2s ease-in-out;
 }
-#custom-notification.notification,
-#custom-notification.inhibited-notification { color: @hi; }
+#custom-notification.notification { color: @hi; }
 #custom-notification.none,
-#custom-notification.dnd-none,
-#custom-notification.inhibited-none,
-#custom-notification.dnd-inhibited-none { color: @txt-dim; }
-#custom-notification.dnd-notification,
-#custom-notification.dnd-inhibited-notification { color: @warn; }
+#custom-notification.dnd-none { color: @txt-dim; }
+#custom-notification.dnd-notification { color: @warn; }
 
 /* ── Agenda (next calendar event) ──────────────────────────────────────
  * Colour is the only signal here — the module is text-only and sits inside

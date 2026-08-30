@@ -104,7 +104,6 @@ in {
       mouse_accel_speed = 1.0;
 
       # Trackpad Profile
-      disable_while_typing = 1;
       tap_to_click = 1;
       trackpad_natural_scrolling = 1;
       trackpad_accel_profile = 1;
@@ -222,7 +221,13 @@ in {
         "SUPER,a,spawn,fuzzel-drun"
         "SUPER,v,spawn,fuzzel-clipboard"
         "SUPER,w,spawn,wallpaper-picker"
+        # One panel, three views (dashboard/qml/Drawer.qml). SUPER+D lands on
+        # whichever view was last open; SUPER+I goes straight to notifications
+        # so the old swaync control-center reflex still has a key. Once either
+        # is up, the tab bar switches between Home / System / Notifications.
         "SUPER,d,spawn,qs -c dashboard ipc call dash toggle"
+        "SUPER,i,spawn,qs -c dashboard ipc call dash open notifications"
+        "SUPER+SHIFT,i,spawn,qs -c dashboard ipc call dash dnd"
         "SUPER+SHIFT,b,spawn,pkill -SIGUSR1 .waybar-wrapped"
 
         # Declarative App Launches
@@ -312,8 +317,8 @@ in {
         "SUPER+ALT,9,tag,9,0"
 
         # Move Window to Tag Silently
-        "CTRL+SUPER,Left,tagtoleft,0"
-        "CTRL+SUPER,Right,tagtoright,0"
+        "SUPER+CTRL+SHIFT,Left,tagtoleft,0"
+        "SUPER+CTRL+SHIFT,Right,tagtoright,0"
 
         # Dropdown Scratchpad Terminal
         "ALT,z,toggle_named_scratchpad,${opts.defaultTerminal}-scratchpad,none,${opts.defaultTerminal} --app-id=${opts.defaultTerminal}-scratchpad"

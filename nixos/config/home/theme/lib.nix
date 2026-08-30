@@ -11,7 +11,6 @@
 
   apps =
     (import ./apps/waybar.nix {inherit lib palette;})
-    // (import ./apps/swaync.nix {inherit lib palette;})
     // (import ./apps/dashboard.nix {inherit lib;})
     // (import ./apps/starship.nix {inherit lib;})
     // (import ./apps/foot.nix {inherit lib;})
