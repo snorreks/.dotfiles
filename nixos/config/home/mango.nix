@@ -187,6 +187,15 @@ in {
         # Declarative background / silent apps
         "appid:thunderbird,tags:9,isopensilent:1"
         "appid:discord,tags:4,isopensilent:1"
+
+        # Gamescope. Two things make the obvious rule wrong:
+        #   * its app_id is the *wrapper* binary name, `.gamescope-wrapped`,
+        #     not `gamescope` (verified via `mmsg get all-clients`);
+        #   * its title mirrors the title of the window running inside it, so a
+        #     Proton game makes gamescope's own toplevel match the
+        #     `title:^.*\.exe$` float rule above.
+        # Hence: match on the real app_id, and keep this last so it wins.
+        "appid:^\\.gamescope-wrapped$,isfloating:0,isfullscreen:1,isglobal:1"
       ];
 
       # ── Keybindings ───────────────────────────────────────────────────

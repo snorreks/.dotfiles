@@ -5,12 +5,32 @@
   # Switch to performance profile during gameplay via power-profiles-daemon.
   # This drives the firmware's ACPI platform_profile (performance/balanced/power-saver)
   # and adjusts CPU/GPU power limits without requiring direct sysfs access.
+  # gamemoded runs with a PATH of exactly one entry (the pkexec wrapper), so an
+  # unqualified `powerprofilesctl` here is not found — and with `2>/dev/null ||
+  # true` swallowing both the message and the exit code, the profile switch
+  # silently did nothing on every launch. Absolute store path, and let failures
+  # reach the journal.
+  ppctl = "${pkgs.power-profiles-daemon}/bin/powerprofilesctl";
+
+  # Where the pre-game profile is stashed so `end` can put it back. gamemoded is
+  # a user service, so XDG_RUNTIME_DIR is set; /tmp is a fallback, not a plan.
+  ppStateFile = ''''${XDG_RUNTIME_DIR:-/tmp}/gamemode-previous-power-profile'';
+
   gamemode-start-script = pkgs.writeShellScriptBin "gamemode-start-system" ''
-    powerprofilesctl set performance 2>/dev/null || true
+    # Remember whatever profile the user was on, so stopping a game restores it
+    # instead of assuming they were on balanced.
+    ${ppctl} get > "${ppStateFile}" 2>/dev/null || true
+    ${ppctl} set performance || echo "gamemode: failed to set performance profile" >&2
   '';
 
   gamemode-end-script = pkgs.writeShellScriptBin "gamemode-end-system" ''
-    powerprofilesctl set balanced 2>/dev/null || true
+    previous=$(cat "${ppStateFile}" 2>/dev/null || true)
+    case "$previous" in
+      performance | balanced | power-saver) ;;
+      *) previous=balanced ;;
+    esac
+    rm -f "${ppStateFile}"
+    ${ppctl} set "$previous" || echo "gamemode: failed to restore $previous profile" >&2
   '';
 
   steam-patched = pkgs.steam.override {
@@ -55,18 +75,24 @@ in {
         general = {
           # This correctly raises the game's CPU priority.
           renice = -15;
-          # Request a real-time CPU scheduler for lower latency.
-          softrealtime = "auto";
+          # NOTE: no `softrealtime`. It asks for SCHED_ISO, which only exists in
+          # -ck/MuQSS kernels — on mainline every client just logs
+          #   ERROR: Failed setting client [N] into SCHED_ISO mode ... Invalid argument
+          # once per process, and gets nothing.
           # Force the CPU governor to 'performance' for maximum clock speeds.
           desiredgov = "performance";
         };
 
-        gpu = {
-          # Forcing the NVIDIA GPU to its highest performance level.
-          apply_gpu_optimisations = "accept-responsibility";
-          # Set the PowerMizer mode: 0=Adaptive, 1=Prefer Maximum Performance
-          nv_powermizer_mode = 1;
-        };
+        # NOTE: no `gpu` section on purpose. gamemode applies NVIDIA
+        # optimisations by shelling out to `gpuclockctl`, which drives
+        # nvidia-settings against an X display — there isn't one in a mango
+        # session, so `apply_gpu_optimisations` / `nv_powermizer_mode` only
+        # produced a burst of
+        #   ERROR: Failed to get [gpu:0]/GPUPerfModes!
+        #   ERROR: Failed to call gpuclockctl, could not apply optimisations!
+        # in the journal on every single game launch, and changed nothing.
+        # The dGPU clocks itself up under load anyway; the performance
+        # power-profile switch below is what actually has an effect.
 
         # Improve disk I/O performance.
         io = {

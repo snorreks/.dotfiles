@@ -52,12 +52,28 @@ in {
       # WLR_DRM_NO_ATOMIC = "1";
 
       # --- NVIDIA Driver Configuration ---
-      # These are the correct settings for using the NVIDIA proprietary driver.
-      GBM_BACKEND = "nvidia-drm";
-      LIBVA_DRIVER_NAME = "nvidia";
-      VDPAU_DRIVER = "nvidia";
-      # Instruct the nvidia-vaapi-driver to use the 'direct' backend.
-      # This is required for modern NVIDIA drivers.
+      # NOTHING here may force the dGPU globally. This is a hybrid laptop
+      # (Intel iGPU renders the desktop; the dGPU is opt-in via PRIME offload),
+      # so a session-wide "always NVIDIA" variable is applied to *every* client,
+      # including the Intel-side ones that cannot honour it.
+      #
+      # Deliberately NOT set:
+      #   GBM_BACKEND=nvidia-drm    — a pre-495 workaround. On driver 495+ the
+      #     NVIDIA GBM backend is discovered on its own, and forcing it makes
+      #     Intel-side GBM consumers (Xwayland included, e.g. gamescope's nested
+      #     Xwayland) load a backend that cannot allocate on their device.
+      #   LIBVA_DRIVER_NAME=nvidia  — routes ALL VA-API through NVDEC, so plain
+      #     video playback wakes the 4090. Unset, libva picks iHD on the iGPU
+      #     (verified: `vainfo` → "Intel iHD driver") and NVDEC still works for
+      #     anything actually running on the dGPU.
+      #   VDPAU_DRIVER=nvidia       — same class of problem for VDPAU clients.
+      #
+      # Per-app overrides are the right tool: `prime-run <app>`, or the
+      # __NV_PRIME_RENDER_OFFLOAD / __GLX_VENDOR_LIBRARY_NAME pair in a Steam
+      # launch option.
+
+      # Read only by nvidia-vaapi-driver, i.e. only when something explicitly
+      # asks for the NVIDIA VA-API backend. Harmless for Intel clients.
       NVD_BACKEND = "direct"; # [20, 26]
       # A common and safe workaround for NVIDIA cursor rendering issues.
       # WLR_NO_HARDWARE_CURSORS = "1";
