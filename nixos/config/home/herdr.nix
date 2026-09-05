@@ -58,7 +58,9 @@
   repoRoot = "/home/sonny/Development/Projects/passion/aikami";
 in {
   # Single owner of the package: `__herdr_launch_agent` and the contract
-  # pipeline both resolve `herdr` from PATH, and the unit pins the store path.
+  # pipeline both resolve `herdr` from PATH, and the unit resolves from the
+  # stable home-manager profile symlink (/etc/profiles/per-user/%u) so the
+  # unit text is stable across herdr version bumps — no forced restarts.
   home.packages = [herdr];
 
   systemd.user.services.herdr = {
@@ -79,9 +81,16 @@ in {
       # This matters on the switchover: activating this unit while yesterday's
       # terminal-bound server is still holding the socket must be a no-op, not
       # a crash loop, and must never disturb the running agents.
-      ExecCondition = "${pkgs.bash}/bin/bash -c '! ${herdr}/bin/herdr status server 2>/dev/null | ${pkgs.gnugrep}/bin/grep -qx \"status: running\"'";
+      #
+      # 🔴 Resolve herdr from the stable home-manager profile symlink
+      # (/etc/profiles/per-user/%u) NOT a pinned store path — so the unit
+      # file text is stable across herdr version bumps. If we pinned the
+      # store path directly, every flake update that changes herdr would
+      # alter the unit content and home-manager would restart the service,
+      # killing all running agents.
+      ExecCondition = "/run/current-system/sw/bin/bash -c '! /etc/profiles/per-user/%u/bin/herdr status server 2>/dev/null | /run/current-system/sw/bin/grep -qx \"status: running\"'";
 
-      ExecStart = "${herdr}/bin/herdr server";
+      ExecStart = "/etc/profiles/per-user/%u/bin/herdr server";
 
       # herdr panicked once in 14h of pipeline use with
       #   src/app/ids.rs:16 — index out of bounds: the len is 7 but the index is 7

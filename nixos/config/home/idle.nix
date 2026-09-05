@@ -85,13 +85,18 @@
 # ── Mechanics ───────────────────────────────────────────────────────────────
 # Dim fires first, lock second, both from one command — so nothing
 # lock-screen-related is ever visible while idle, whatever it looks like.
-# Dimming uses brightnessctl (set 0 / restore), not wlr-output-power-management
+# Dimming uses brightnessctl (set 1% / restore), not wlr-output-power-management
 # (wlopm) — wlopm was tried first, but toggling DPMS off/on left the
 # compositor's repaint wedged (flat dark-grey background, hardware cursor only)
 # on this NVIDIA + mango setup. That turned out to likely be a milder case of
 # the same resume fragility above, not a DPMS-specific bug, but brightnessctl
 # avoids the DRM connector power state entirely regardless, so there's no
 # reason to go back to wlopm.
+#
+# The 1% floor (rather than 0) is deliberate: if swayidle's resumeCommand
+# doesn't fire during session lock, the lock screen stays faintly visible and
+# the user can recover without a hard power-off. The marker-based guard in
+# idle-dim prevents a later rung from re-saving 1% as the restore point.
 #
 # Never reach for `pkill -f idle-dim` here. swayidle carries both the idle-dim
 # store path and its own resume command on its own argv, so that pattern
@@ -117,7 +122,7 @@
   # Held for as long as a lock screen is up — fd 9 survives the exec into
   # swaylock — so later rungs can tell "already locked" from "free to lock".
   lockFile = "${runtimeDir}/idle-dim.lock";
-  # Present only while this chain is the reason the backlight is at 0. Keeps
+  # Present only while this chain dimmed the backlight. Keeps
   # idle-resume idempotent across the several rungs that may have fired, and
   # keeps it from clobbering a brightness the user set by hand during an idle
   # period where nothing ever dimmed.
@@ -149,16 +154,22 @@
     # `brightnessctl -s` saves whatever is current, so dimming while already at
     # 0 saves 0 and makes every later `restore` a permanent no-op — that had
     # already happened here (/run/user/1000/brightnessctl held 0). Only save and
-    # dim when there's a lit backlight to put back. The marker goes down BEFORE
-    # the dim on purpose: a spurious restore (marker set, dim failed) is a
-    # harmless brightness bump, while the reverse ordering can lose the resume
-    # in between and strand the screen black. Note this step is decorative on an
+    # dim when we haven't already done so this idle period (marker check) AND
+    # there's a lit backlight to save. The marker goes down BEFORE the dim on
+    # purpose: a spurious restore (marker set, dim failed) is a harmless
+    # brightness bump, while the reverse ordering can lose the resume in between
+    # and strand the screen black. Note this step is decorative on an
     # external-monitor-only setup: DP/HDMI outputs have no /sys/class/backlight
     # entry, so the dim is invisible and the lock is the only thing that shows.
+    #
+    # Dim to 1% (not 0) to avoid total blackout if swayidle's resumeCommand
+    # doesn't fire during session lock — the user can still see the lock screen
+    # faintly and recover without a hard power-off. The marker guard below
+    # prevents a later rung from re-saving 1% as the restore point.
     current=$(${pkgs.brightnessctl}/bin/brightnessctl -m | head -n1 | cut -d, -f3)
-    if [ "''${current:-0}" -gt 0 ]; then
+    if [ ! -e "${dimmedMarker}" ] && [ "''${current:-0}" -gt 0 ]; then
       : >"${dimmedMarker}"
-      ${pkgs.brightnessctl}/bin/brightnessctl -s set 0
+      ${pkgs.brightnessctl}/bin/brightnessctl -s set 1%
     fi
 
     if [ "$alreadyLocked" = 1 ]; then
