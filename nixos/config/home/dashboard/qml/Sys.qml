@@ -390,12 +390,13 @@ Singleton {
         }
     }
 
-    // ── Fan / cooling (msi-ec) ───────────────────────────────────────────
-    // Hardware-gated, not host-gated: `fanAvailable` is false wherever the
-    // msi-ec platform device isn't there — the Legion, or a GS65 whose EC
-    // firmware the driver declined to match — and SystemView hides the card
-    // on that flag. No hostname appears anywhere in this shell, so the same
-    // QML directory is correct on both machines.
+    // ── Fan / cooling (msi-ec / legion-laptop) ────────────────────────────
+    // Hardware-gated, not host-gated: `fanAvailable` is false wherever neither
+    // backend is there — a GS65 whose EC firmware msi-ec declined to match,
+    // or a Legion before hosts/legion/fan-control.nix's legion-laptop module
+    // is loaded — and SystemView hides the card on that flag. No hostname
+    // appears anywhere in this shell, so the same QML directory is correct on
+    // both machines; see dashboard-fan.sh for which platform device backs it.
     //
     // Rides the same 3s tick as the stats above rather than owning a timer:
     // both are sysfs reads for the System tab, and one tick that spawns two

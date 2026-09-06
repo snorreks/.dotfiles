@@ -118,10 +118,13 @@ Item {
         // the same question. Power mode asks the CPU how hard to work;
         // this asks the fans how hard to answer.
         //
-        // Hidden entirely unless the msi-ec platform device is there, which
-        // is the GS65 and nothing else — the Legion's fans follow its
-        // platform profile, which is what the card above already sets, so a
-        // second control there would be two widgets fighting over one value.
+        // Hidden entirely unless a fan backend is there: msi-ec on the GS65,
+        // or the legion-laptop module on the Legion (see
+        // hosts/legion/fan-control.nix — the in-tree mainline WMI driver binds
+        // this Legion but refuses fan control on this model, so legion-laptop
+        // replaces it for that one purpose). The Legion has no discrete fan
+        // modes, so Sys.fanModes comes back empty there and the Segmented
+        // control below renders nothing; only the boost pill does anything.
         // Nothing here tests a hostname; see Sys.qml.
         Card {
             title: "Cooling"
@@ -170,7 +173,7 @@ Item {
             Text {
                 Layout.fillWidth: true
                 visible: !Sys.fanWritable
-                text: "Read-only until the msi-ec udev rule applies — reboot."
+                text: "Read-only until the fan-control udev rule applies — reboot."
                 color: Theme.warn
                 font.pixelSize: 10
                 wrapMode: Text.Wrap

@@ -3,6 +3,7 @@
 {...}: {
   imports = [
     ./hardware.nix
+    ./fan-control.nix
   ];
 
   # WLR_DRM_DEVICES with the NVIDIA node listed first (to make it the primary

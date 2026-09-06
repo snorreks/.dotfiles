@@ -22,10 +22,6 @@
     name = "ANTHROPIC_API_KEY";
     sessionVariable = false; # oauth is used instead
   }
-  {
-    name = "GOOGLE_AI_API_KEY";
-    aliases = ["GEMINI_API_KEY"];
-  }
   {name = "OPENROUTER_API_KEY";}
   {name = "SUPABASE_ACCESS_TOKEN";}
   {name = "DEEPSEEK_API_KEY";}
@@ -44,4 +40,5 @@
   {name = "DEEPINFRA_API_KEY";}
   {name = "GOOGLE_CALENDAR_ICS_URL";}
   {name = "OPENWEATHER_API_KEY";}
+  {name = "GEMINI_API_KEY";}
 ]

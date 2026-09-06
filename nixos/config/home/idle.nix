@@ -122,10 +122,12 @@
   # Held for as long as a lock screen is up — fd 9 survives the exec into
   # swaylock — so later rungs can tell "already locked" from "free to lock".
   lockFile = "${runtimeDir}/idle-dim.lock";
-  # Present only while this chain dimmed the backlight. Keeps
-  # idle-resume idempotent across the several rungs that may have fired, and
-  # keeps it from clobbering a brightness the user set by hand during an idle
-  # period where nothing ever dimmed.
+  # Present only while this chain dimmed the backlight; its contents are the
+  # pre-dim brightness percent (from /tmp/custom_brightness, the actual
+  # source of truth waybar/the dashboard read — see change_brightness.sh and
+  # Sys.qml). Keeps idle-resume idempotent across the several rungs that may
+  # have fired, and keeps it from clobbering a brightness the user set by
+  # hand during an idle period where nothing ever dimmed.
   dimmedMarker = "${runtimeDir}/idle-dim.dimmed";
 
   dimThenLock = pkgs.writeShellScriptBin "idle-dim" ''
@@ -168,7 +170,13 @@
     # prevents a later rung from re-saving 1% as the restore point.
     current=$(${pkgs.brightnessctl}/bin/brightnessctl -m | head -n1 | cut -d, -f3)
     if [ ! -e "${dimmedMarker}" ] && [ "''${current:-0}" -gt 0 ]; then
-      : >"${dimmedMarker}"
+      # Save the app's brightness of record (/tmp/custom_brightness), not
+      # just brightnessctl's own save-file: idle-resume restores through
+      # change_brightness so waybar/the dashboard actually reflect the
+      # restore, instead of quietly disagreeing with sysfs until the user
+      # manually scrolls brightness. Falls back to the raw sysfs percent if
+      # the state file hasn't been created yet.
+      cat /tmp/custom_brightness 2>/dev/null >"${dimmedMarker}" || printf '%s' "''${current}" >"${dimmedMarker}"
       ${pkgs.brightnessctl}/bin/brightnessctl -s set 1%
     fi
 
@@ -188,8 +196,17 @@
   resumeFromDim = pkgs.writeShellScriptBin "idle-resume" ''
     marker="${dimmedMarker}"
     [ -e "$marker" ] || exit 0
+    saved=$(cat "$marker" 2>/dev/null || echo "")
     rm -f "$marker"
-    ${pkgs.brightnessctl}/bin/brightnessctl restore
+    # Go through change_brightness (not brightnessctl restore) so the state
+    # file, waybar's instant refresh, and the ddcutil fan-out to external
+    # monitors all catch up too — otherwise the panel silently disagrees with
+    # what the UI shows until the user manually scrolls brightness.
+    if [ -n "$saved" ]; then
+      change_brightness "$saved"
+    else
+      ${pkgs.brightnessctl}/bin/brightnessctl restore
+    fi
   '';
 in {
   services.swayidle = {
