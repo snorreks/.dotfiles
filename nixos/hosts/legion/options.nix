@@ -17,6 +17,26 @@
     "name:^DP-1$,width:1920,height:1080,refresh:60,x:5120,y:0,scale:1,rr:3,vrr:0"
   ];
 
+  # The mouse pairs through the Bolt receiver here, not Bluetooth as on the
+  # gs65, and the two report the thumb wheel's horizontal axis with opposite
+  # signs. Flip it back so a flick to the right raises the volume on both.
+  mouse.thumbWheelInvert = true;
+
   # Impermanence is OFF (base default).
   enablePersistence = false;
+
+  # ── Basement server ────────────────────────────────────────────────────────
+  # This machine is destined to stay behind as an always-on box reached over
+  # the tailnet. Until then it is a normal three-monitor desktop.
+  #
+  # BEFORE TRAVEL: flip both of these, rebuild, and work through the checklist
+  # in docs/headless-server.md (BIOS auto-power-on, tailnet IP, ethernet).
+  #
+  #   headless           = true;
+  #   batteryChargeLimit = 60;
+  #
+  headless = false;
+
+  # 80 while it is a daily driver; 60 once it is parked and permanently on AC.
+  batteryChargeLimit = 80;
 }

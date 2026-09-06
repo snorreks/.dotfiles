@@ -44,8 +44,8 @@
     ./clipboard.nix
     ./mouse.nix # logitech mouse (MX Master 3S) declarative settings
   ]
-  # GS65-only: sync nbfc-linux fan profile to PPD power profile.
+  # GS65-only: replay the keyboard RGB colour the dashboard last set.
   ++ lib.optionals (opts.hostname == "gs65") [
-    ../../hosts/gs65/power-hook.nix
+    ../../hosts/gs65/keyboard-restore.nix
   ];
 }

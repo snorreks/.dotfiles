@@ -64,7 +64,6 @@
           "i2c" # DDC/CI monitor control (ddcutil)
           # "libvirtd"      # Uncomment if managing virtual machines
           # "tss"           # Uncomment if using TPM software
-          "nbfc" # For fan control (Laptop)
         ];
         shell = pkgs.fish; # Sets Fish as the default shell for the user
       };

@@ -4,6 +4,7 @@
   imports = [
     ./hardware.nix
     ./fan-control.nix
+    ./keyboard-rgb.nix
   ];
 
   # Disable Panel Self Refresh on the GS65's eDP panel to prevent the

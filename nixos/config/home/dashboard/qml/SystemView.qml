@@ -43,6 +43,27 @@ Item {
         return m + "m";
     }
 
+    // msi-ec's mode names, mapped to something glanceable. Falls back to the
+    // fan glyph for any name a future firmware config might add.
+    function fanIcon(mode: string): string {
+        switch (mode) {
+        case "silent":
+            return "󰤄";
+        case "advanced":
+            return "󰈸";
+        default:
+            return "󰈐";
+        }
+    }
+
+    // Keyboard swatches. Deliberately literal colours rather than Theme
+    // tokens: this picks what the keyboard emits, and a swatch has to show
+    // the colour it will actually produce — a "red" that follows the wallpaper
+    // would be a swatch that lies. The card appends one extra, theme-derived
+    // swatch after these, marked with a palette glyph so it reads as the
+    // deliberate exception.
+    readonly property var kbdSwatches: ["#ff0000", "#ff7700", "#ffdd00", "#00ff40", "#00e5ff", "#0055ff", "#aa00ff", "#ffffff"]
+
     function batteryState(): string {
         switch (view.battery?.state) {
         case UPowerDeviceState.Charging:
@@ -89,6 +110,70 @@ Item {
                 ]
                 current: Sys.powerProfile
                 onActivated: id => Sys.setPower(id)
+            }
+        }
+
+        // ── Cooling ──────────────────────────────────────────────────────
+        // Directly under Power mode on purpose: this is the second half of
+        // the same question. Power mode asks the CPU how hard to work;
+        // this asks the fans how hard to answer.
+        //
+        // Hidden entirely unless the msi-ec platform device is there, which
+        // is the GS65 and nothing else — the Legion's fans follow its
+        // platform profile, which is what the card above already sets, so a
+        // second control there would be two widgets fighting over one value.
+        // Nothing here tests a hostname; see Sys.qml.
+        Card {
+            title: "Cooling"
+            visible: Sys.fanAvailable
+
+            Segmented {
+                // Built from the driver's own available_fan_modes rather than
+                // a hardcoded triple: which modes exist depends on the
+                // msi_ec_conf that matched this machine's EC firmware, and
+                // this file has no business assuming which one that was.
+                model: Sys.fanModes.map(m => ({
+                            id: m,
+                            icon: view.fanIcon(m),
+                            label: m.charAt(0).toUpperCase() + m.slice(1)
+                        }))
+                current: Sys.fanMode
+                onActivated: id => Sys.setFanMode(id)
+            }
+
+            // Cooler boost is not a fourth fan mode — it is an independent
+            // override that pins both fans to maximum on top of whichever
+            // mode is selected, so it is a pill, not a segment.
+            PillToggle {
+                icon: "󰜗"
+                label: "Cooler boost"
+                accent: Theme.warn
+                active: Sys.coolerBoost
+                onClicked: Sys.toggleCoolerBoost()
+            }
+
+            // The EC can hold a byte the driver has no name for — this machine
+            // boots with 0x0c, one bit off the 0x0d it calls `auto`, presumably
+            // whatever the firmware leaves behind. fan_mode then reads back
+            // "unknown (12)", no segment matches it, and the selector renders
+            // with nothing lit. That is honest rather than broken, but it looks
+            // broken, so say what is going on. Picking any mode clears it.
+            Text {
+                Layout.fillWidth: true
+                visible: Sys.fanMode.startsWith("unknown")
+                text: "Fan is in a firmware state with no name (" + Sys.fanMode + ") — pick a mode to take over."
+                color: Theme.subtle
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: !Sys.fanWritable
+                text: "Read-only until the msi-ec udev rule applies — reboot."
+                color: Theme.warn
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
             }
         }
 
@@ -161,6 +246,136 @@ Item {
                 color: Theme.muted
                 font.pixelSize: 10
                 elide: Text.ElideRight
+            }
+        }
+
+        // ── Keyboard light ───────────────────────────────────────────────
+        // Hidden unless the SteelSeries HID controller is present, same rule
+        // as Cooling: hardware, not hostname.
+        //
+        // Note there is no "current colour" coming back from the keyboard —
+        // it is a write-only device (see dashboard-kbd). What is highlighted
+        // below is what this panel last successfully set, which is the same
+        // thing as long as nothing else writes the lighting, and nothing does.
+        Card {
+            title: "Keyboard light"
+            visible: Sys.kbdAvailable
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                Repeater {
+                    model: view.kbdSwatches
+
+                    delegate: Rectangle {
+                        id: swatch
+                        required property string modelData
+
+                        readonly property bool active: Sys.kbdMode === "steady" && Sys.kbdColor === modelData.slice(1).toLowerCase()
+
+                        Layout.fillWidth: true
+                        implicitHeight: 26
+                        radius: 7
+                        color: swatch.modelData
+
+                        // Ring rather than a check mark: at 26px a glyph on
+                        // top of an arbitrary colour is unreadable half the
+                        // time, and the ring reads against any of them.
+                        border.width: swatch.active ? 2 : 0
+                        border.color: Theme.txt
+
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: Sys.setKbdColor(swatch.modelData)
+                        }
+                    }
+                }
+
+                // Whatever the wallpaper is currently themed to.
+                Rectangle {
+                    readonly property string hex: String(Theme.hi).slice(1).toLowerCase()
+
+                    Layout.fillWidth: true
+                    implicitHeight: 26
+                    radius: 7
+                    color: Theme.hi
+                    border.width: Sys.kbdMode === "steady" && Sys.kbdColor === hex ? 2 : 0
+                    border.color: Theme.txt
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: "󰸌"
+                        color: Theme.bg
+                        font.pixelSize: 13
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: Sys.setKbdColor(Theme.hi)
+                    }
+                }
+            }
+
+            // Not a hardware brightness register — there isn't one. This
+            // scales the base colour on its way to the keyboard, which is why
+            // it only bites on a steady colour and goes inert (dimmed, not
+            // hidden, so the card doesn't change height) under a preset.
+            DragSlider {
+                // Same glyph as the display-brightness slider on Home. It
+                // means brightness in both places; the card title is what says
+                // which light it is.
+                icon: "󰃟"
+                // Tinted with the colour it is dimming, which is the one place
+                // in the panel where the accent is not a theme token: the
+                // slider IS the colour's intensity.
+                accent: Sys.kbdMode === "steady" && Sys.kbdColor !== "" ? "#" + Sys.kbdColor : Theme.hi
+                value: Sys.kbdBrightness / 100
+                enabled: Sys.kbdMode === "steady"
+                opacity: enabled ? 1 : 0.35
+                // Every move is a Python process opening a USB device — far
+                // heavier than the backlight slider's 80ms, so throttle hard.
+                throttleMs: 250
+                onMoved: v => Sys.setKbdBrightness(v * 100)
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+
+                PillToggle {
+                    icon: "󰌌"
+                    label: "Off"
+                    active: Sys.kbdMode === "off"
+                    onClicked: Sys.setKbdOff()
+                }
+                // Two of msi-perkeyrgb's nine vendor presets. The rest are
+                // reachable from `dashboard-kbd presets` / `dashboard-kbd
+                // preset <name>`; putting all nine in here would make this
+                // the largest card in the panel for the least-used control.
+                PillToggle {
+                    icon: "󰸉"
+                    label: "Rainbow"
+                    active: Sys.kbdPreset === "rainbow-split"
+                    onClicked: Sys.setKbdPreset("rainbow-split")
+                }
+                PillToggle {
+                    icon: "󰧵"
+                    label: "Disco"
+                    active: Sys.kbdPreset === "disco"
+                    onClicked: Sys.setKbdPreset("disco")
+                }
+            }
+
+            Text {
+                Layout.fillWidth: true
+                visible: !Sys.kbdWritable
+                text: "No access to the keyboard's HID device — reboot for the udev rule to apply."
+                color: Theme.warn
+                font.pixelSize: 10
+                wrapMode: Text.Wrap
             }
         }
 

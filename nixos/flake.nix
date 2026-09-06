@@ -108,7 +108,16 @@
       };
 
     mkHost = hostKey: hostCfg: enableOllama: let
-      opts = baseOpts // hostCfg.optsOverrides // localOverrides // {inherit enableOllama;};
+      # recursiveUpdate, not `//`: a host (or local.nix) overriding a single
+      # key of a nested attrset — say `mouse.thumbWheelInvert` — must not drop
+      # the rest of that attrset. Lists still replace wholesale, so
+      # `monitorrule` keeps its all-or-nothing semantics.
+      opts =
+        nixpkgs.lib.recursiveUpdate
+        (nixpkgs.lib.recursiveUpdate
+          (nixpkgs.lib.recursiveUpdate baseOpts hostCfg.optsOverrides)
+          localOverrides)
+        {inherit enableOllama;};
     in
       nixpkgs.lib.nixosSystem {
         inherit system;

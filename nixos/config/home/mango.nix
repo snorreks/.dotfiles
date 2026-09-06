@@ -372,13 +372,24 @@ in {
         # without forwarding to the client), so with the NONE modifier this
         # takes horizontal scroll away from every app. That is the intent here;
         # to keep horizontal scrolling, change NONE to a modifier such as SUPER.
-        ++ lib.optionals opts.mouse.thumbWheelVolume [
+        ++ lib.optionals opts.mouse.thumbWheelVolume (
           # 5% steps rather than the 2% used by the media keys: mango throttles
           # axis binds to one per `axis_bind_apply_timeout` (default 100ms), so
           # a quick flick only fires a handful of times.
-          "NONE,RIGHT,spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%-"
-          "NONE,LEFT,spawn,wpctl set-volume @DEFAULT_SINK@ 5%+"
-        ];
+          #
+          # Which of LEFT/RIGHT a physical flick lands on depends on how the
+          # mouse is paired — Bolt receiver and Bluetooth report REL_HWHEEL with
+          # opposite signs — so the pair is ordered by opts.mouse.thumbWheelInvert
+          # (see the note in options.nix). Either way: thumb wheel toward the
+          # right raises the volume.
+          let
+            up = dir: "NONE,${dir},spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%+";
+            down = dir: "NONE,${dir},spawn,wpctl set-volume @DEFAULT_SINK@ 5%-";
+          in
+            if opts.mouse.thumbWheelInvert
+            then [(up "LEFT") (down "RIGHT")]
+            else [(up "RIGHT") (down "LEFT")]
+        );
     };
 
     # Static WM colors (tokyo-night) — appended after settings. The dynamic

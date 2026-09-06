@@ -8,6 +8,7 @@
 }: {
   imports =
     [
+      ./battery.nix
       ./boot.nix
       ./display-manager.nix
       ./environment.nix
@@ -18,6 +19,7 @@
       ./power-management.nix
       ./security.nix
       ./mouse.nix
+      ./server.nix
       ./services.nix
       ./ssh.nix
       ./sound.nix

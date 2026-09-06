@@ -2,6 +2,9 @@
 {...}: {
   # --- Systemd Login Manager (logind) ---
   # Configure system behavior on events like closing the laptop lid.
+  #
+  # NOTE: a headless host overrides all of this (with mkForce) in
+  # config/system/server.nix — there, nothing may ever suspend.
   services.logind = {
     settings = {
       Login = {

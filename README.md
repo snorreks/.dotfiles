@@ -78,6 +78,7 @@ AI-agent-heavy dev workflow.
 | [`docs/keybindings.md`](./docs/keybindings.md)                       | Full keybinding cheat sheet + per-tool usage notes                                                            |
 | [`docs/bootstrap.md`](./docs/bootstrap.md)                           | Fresh machine setup, Bitwarden/sops bootstrap, GS65 first install, using **disko** for a from-scratch install |
 | [`docs/impermanence-migration.md`](./docs/impermanence-migration.md) | Converting an existing (already-installed, dual-boot) disk to the impermanence layout in place                |
+| [`docs/headless-server.md`](./docs/headless-server.md)               | Running a host as an always-on, tailnet-only box: `headless = true`, safe remote rebuilds, remote builds      |
 | [`docs/forking.md`](./docs/forking.md)                               | Adapting this repo to your own identity, hardware, and accounts                                               |
 
 ## NixOS Management
@@ -104,6 +105,44 @@ app on the NVIDIA GPU:
 ```fish
 prime-run steam
 ```
+
+## GS65 Hardware Controls
+
+The MSI GS65 Stealth has two pieces of hardware the generic laptop stack does
+not reach, both wired into the dashboard's **System** tab (`SUPER+D`):
+
+- **Cooling** — fan mode (silent / auto / advanced) and Cooler Boost, via the
+  `msi-ec` kernel module (`hosts/gs65/fan-control.nix`).
+- **Keyboard light** — colour and brightness for the SteelSeries per-key RGB
+  controller, via `msi-perkeyrgb` (`hosts/gs65/keyboard-rgb.nix`, packaged in
+  `pkgs/`). The controller has no brightness register, so brightness scales the
+  chosen colour before it is sent; it therefore applies to a steady colour and
+  not to the vendor presets, which carry their own colours.
+
+Both cards are gated on the hardware being present, not on the hostname, so
+they are simply absent on the Legion — whose fans follow the platform profile
+the **Power mode** card already sets. Both need one reboot after the rebuild
+that introduces them: `msi-ec` has to load, and the udev rules that grant the
+user access to the EC attributes and `/dev/hidraw*` only apply from boot. Until
+then each card says so instead of silently ignoring clicks.
+
+From the shell:
+
+```fish
+dashboard-fan status
+dashboard-fan mode silent
+dashboard-fan boost toggle
+
+dashboard-kbd presets      # all nine vendor presets
+dashboard-kbd color ff0000
+dashboard-kbd brightness 40
+dashboard-kbd preset rainbow-split
+dashboard-kbd off
+```
+
+If the Cooling card never appears, `msi-ec` declined to bind — check
+`journalctl -b | grep msi-ec` for the EC firmware version it saw, and see the
+header comment in `hosts/gs65/fan-control.nix`.
 
 ## Known Issues
 
@@ -135,12 +174,14 @@ See `.pi/skills/nixos-kernel-bump/SKILL.md` for full diagnosis steps.
 │ ├── keybindings.md # Keybinding cheat sheet + usage notes
 │ ├── bootstrap.md # New machine setup + disko usage
 │ ├── impermanence-migration.md # Migrating an existing install
+│ ├── headless-server.md # Always-on tailnet-only host mode
 │ └── forking.md # Adapting this repo to your own setup
 ├── nixos/
 │ ├── flake.nix
 │ ├── flake.lock
 │ ├── secrets.yaml # Encrypted secrets (sops + Age)
 │ ├── options.nix
+│ ├── pkgs/ # Packages not in nixpkgs (msi-perkeyrgb)
 │ ├── system.nix
 │ ├── hosts/
 │ │ └── legion/ # Hardware configs

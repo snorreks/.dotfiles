@@ -3,6 +3,7 @@
 {
   opts,
   pkgs,
+  lib,
   ...
 }: {
   # System packages needed for wg-quick DNS management
@@ -42,7 +43,14 @@
   ];
 
   # --- VPN START
-  # services.tailscale.enable = true;
+  # Tailscale now lives in config/system/server.nix (it is infrastructure for
+  # reaching the headless host, not an on-demand VPN like the one below).
+  #
+  # WARNING, on the headless host: never start wg-quick-wg0 remotely. Its
+  # kill-switch below REJECTs all output that is not marked for wg0, which
+  # includes the tailnet — it would cut the only way back in. autostart is
+  # false and it is not wantedBy multi-user.target, so this only happens if
+  # someone runs it by hand.
 
   # This service will manage the connection using your config file
   networking.wg-quick.interfaces.wg0 = {
@@ -88,14 +96,37 @@
       enable = true;
 
       # OPTIMIZATION: Enhance privacy on Wi-Fi by using a random MAC address.
-      wifi.macAddress = "random";
+      #
+      # Except on a headless host, where it is a liability rather than a
+      # privacy win: a fresh MAC on every reconnect means a fresh DHCP lease
+      # and potentially a new IP each time, and the machine is joining one
+      # trusted network and staying there for months. Pin it so the router
+      # (and any reservation on it) sees a stable client.
+      wifi.macAddress =
+        if opts.headless
+        then "permanent"
+        else "random";
 
       # Tell NetworkManager to ignore DNS, as dnscrypt-proxy2 will handle it.
       dns = "none";
     };
 
     # Point the system's resolver to the local dnscrypt-proxy2 service.
-    nameservers = ["127.0.0.1" "::1"];
+    #
+    # On a headless host, append public resolvers behind it. This is a
+    # deliberate privacy-for-availability trade and only applies there: with
+    # dns = "none" and a loopback-only resolver, dnscrypt-proxy failing to come
+    # up after an unattended reboot leaves the machine with NO name resolution
+    # at all — including for controlplane.tailscale.com, which is how we get
+    # back in. glibc tries these in order, so they are only consulted when the
+    # local resolver does not answer; in normal operation nothing changes.
+    nameservers =
+      ["127.0.0.1" "::1"]
+      ++ lib.optionals opts.headless [
+        "9.9.9.9" # Quad9
+        "1.1.1.1" # Cloudflare
+        "2620:fe::fe"
+      ];
 
     # Allows wg-quick to manage /etc/resolv.conf for DNS during VPN connections.
     resolvconf.enable = true;
@@ -106,9 +137,20 @@
       # "loose" mode prevents the kernel from dropping incoming WireGuard
       # handshake packets that arrive on a different interface than expected.
       # Required for VPNs where traffic may be asymmetric.
-      checkReversePath = "loose";
-      # NOTE: You can define specific open ports here if needed, for example:
-      allowedTCPPorts = [11434 8188];
+      #
+      # mkForce because the tailscale module also sets this option (to the same
+      # value) whenever useRoutingFeatures includes "client". checkReversePath
+      # is not a mergeable type, so two plain definitions would be an eval
+      # conflict rather than a no-op.
+      checkReversePath = lib.mkForce "loose";
+
+      # 11434 = ollama, 8188 = ComfyUI. Both speak unauthenticated HTTP, so on
+      # a headless host they are NOT exposed to the LAN it sits on — that is a
+      # family network full of devices we do not control, and anyone on it
+      # could otherwise drive the GPU. The services still listen on 0.0.0.0;
+      # server.nix trusts tailscale0 instead, so our own machines reach them
+      # over the tailnet and nothing else can.
+      allowedTCPPorts = lib.optionals (!opts.headless) [11434 8188];
     };
   };
 
@@ -121,6 +163,17 @@
       listen_addresses = ["127.0.0.1:53" "[::1]:53"];
       ipv6_servers = true;
       require_dnssec = true;
+
+      # Resolvers used only to look up the encrypted resolvers' own hostnames.
+      # Without these, dnscrypt-proxy asks the system resolver — which is
+      # itself, via nameservers = 127.0.0.1 — and a cold boot with a stale
+      # cache can deadlock into never becoming ready.
+      bootstrap_resolvers = ["9.9.9.9:53" "1.1.1.1:53"];
+      ignore_system_dns = true;
+
+      # Wait for the network instead of giving up: on an unattended boot the
+      # link is frequently not up yet when the service starts.
+      netprobe_timeout = 60;
 
       # A curated list of high-quality, non-logging resolvers with security filtering.
       server_names = [
@@ -140,6 +193,16 @@
         minisign_key = "RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3";
       };
     };
+  };
+
+  # dnscrypt-proxy is a single point of failure for the whole machine's name
+  # resolution (dns = "none" above means nothing else answers). Upstream's unit
+  # gives up after the default start-limit burst; on a host we cannot reach a
+  # console for, keep retrying forever instead.
+  systemd.services.dnscrypt-proxy.serviceConfig = {
+    Restart = lib.mkForce "always";
+    RestartSec = "10s";
+    StartLimitBurst = 0;
   };
 
   # Enables the OpenSSH server for remote access.

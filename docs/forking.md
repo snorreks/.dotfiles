@@ -32,7 +32,7 @@ The actual theme color scheme (Stylix `base16Scheme`) is set directly in
 
 Each machine gets its own directory under `nixos/hosts/<name>/`:
 
-- `default.nix` — imports `./hardware.nix` and any host-only extras (e.g. `gs65/fan-control.nix` is MSI-specific `nbfc-linux` fan control — delete it, it'll break on other hardware).
+- `default.nix` — imports `./hardware.nix` and any host-only extras. On `gs65` those are MSI-specific: `fan-control.nix` (the `msi-ec` kernel module, which only binds to MSI EC firmware it recognises) and `keyboard-rgb.nix` (the SteelSeries per-key RGB controller). Delete both on other hardware.
 - `hardware.nix` — filesystem/initrd/kernel-module config. **Don't hand-write this** — boot the target machine's installer and run `nixos-generate-config --show-hardware-config > hardware.nix`, then re-add the microcode line the generator drops (see `docs/bootstrap.md`'s GS65 section for the exact diff).
 - `options.nix` (optional) — per-host overrides merged on top of the base `options.nix` (hostname, GPU bus IDs, `deviceName`, monitor defaults). Follow the pattern in `hosts/gs65/options.nix`.
 

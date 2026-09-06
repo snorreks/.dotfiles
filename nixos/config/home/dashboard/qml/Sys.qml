@@ -24,6 +24,12 @@
 //             live for the bar, so a closed panel has no reason to hit the
 //             network. Re-fetch is suppressed for 5 minutes after the last one.
 //   stats   : dashboard-stats, 3s, ONLY while SystemView is up.
+//   fan     : dashboard-fan, on the same 3s tick as stats — sysfs reads off
+//             the msi-ec platform device, so it rides the tick that already
+//             exists rather than owning one.
+//   kbd     : dashboard-kbd, once per SystemView open and after each write.
+//             Nothing else on this machine touches the keyboard lighting, so
+//             there is nothing to poll for.
 //   toggles : dashboard-toggles, 5s, ONLY while HomeView is up —
 //             wifi/bluetooth/airplane have no push source, but one script
 //             spawn beats the three swaync ran.
@@ -272,8 +278,19 @@ Singleton {
         running: root.statsActive
         repeat: true
         triggeredOnStart: true
-        onTriggered: statsProc.running = true
+        onTriggered: {
+            statsProc.running = true;
+            // Same tab, same tick, one more sysfs read — see "Fan / cooling"
+            // below for why this doesn't get a timer of its own.
+            fanProc.running = true;
+        }
     }
+
+    // The keyboard's lighting can only be changed by this panel, so unlike the
+    // fan it has nothing to poll for — read it once each time the tab comes up
+    // and then only after this shell's own writes (see kbdSettle).
+    onStatsActiveChanged: if (statsActive)
+        kbdProc.running = true
 
     // ── Quick toggles with no push source ────────────────────────────────
     property bool wifiOn: false
@@ -371,6 +388,146 @@ Singleton {
             root.calRows = root.calGrid();
             root.calMonth = Qt.formatDate(new Date(), "MMMM yyyy");
         }
+    }
+
+    // ── Fan / cooling (msi-ec) ───────────────────────────────────────────
+    // Hardware-gated, not host-gated: `fanAvailable` is false wherever the
+    // msi-ec platform device isn't there — the Legion, or a GS65 whose EC
+    // firmware the driver declined to match — and SystemView hides the card
+    // on that flag. No hostname appears anywhere in this shell, so the same
+    // QML directory is correct on both machines.
+    //
+    // Rides the same 3s tick as the stats above rather than owning a timer:
+    // both are sysfs reads for the System tab, and one tick that spawns two
+    // one-shots is the same cost as two ticks that spawn one each, minus a
+    // timer.
+    property bool fanAvailable: false
+    property bool fanWritable: false
+    property var fanModes: []
+    property string fanMode: ""
+    property bool coolerBoost: false
+
+    Process {
+        id: fanProc
+        command: ["dashboard-fan", "status"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let j;
+                try {
+                    j = JSON.parse(text);
+                } catch (e) {
+                    return;
+                }
+                root.fanAvailable = j.available ?? false;
+                root.fanWritable = j.writable ?? false;
+                root.fanModes = j.modes ?? [];
+                root.fanMode = j.mode ?? "";
+                root.coolerBoost = j.boost ?? false;
+            }
+        }
+    }
+
+    function setFanMode(mode: string): void {
+        oneShot.exec(["dashboard-fan", "mode", mode]);
+        fanSettle.restart();
+    }
+
+    function toggleCoolerBoost(): void {
+        oneShot.exec(["dashboard-fan", "boost", "toggle"]);
+        fanSettle.restart();
+    }
+
+    // The EC takes a moment to reflect a write, and the card should not sit on
+    // a stale value for most of a 3s tick after its own click.
+    Timer {
+        id: fanSettle
+        interval: 400
+        repeat: false
+        onTriggered: fanProc.running = true
+    }
+
+    // ── Keyboard RGB (msi-perkeyrgb) ─────────────────────────────────────
+    // Also hardware-gated — on the USB HID keyboard (1038:1122) this time.
+    //
+    // `kbdMode` is "off" | "steady" | "preset", and it comes out of a state
+    // file rather than off the keyboard: the SteelSeries controller accepts
+    // lighting packets and reports nothing back, so dashboard-kbd's record of
+    // what it last sent is the only available answer. See that script.
+    //
+    // Polled once when the tab opens rather than on the tick: nothing else on
+    // this machine writes the keyboard lighting, so the value can only change
+    // when this card changes it — and those paths re-read directly.
+    //
+    // `kbdColor` is the BASE colour, not what is on the wire: the controller
+    // has no brightness of its own, so dashboard-kbd dims by scaling the RGB
+    // before sending. Keeping the two apart is what lets the swatch stay lit
+    // on the colour that was picked while the keyboard shows a dimmed one.
+    property bool kbdAvailable: false
+    property bool kbdWritable: false
+    property string kbdMode: ""
+    property string kbdColor: ""
+    property string kbdPreset: ""
+    property int kbdBrightness: 100
+
+    Process {
+        id: kbdProc
+        command: ["dashboard-kbd", "status"]
+        stdout: StdioCollector {
+            onStreamFinished: {
+                let j;
+                try {
+                    j = JSON.parse(text);
+                } catch (e) {
+                    return;
+                }
+                root.kbdAvailable = j.available ?? false;
+                root.kbdWritable = j.writable ?? false;
+                root.kbdMode = j.mode ?? "";
+                root.kbdColor = j.color ?? "";
+                root.kbdPreset = j.preset ?? "";
+                root.kbdBrightness = j.brightness ?? 100;
+            }
+        }
+    }
+
+    // QML stringifies an opaque color as "#rrggbb" and a translucent one as
+    // "#aarrggbb"; msi-perkeyrgb wants six bare hex digits either way, and
+    // dashboard-kbd rejects anything else rather than half-writing a colour.
+    function setKbdColor(c: color): void {
+        oneShot.exec(["dashboard-kbd", "color", String(c).slice(-6)]);
+        kbdSettle.restart();
+    }
+
+    function setKbdPreset(name: string): void {
+        oneShot.exec(["dashboard-kbd", "preset", name]);
+        kbdSettle.restart();
+    }
+
+    function setKbdOff(): void {
+        oneShot.exec(["dashboard-kbd", "off"]);
+        kbdSettle.restart();
+    }
+
+    // Scales the base colour rather than touching a hardware register — see
+    // dashboard-kbd. The card throttles the drag, because each call is a
+    // Python process and a USB conversation.
+    function setKbdBrightness(pct: int): void {
+        oneShot.exec(["dashboard-kbd", "brightness", String(Math.max(0, Math.min(100, Math.round(pct))))]);
+        kbdSettle.restart();
+    }
+
+    // Re-read rather than assume: msi-perkeyrgb exits non-zero if it cannot
+    // open the HID device (the udev rule needs a reboot to take effect), and
+    // dashboard-kbd only records state on success — so a failed click leaves
+    // the card showing the truth instead of an optimistic lie.
+    // Longer than the fan's: that one is a sysfs write that lands instantly,
+    // this one is a USB HID conversation of several packets, and re-reading
+    // before it finishes would show the previous colour.
+    Timer {
+        id: kbdSettle
+        interval: 1200
+        repeat: false
+        onTriggered: kbdProc.running = true
     }
 
     // Shared fire-and-forget process for every command this panel issues.
