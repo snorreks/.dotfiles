@@ -3,9 +3,11 @@
   description = "Sonny's NixOS Configuration";
 
   inputs = {
-    # Temporarily pinned to working rev (ollama-cuda build broken on latest head).
-    # Revert to nixos-unstable once fixed upstream.
-    nixpkgs.url = "github:NixOS/nixpkgs/421eebfd0ec7bccd4abe826ce62d7e6e83129493";
+    # TEMP: testing against latest nixos-unstable. If it breaks (e.g. ollama-cuda
+    # or an input that can't keep up), restore the pinned rev below and re-run
+    # `nix flake lock`.
+    # nixpkgs.url = "github:NixOS/nixpkgs/421eebfd0ec7bccd4abe826ce62d7e6e83129493";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     nur.url = "github:nix-community/NUR";
 
     llm-agents.url = "github:numtide/llm-agents.nix";
@@ -31,10 +33,13 @@
     };
 
     # Wallpaper-derived dynamic theming (runtime color extraction + templates).
-    # NOTE: deliberately does NOT follow the pinned nixpkgs — base16 palette
-    # output requires matugen >= 4.0 (added 2026-02), which predates the pin.
+    # Follows the pinned nixpkgs so matugen's cargo crates are fetched through
+    # static.crates.io: crates.io's api/v1 endpoint now 403s nixpkgs' curl
+    # User-Agent, and matugen's own nixpkgs pin predates that fix. The pin
+    # already ships matugen >= 4.1, so base16 palette output is unaffected.
     matugen = {
       url = "github:InioX/matugen";
+      inputs.nixpkgs.follows = "nixpkgs";
     };
 
     zen-browser = {
