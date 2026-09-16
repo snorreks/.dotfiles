@@ -7,3 +7,5 @@ https://github.com/Alexandro521/Tanko
 for windows msi
 
 https://github.com/wygodad/ghostdeck
+
+https://wiki.nixos.org/wiki/Jellyfin

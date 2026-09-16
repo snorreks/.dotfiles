@@ -25,8 +25,8 @@
 //             network. Re-fetch is suppressed for 5 minutes after the last one.
 //   stats   : dashboard-stats, 3s, ONLY while SystemView is up.
 //   fan     : dashboard-fan, on the same 3s tick as stats — sysfs reads off
-//             the msi-ec platform device, so it rides the tick that already
-//             exists rather than owning one.
+//             the msi-ec or legion platform device, so it rides the tick that
+//             already exists rather than owning one.
 //   kbd     : dashboard-kbd, once per SystemView open and after each write.
 //             Nothing else on this machine touches the keyboard lighting, so
 //             there is nothing to poll for.
@@ -398,6 +398,13 @@ Singleton {
     // appears anywhere in this shell, so the same QML directory is correct on
     // both machines; see dashboard-fan.sh for which platform device backs it.
     //
+    // The two backends differ underneath without leaking here: msi-ec has a
+    // fan_mode enum, while the Legion reports its powermode
+    // (quiet/balanced/performance) in the same field. The Legion's custom
+    // powermode is hidden inside dashboard-fan's boost path, because the
+    // firmware only honours fan_fullspeed there, so `fanModes` stays the three
+    // profiles users actually pick on both machines.
+    //
     // Rides the same 3s tick as the stats above rather than owning a timer:
     // both are sysfs reads for the System tab, and one tick that spawns two
     // one-shots is the same cost as two ticks that spawn one each, minus a
@@ -439,10 +446,14 @@ Singleton {
     }
 
     // The EC takes a moment to reflect a write, and the card should not sit on
-    // a stale value for most of a 3s tick after its own click.
+    // a stale value for most of a 3s tick after its own click. 800ms rather
+    // than the msi-ec write's instant: the Legion's powermode_store sleeps
+    // 500ms before it returns, and the boost path writes powermode and
+    // fan_fullspeed one after the other, so a shorter settle would re-read
+    // mid-write and light the wrong segment.
     Timer {
         id: fanSettle
-        interval: 400
+        interval: 800
         repeat: false
         onTriggered: fanProc.running = true
     }

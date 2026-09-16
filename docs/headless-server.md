@@ -6,7 +6,7 @@ written for.
 
 The guiding constraint behind every choice here: once the machine is on another
 continent, the only recovery path that does not involve talking a relative
-through a boot menu is *"it came back up on its own."* So the design favours
+through a boot menu is _"it came back up on its own."_ So the design favours
 coming back over being clever.
 
 ## What the flag does
@@ -14,17 +14,17 @@ coming back over being clever.
 Set `headless = true;` in `hosts/<host>/options.nix` and rebuild. That single
 flag:
 
-| Area        | Change                                                                     | Why                                                                                   |
-| ----------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Desktop     | greetd stops autologging into mango                                        | Nothing should run a compositor for an empty room                                     |
-| Sleep       | `sleep`/`suspend`/`hibernate` targets masked; lid + power key ignored      | Resume is known-broken on this NVIDIA + mango combo (`config/home/idle.nix`)          |
-| Wi-Fi       | MAC pinned to `permanent` instead of randomised                            | A new MAC per reconnect means a new DHCP lease, possibly a new IP                     |
-| DNS         | Public resolvers appended behind dnscrypt-proxy                            | dnscrypt failing to start would otherwise leave the box with no name resolution at all |
-| Firewall    | Ports 11434 (ollama) / 8188 (ComfyUI) closed to the LAN                    | Unauthenticated HTTP; a family LAN is not a trust boundary                             |
-| Tailnet     | Advertises itself as an exit node                                          | A Norwegian IP for banking and geo-locked services from abroad                          |
-| SSH         | Password and keyboard-interactive auth off, root login off                 | Keys and Tailscale SSH are the two ways in                                             |
-| Nix         | `${username}` added to `trusted-users`                                     | Lets the travel laptop offload builds here                                             |
-| Battery     | `batteryChargeLimit = 60` (set separately)                                 | A pack held at 100% for months is a pack you replace                                    |
+| Area     | Change                                                                | Why                                                                                    |
+| -------- | --------------------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Desktop  | greetd stops autologging into mango                                   | Nothing should run a compositor for an empty room                                      |
+| Sleep    | `sleep`/`suspend`/`hibernate` targets masked; lid + power key ignored | Resume is known-broken on this NVIDIA + mango combo (`config/home/idle.nix`)           |
+| Wi-Fi    | MAC pinned to `permanent` instead of randomised                       | A new MAC per reconnect means a new DHCP lease, possibly a new IP                      |
+| DNS      | Public resolvers appended behind dnscrypt-proxy                       | dnscrypt failing to start would otherwise leave the box with no name resolution at all |
+| Firewall | Ports 11434 (ollama) / 8188 (ComfyUI) closed to the LAN               | Unauthenticated HTTP; a family LAN is not a trust boundary                             |
+| Tailnet  | Advertises itself as an exit node                                     | A Norwegian IP for banking and geo-locked services from abroad                         |
+| SSH      | Password and keyboard-interactive auth off, root login off            | Keys and Tailscale SSH are the two ways in                                             |
+| Nix      | `${username}` added to `trusted-users`                                | Lets the travel laptop offload builds here                                             |
+| Battery  | `batteryChargeLimit = 60` (set separately)                            | A pack held at 100% for months is a pack you replace                                   |
 
 Crucially, **nothing is uninstalled**. Mango, waybar, Zed, Steam and the rest
 stay in the closure. Walk up to the machine, log in at tuigreet, and the normal
@@ -33,7 +33,7 @@ desktop is there. The flag only stops anything from starting one unattended.
 That was a deliberate call. Stripping the GUI would save disk and nothing else —
 the desktop renders on the Intel iGPU (see `config/system/services.nix`), so it
 never competed with ollama for VRAM in the first place, and the daemons that
-*did* cost something only ever start inside a session. Ripping packages out
+_did_ cost something only ever start inside a session. Ripping packages out
 would buy a few GB of a 2 TB disk in exchange for a machine that is useless the
 next time you are physically in front of it.
 
@@ -53,7 +53,7 @@ Two flags are applied automatically on every boot via `extraSetFlags`:
 - **`--accept-dns=false`** — not optional. Tailscale's resolver would take over
   `/etc/resolv.conf` and displace dnscrypt-proxy, which is both a privacy
   regression and one more way to strand a machine nobody can reach a console
-  for. MagicDNS is therefore *off*, and peers are named through
+  for. MagicDNS is therefore _off_, and peers are named through
   `opts.tailnetHosts` instead.
 
 ## First-time setup
@@ -97,8 +97,8 @@ power cut is a non-event or a dead machine:
 - **Restore on AC power loss / auto power-on** — enable it. Without this, the
   box stays off once the battery runs down, and stays off.
 - **Boot order** — confirm the machine actually lands on NixOS. `boot.nix` gives
-  the manual Windows entry `sort-key aa`, which places it at the *top of the
-  menu*; systemd-boot's `default` directive should still win, but this is worth
+  the manual Windows entry `sort-key aa`, which places it at the _top of the
+  menu_; systemd-boot's `default` directive should still win, but this is worth
   proving with a real power-cycle rather than trusting.
 
 ### 4. Prefer ethernet
@@ -133,7 +133,7 @@ nswitch-safe
 
 This arms a dead man's switch before rebuilding: if `nswitch-confirm` has not
 run within 20 minutes (`ROLLBACK_TIMEOUT` to change), the machine reverts to the
-generation it was on and reboots into it. The timer is a transient *system*
+generation it was on and reboots into it. The timer is a transient _system_
 unit, so it outlives the SSH session that armed it — which is the whole point.
 
 After the rebuild returns, **open a second SSH session** to verify you can still
@@ -150,7 +150,7 @@ disarms automatically — there is nothing to revert.
 An autonomous "is the internet up?" watchdog was considered and rejected. It
 cannot tell a config mistake from the parents' ISP having a bad afternoon, so it
 reboots the machine for problems a rollback will not fix. The dead man's switch
-arms only across the window where *you* changed something, which is when the
+arms only across the window where _you_ changed something, which is when the
 risk actually exists.
 
 ### Manual rollback
@@ -231,7 +231,7 @@ pushed across the tailnet.
 ## Pre-departure checklist
 
 - [ ] `headless = true` and `batteryChargeLimit = 60` in `hosts/legion/options.nix`
-- [ ] Rebuilt, and verified SSH still works from a *second* session
+- [ ] Rebuilt, and verified SSH still works from a _second_ session
 - [ ] Key expiry disabled on both tailnet nodes
 - [ ] Exit node approved in the admin console
 - [ ] `tailnetHosts` filled in with the Legion's `100.x` address
@@ -242,3 +242,8 @@ pushed across the tailnet.
 - [ ] Models pulled that you expect to want
 - [ ] Parents shown where the power cable is, and told "unplug, wait ten
       seconds, plug back in" is the whole recovery procedure
+
+## Refrences
+
+- consider looking at https://github.com/Osmantic/ODS
+- https://wiki.nixos.org/wiki/Jellyfin

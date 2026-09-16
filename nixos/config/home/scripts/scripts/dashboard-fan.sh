@@ -7,10 +7,18 @@
 #   msi-ec  — GS65, see hosts/gs65/fan-control.nix for how it comes to exist
 #             and why its attributes are group-writable. Has real fan modes
 #             (auto/silent/advanced) plus cooler_boost.
-#   legion  — Legion Pro 7, see hosts/legion/fan-control.nix. No fan modes —
-#             the EC just runs its own curve — so the only control surface is
-#             fan_fullspeed, which this script reports through the same
-#             "boost" field cooler_boost uses on the GS65.
+#   legion  — Legion Pro 7, see hosts/legion/fan-control.nix. Its fan modes
+#             live in powermode — the firmware's smartFanMode, which the EC
+#             uses to pick the fan curve — and are reported through the same
+#             "modes"/"mode" fields the GS65's fan_mode uses. "boost" is
+#             fan_fullspeed, but the firmware only honours it while powermode
+#             is custom: outside custom the WMI write stores the flag, reads
+#             back 1, and the fan controller ignores it (the driver's own
+#             fanfullspeed_requires_custom_powermode documents the same thing
+#             for the LOQ 83SC). So the Legion boost path flips to custom
+#             first and restores the previous mode on the way out, and custom
+#             stays out of `modes`: it is an implementation detail of boost,
+#             not a profile the card should offer next to quiet/balanced/perf.
 #
 # Everything here is sysfs, so a status read is a handful of file reads and no
 # subprocess chain; it rides the same 3s tick as dashboard-stats, and only
@@ -55,11 +63,24 @@ status() {
     fi
 
     if [ -d "$LEGION" ]; then
+        # Legion fan modes are powermode (smartFanMode). Only the three
+        # profiles are offered as buttons: custom (255) is not a profile the
+        # user picks, it is the state the boost pill enters internally so the
+        # firmware will honour fan_fullspeed. mode still reports "custom" while
+        # there, so the card can distinguish it from a profile with no segment
+        # lit; 224 (extreme/max power) has no button for the same reason.
+        case "$(cat "$LEGION/powermode" 2>/dev/null || echo "")" in
+        1) mode=quiet ;;
+        2) mode=balanced ;;
+        3) mode=performance ;;
+        255) mode=custom ;;
+        *) mode="" ;;
+        esac
         [ "$(cat "$LEGION/fan_fullspeed" 2>/dev/null || echo 0)" = "1" ] && boost=true || boost=false
-        [ -w "$LEGION/fan_fullspeed" ] && writable=true || writable=false
+        [ -w "$LEGION/powermode" ] && [ -w "$LEGION/fan_fullspeed" ] && writable=true || writable=false
 
-        printf '{"available":true,"modes":[],"mode":"","boost":%s,"writable":%s}\n' \
-            "$boost" "$writable"
+        printf '{"available":true,"modes":["quiet","balanced","performance"],"mode":"%s","boost":%s,"writable":%s}\n' \
+            "$mode" "$boost" "$writable"
         return 0
     fi
 
@@ -71,14 +92,40 @@ status)
     status
     ;;
 mode)
-    # Validated against the driver's own list rather than a hardcoded one:
-    # the mode names come from whichever msi_ec_conf matched this firmware.
-    [ -d "$EC" ] || exit 0
-    grep -qxF "${2:?usage: dashboard-fan mode <name>}" "$EC/available_fan_modes" || {
-        echo "dashboard-fan: unknown fan mode: $2" >&2
-        exit 1
-    }
-    printf '%s' "$2" >"$EC/fan_mode"
+    if [ -d "$EC" ]; then
+        # Validated against the driver's own list rather than a hardcoded one:
+        # the mode names come from whichever msi_ec_conf matched this firmware.
+        grep -qxF "${2:?usage: dashboard-fan mode <name>}" "$EC/available_fan_modes" || {
+            echo "dashboard-fan: unknown fan mode: $2" >&2
+            exit 1
+        }
+        printf '%s' "$2" >"$EC/fan_mode"
+        exit 0
+    fi
+
+    if [ -d "$LEGION" ]; then
+        # The Legion's names are ours, not the driver's: powermode is an int
+        # enum (the driver has no name table for it). `custom` is still
+        # accepted here for the shell (and so `status`'s mode round-trips) even
+        # though the card doesn't offer it; picking any other mode drops a
+        # sticky boost, because the firmware would ignore it outside custom and
+        # the lit pill would be lying.
+        case "${2:?usage: dashboard-fan mode <name>}" in
+        quiet) v=1 ;;
+        balanced) v=2 ;;
+        performance) v=3 ;;
+        custom) v=255 ;;
+        *)
+            echo "dashboard-fan: unknown fan mode: $2" >&2
+            exit 1
+            ;;
+        esac
+        [ "$v" != 255 ] && printf '0' >"$LEGION/fan_fullspeed" 2>/dev/null || true
+        printf '%s' "$v" >"$LEGION/powermode"
+        exit 0
+    fi
+
+    exit 0
     ;;
 boost)
     if [ -d "$EC" ]; then
@@ -109,7 +156,29 @@ boost)
             exit 1
             ;;
         esac
-        printf '%s' "$v" >"$LEGION/fan_fullspeed"
+
+        # fan_fullspeed is only honoured in custom powermode, so boosting
+        # always enters custom. Stash where the user was so un-boosting puts
+        # them back instead of assuming performance. The state lives next to
+        # the session (gamemode.nix uses the same XDG_RUNTIME_DIR-or-/tmp
+        # trick) and is only advisory — a missing/garbage file falls back to
+        # performance rather than blocking the write.
+        state=${XDG_RUNTIME_DIR:-/tmp}/dashboard-fan-legion-powermode
+
+        if [ "$v" = "1" ]; then
+            cat "$LEGION/powermode" >"$state" 2>/dev/null || true
+            printf '255' >"$LEGION/powermode"
+            printf '1' >"$LEGION/fan_fullspeed"
+        else
+            printf '0' >"$LEGION/fan_fullspeed"
+            prev=$(cat "$state" 2>/dev/null || echo 3)
+            rm -f "$state"
+            case "$prev" in
+            1 | 2 | 3 | 255) ;;
+            *) prev=3 ;;
+            esac
+            printf '%s' "$prev" >"$LEGION/powermode"
+        fi
         exit 0
     fi
 

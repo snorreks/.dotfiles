@@ -57,6 +57,10 @@
       nau = "sudo nix-channel --add https://nixos.org/channels/nixos-unstable nixos";
       nsgc = "sudo nix-store --gc";
       ngc = "sudo nix-collect-garbage -d";
+      # Reclaim disk: caches, stale /tmp, containers, nix. `dcdeep` also drops
+      # all unused container images + volumes (re-pullable, but large).
+      dclean = "disk-cleanup";
+      dcdeep = "disk-cleanup --deep";
       reboot = "systemctl reboot";
       poweroff = "systemctl poweroff";
       # y = "yazi";
@@ -67,7 +71,7 @@
 
       fuck = "f";
       cu = "claude_usage";
-      pi-update = "cd $HOME/.pi && bun run update";
+      pi-update = "cd $HOME/.pi; and bun run update; and cd -";
 
       where = "curl -s https://ipinfo.io/json | grep -E '\"ip\":|\"country\":|\"city\":'";
 

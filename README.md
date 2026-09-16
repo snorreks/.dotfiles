@@ -106,25 +106,32 @@ app on the NVIDIA GPU:
 prime-run steam
 ```
 
-## GS65 Hardware Controls
+## Hardware Controls
 
-The MSI GS65 Stealth has two pieces of hardware the generic laptop stack does
-not reach, both wired into the dashboard's **System** tab (`SUPER+D`):
+The dashboard's **System** tab (`SUPER+D`) reaches hardware the generic laptop
+stack does not, gated on the device being present rather than the hostname:
 
-- **Cooling** — fan mode (silent / auto / advanced) and Cooler Boost, via the
-  `msi-ec` kernel module (`hosts/gs65/fan-control.nix`).
-- **Keyboard light** — colour and brightness for the SteelSeries per-key RGB
-  controller, via `msi-perkeyrgb` (`hosts/gs65/keyboard-rgb.nix`, packaged in
-  `pkgs/`). The controller has no brightness register, so brightness scales the
-  chosen colour before it is sent; it therefore applies to a steady colour and
-  not to the vendor presets, which carry their own colours.
+- **Cooling** — fan mode (a profile) and Cooler Boost (an override that pins
+  both fans to max), from whichever EC backend is present. On the GS65 those
+  are `msi-ec`'s silent / auto / advanced and `cooler_boost`
+  (`hosts/gs65/fan-control.nix`). On the Legion they are the firmware's
+  `powermode` — quiet / balanced / performance — and `fan_fullspeed`, via
+  `legion-laptop` (`hosts/legion/fan-control.nix`). The Legion's `custom`
+  powermode is deliberately not a mode: it is only where the firmware honours
+  `fan_fullspeed`, so Cooler Boost enters it internally and restores your
+  profile on the way out. Where neither device binds, the card is absent
+  rather than empty.
+- **Keyboard light** — colour and brightness for the GS65's SteelSeries per-key
+  RGB controller, via `msi-perkeyrgb` (`hosts/gs65/keyboard-rgb.nix`, packaged
+  in `pkgs/`). The controller has no brightness register, so brightness scales
+  the chosen colour before it is sent; it therefore applies to a steady colour
+  and not to the vendor presets, which carry their own colours. Absent on the
+  Legion, which has no such controller.
 
-Both cards are gated on the hardware being present, not on the hostname, so
-they are simply absent on the Legion — whose fans follow the platform profile
-the **Power mode** card already sets. Both need one reboot after the rebuild
-that introduces them: `msi-ec` has to load, and the udev rules that grant the
-user access to the EC attributes and `/dev/hidraw*` only apply from boot. Until
-then each card says so instead of silently ignoring clicks.
+Both machines need one reboot after the rebuild that introduces them: the EC
+module has to load, and the udev rules that grant the user access to the EC
+attributes and `/dev/hidraw*` only apply from boot. Until then each card says
+so instead of silently ignoring clicks.
 
 From the shell:
 
@@ -140,9 +147,10 @@ dashboard-kbd preset rainbow-split
 dashboard-kbd off
 ```
 
-If the Cooling card never appears, `msi-ec` declined to bind — check
-`journalctl -b | grep msi-ec` for the EC firmware version it saw, and see the
-header comment in `hosts/gs65/fan-control.nix`.
+If the Cooling card never appears, the EC module declined to bind — check
+`journalctl -b | grep -E 'msi-ec|legion'` for what the driver reported, then see
+the header comment in `hosts/gs65/fan-control.nix` (EC firmware not matched) or
+`hosts/legion/fan-control.nix` (DMI not on the module's allowlist).
 
 ## Known Issues
 

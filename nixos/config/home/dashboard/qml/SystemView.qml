@@ -43,17 +43,30 @@ Item {
         return m + "m";
     }
 
-    // msi-ec's mode names, mapped to something glanceable. Falls back to the
-    // fan glyph for any name a future firmware config might add.
+    // Backend mode names, mapped to something glanceable. The GS65's msi-ec
+    // names are silent/auto/advanced; the Legion's powermode names are
+    // quiet/balanced/performance, which reuse the same moon/flame as the
+    // matching GS65 modes. Falls back to the fan glyph for any name a future
+    // firmware config might add.
     function fanIcon(mode: string): string {
         switch (mode) {
         case "silent":
+        case "quiet":
             return "󰤄";
         case "advanced":
+        case "performance":
             return "󰈸";
         default:
             return "󰈐";
         }
+    }
+
+    // "Performance" is too wide for its third of the Legion's
+    // Quiet/Balanced/Performance track and would run into its neighbour; the
+    // rest only need the default sentence-case. Nothing else is abbreviated,
+    // so the GS65's three names pass through unchanged.
+    function fanLabel(mode: string): string {
+        return mode === "performance" ? "Perf" : mode.charAt(0).toUpperCase() + mode.slice(1);
     }
 
     // Keyboard swatches. Deliberately literal colours rather than Theme
@@ -122,31 +135,38 @@ Item {
         // or the legion-laptop module on the Legion (see
         // hosts/legion/fan-control.nix — the in-tree mainline WMI driver binds
         // this Legion but refuses fan control on this model, so legion-laptop
-        // replaces it for that one purpose). The Legion has no discrete fan
-        // modes, so Sys.fanModes comes back empty there and the Segmented
-        // control below renders nothing; only the boost pill does anything.
-        // Nothing here tests a hostname; see Sys.qml.
+        // replaces it for that one purpose). On the Legion the modes are the
+        // firmware's powermode (quiet/balanced/performance) rather than a
+        // fan_mode attribute; dashboard-fan maps both backends onto the same
+        // modes/mode fields, so this control is identical on both machines.
+        // The Legion's custom powermode is deliberately not a segment — it is
+        // only where the firmware honours the boost pill, and dashboard-fan
+        // enters it there. Nothing here tests a hostname; see Sys.qml.
         Card {
             title: "Cooling"
             visible: Sys.fanAvailable
 
             Segmented {
-                // Built from the driver's own available_fan_modes rather than
-                // a hardcoded triple: which modes exist depends on the
-                // msi_ec_conf that matched this machine's EC firmware, and
-                // this file has no business assuming which one that was.
+                // Built from whatever dashboard-fan reports rather than a
+                // hardcoded triple: on the GS65 these are the msi_ec_conf's
+                // available_fan_modes, on the Legion the powermode names, and
+                // this file has no business assuming which backend it is.
                 model: Sys.fanModes.map(m => ({
                             id: m,
                             icon: view.fanIcon(m),
-                            label: m.charAt(0).toUpperCase() + m.slice(1)
+                            label: view.fanLabel(m)
                         }))
                 current: Sys.fanMode
                 onActivated: id => Sys.setFanMode(id)
             }
 
-            // Cooler boost is not a fourth fan mode — it is an independent
-            // override that pins both fans to maximum on top of whichever
-            // mode is selected, so it is a pill, not a segment.
+            // Cooler boost is not just another mode — it is an independent
+            // override that pins both fans to maximum on top of whichever mode
+            // is selected, so it is a pill, not a segment. On the Legion the
+            // firmware only honours it in custom powermode, so dashboard-fan
+            // enters custom around the write: while the pill is lit no segment
+            // is (custom is not one), and picking a profile or the pill again
+            // restores the mode that was active before the boost.
             PillToggle {
                 icon: "󰜗"
                 label: "Cooler boost"

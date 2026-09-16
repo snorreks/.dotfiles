@@ -36,11 +36,36 @@
 # "Power mode" card (already reading/writing /sys/firmware/acpi/platform_profile
 # — see dashboard's Sys.qml) keeps working unchanged; this module doesn't add
 # a second one.
+#
+# The nixpkgs package pin (2026-05-12) predates this machine: its optimistic
+# allowlist has no DMI 83DE / BIOS N2CN (Legion Pro 7 16IRX9H) entry, so probe
+# bails before fan control is ever reached:
+#
+#   legion legion: is_denied: 0; is_allowed: 0; do_load_by_list: 0; do_load: 0
+#   legion legion: Module not usable ... it is not in allowlist. ... param force.
+#   legion legion: probe with driver legion failed with error -12
+#
+# force=1 is not a workaround: with no model match the probe falls back to
+# optimistic_allowlist[0], whose register map is the wrong one for this EC — the
+# exact class of mistake this repo refuses to make for msi-ec (see
+# gs65/fan-control.nix). Upstream added the 83DE/N2CN -> model_n2cn entry after
+# the pin, so the src is bumped to the v0.0.26 tag; delete the override once
+# nixpkgs' lenovo-legion-module advances past it.
 {
   config,
   pkgs,
   ...
 }: let
+  legion-module = config.boot.kernelPackages.lenovo-legion-module.overrideAttrs (_: {
+    version = "0.0.26";
+    src = pkgs.fetchFromGitHub {
+      owner = "johnfanv2";
+      repo = "LenovoLegionLinux";
+      rev = "e3b2116714b639c852133a44398d03fc64fe9217";
+      hash = "sha256-pXu0ZKUeZumvFic4rTDcXJW7alTUDie6RR2gTqjY4BI=";
+    };
+  });
+
   # Same shape as gs65/fan-control.nix's msi-ec-perms: these are sysfs
   # attributes on a platform device (and its hwmon child), not /dev nodes, so
   # udev's GROUP=/MODE= don't apply — permissions have to be set by hand from
@@ -49,9 +74,20 @@
     dev=/sys/devices/platform/legion
     [ -d "$dev" ] || exit 0
 
-    # fan_fullspeed is the Legion's equivalent of the MSI card's cooler-boost
-    # toggle (forces both fans to max via WMI_METHOD_ID_FAN_SET_FULLSPEED).
-    for attr in fan_fullspeed; do
+    # Two attributes back the dashboard's Cooling card, so both are opened
+    # up to `users`:
+    #
+    #   fan_fullspeed — the Legion's equivalent of the MSI card's cooler-boost
+    #                   toggle. The firmware only honours it in custom
+    #                   powermode (see dashboard-fan.sh), which is why the
+    #                   card enters custom around it.
+    #   powermode     — the firmware's smartFanMode: quiet/balanced/
+    #                   performance/custom. This is the Legion's fan-mode
+    #                   selector (what the GS65 backs with fan_mode). The
+    #                   driver registers a platform_profile on top of it, so
+    #                   this is the same value the Power mode card drives
+    #                   through PPD; both write the same register.
+    for attr in fan_fullspeed powermode; do
         [ -e "$dev/$attr" ] || continue
         ${pkgs.coreutils}/bin/chgrp users "$dev/$attr"
         ${pkgs.coreutils}/bin/chmod g+w "$dev/$attr"
@@ -65,7 +101,7 @@
   '';
 in {
   boot.blacklistedKernelModules = ["lenovo_wmi_gamezone" "lenovo_wmi_other"];
-  boot.extraModulePackages = [config.boot.kernelPackages.lenovo-legion-module];
+  boot.extraModulePackages = [legion-module];
   boot.kernelModules = ["legion_laptop"];
 
   services.udev.extraRules = ''

@@ -1,6 +1,8 @@
 # nixos/config/home/idle.nix
 #
-# Idle chain: dim the screen, lock behind it. That's it — no auto-suspend.
+# Idle chain: dim the screen, lock behind it, and put the power profile the
+# user chose back when they return (see the power-profile section at the
+# bottom). That's it — no auto-suspend.
 #
 # ── Why there is no auto-suspend ────────────────────────────────────────────
 # Auto-suspend (sys-daemon's `idle-guard`, still present and working — see
@@ -194,6 +196,12 @@
   # that fired, so it has to be idempotent. Nothing to cancel or kill any more:
   # idle-dim never outlives its own attempt.
   resumeFromDim = pkgs.writeShellScriptBin "idle-resume" ''
+    # Deliberately ahead of the brightness marker check below: a machine with
+    # no backlight to dim (external outputs only) still has a power profile
+    # worth putting back, and this is a no-op unless something moved the
+    # profile while the seat sat idle.
+    ${restorePowerProfile}/bin/power-profile-restore
+
     marker="${dimmedMarker}"
     [ -e "$marker" ] || exit 0
     saved=$(cat "$marker" 2>/dev/null || echo "")
@@ -207,6 +215,73 @@
     else
       ${pkgs.brightnessctl}/bin/brightnessctl restore
     fi
+  '';
+
+  # ── Power profile: put back the profile the user actually chose ─────────
+  # Nothing in the idle chain proper touches the power profile, and nothing in
+  # it should: the profile PPD is *running* can be lost without anybody asking,
+  # and in both known ways PPD's own persisted choice survives intact in
+  # /var/lib/power-profiles-daemon/state.ini — the file PPD rewrites on every
+  # profile change, which is where waybar's pill, the dashboard's Power mode
+  # card and gamemode's scripts all end up persisted, with no bookkeeping on
+  # this side. That file is therefore the record of what the user last picked.
+  #
+  # Why the running value can disagree with it:
+  #
+  #   1. A hold release. PPD's Set() short-circuits when the value already
+  #      matches, so its `selected_profile` — "the profile the user activated
+  #      manually", which every hold release reverts to — keeps its hard-coded
+  #      balanced initial value until the daemon has seen a real transition.
+  #      Any program that takes and releases a profile hold
+  #      (`powerprofilesctl launch`, and whatever else grows that API) then
+  #      "restores" balanced over the user's choice. Nothing saves that, so the
+  #      state file still holds the truth.
+  #   2. Daemon start. PPD applies the persisted profile only when the driver
+  #      names recorded next to it still match the drivers it just probed (see
+  #      apply_configuration() upstream). Change kernel modules — which this
+  #      machine does often, since several it depends on are pinned per host,
+  #      see hosts/*/fan-control.nix — and the names stop matching, the profile
+  #      is silently dropped, and PPD comes up on balanced with the user's real
+  #      choice still sitting there.
+  #
+  # Either way the recovery is the same one: if the running profile is not the
+  # persisted one, and no program is deliberately holding a profile right now,
+  # put it back. On a healthy system this reads two files, sees them agree, and
+  # exits without a single D-Bus write.
+  pkctl = "${pkgs.power-profiles-daemon}/bin/powerprofilesctl";
+
+  restorePowerProfile = pkgs.writeShellScriptBin "power-profile-restore" ''
+    state=/var/lib/power-profiles-daemon/state.ini
+    [ -r "$state" ] || exit 0
+
+    want=$(${pkgs.gnugrep}/bin/grep -m1 '^Profile=' "$state" | ${pkgs.coreutils}/bin/cut -d= -f2-)
+    case "$want" in
+      performance | balanced | power-saver) ;;
+      *) exit 0 ;;
+    esac
+
+    # PPD can still be bus-activating (seconds, on this machine — see Sys.qml).
+    # Three short tries cover that without holding an unlock up for more than a
+    # second, and a daemon that never answers is not an error here.
+    cur=""
+    for _ in 1 2 3; do
+      cur=$(${pkctl} get 2>/dev/null) && break
+      cur=""
+      ${pkgs.coreutils}/bin/sleep 0.3
+    done
+    [ -n "$cur" ] || exit 0
+    [ "$cur" != "$want" ] || exit 0
+
+    # A hold is a program asking for a profile on purpose (fwupd mid-update,
+    # `powerprofilesctl launch`, a game). Set() releases every hold it finds, so
+    # restoring must not fire on top of one.
+    if ${pkctl} list-holds | ${pkgs.gnugrep}/bin/grep -q 'Profile:'; then
+      echo "power-profile-restore: a program is holding '$cur'; leaving it alone"
+      exit 0
+    fi
+
+    echo "power-profile-restore: PPD is on '$cur' but the profile last chosen was '$want' — switching back"
+    ${pkctl} set "$want" || echo "power-profile-restore: could not switch back to '$want'" >&2
   '';
 in {
   services.swayidle = {
@@ -227,4 +302,23 @@ in {
   systemd.user.services.swayidle.Service.Environment = [
     "PATH=${config.home.profileDirectory}/bin:/run/current-system/sw/bin"
   ];
+
+  # The other half of the same recovery, at the moment the user *arrives*
+  # instead of returns. Case 2 above happens at daemon start, i.e. at boot with
+  # nobody logged in to run an idle-resume, so without this a fresh boot would
+  # sit on balanced until the first lock/unlock cycle. A no-op on a healthy
+  # system, and it runs as the user in an active session, which is the same
+  # polkit path waybar's own profile switches take.
+  systemd.user.services.power-profile-restore = {
+    Unit = {
+      Description = "Restore the power profile PPD has persisted";
+      After = ["graphical-session-pre.target"];
+      PartOf = ["graphical-session.target"];
+    };
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${restorePowerProfile}/bin/power-profile-restore";
+    };
+    Install.WantedBy = ["graphical-session.target"];
+  };
 }

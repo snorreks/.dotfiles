@@ -23,13 +23,23 @@
     ${ppctl} set performance || echo "gamemode: failed to set performance profile" >&2
   '';
 
+  # Same PATH trap as the start script above, in the one place where it does
+  # real damage: `cat` and `rm` here were bare names too, so on this machine
+  # they exited 127 (gamemoded's PATH is one pkexec wrapper), the `|| true`
+  # swallowed it, `previous` came back empty, and the case below took its `*`
+  # branch. That made every gamemode end — a game exiting, and also gamemoded
+  # itself being stopped, which happens at every logout and every reboot —
+  # overwrite the user's chosen profile with "balanced" *and* persist it via
+  # PPD, so the next login came up balanced with no trace of who asked for it.
+  # Reading the stashed profile is the entire job of this script, so both
+  # binaries are now absolute.
   gamemode-end-script = pkgs.writeShellScriptBin "gamemode-end-system" ''
-    previous=$(cat "${ppStateFile}" 2>/dev/null || true)
+    previous=$(${pkgs.coreutils}/bin/cat "${ppStateFile}" 2>/dev/null || true)
     case "$previous" in
       performance | balanced | power-saver) ;;
       *) previous=balanced ;;
     esac
-    rm -f "${ppStateFile}"
+    ${pkgs.coreutils}/bin/rm -f "${ppStateFile}"
     ${ppctl} set "$previous" || echo "gamemode: failed to restore $previous profile" >&2
   '';
 
