@@ -8,6 +8,20 @@
   nixpkgs = {
     overlays = [
       inputs.nur.overlays.default # NUR overlay
+
+      # TEMP: sops-nix master still builds sops-install-secrets with the
+      # versioned `buildGo125Module` (pkgs/sops-install-secrets/default.nix),
+      # and sops.package is evaluated against *our* nixpkgs via
+      # `pkgs.callPackage ../.. {}`. nixpkgs turned buildGo125Module into a
+      # throw when Go 1.25 went EOL, so `sops.package` now fails to evaluate:
+      #
+      #   error: Go 1.25 is end-of-life, and 'buildGo125Module' has been
+      #   removed. Please use a newer builder version.
+      #
+      # Upstream fix is PR Mic92/sops-nix#984 (buildGo125Module ->
+      # buildGoModule). Re-point the removed alias at the default builder until
+      # it merges, then delete this overlay and run `nix flake update sops-nix`.
+      (final: prev: {buildGo125Module = final.buildGoModule;})
     ];
     config = {
       allowUnfree = true; # Allow unfree packages

@@ -34,7 +34,7 @@ sudo bootctl list | grep "Generation NNN"  # No entry for the new generation wit
 The bootloader entries need to be regenerated to point to the new kernel:
 
 ```fish
-sudo nixos-rebuild boot --flake ~/.dotfiles/nixos#sonny-laptop
+sudo nixos-rebuild boot --flake ~/.dotfiles/nixos#legion
 ```
 
 Verify the new entry was created:
