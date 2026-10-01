@@ -60,9 +60,10 @@
 # case that IS automated (headless contract runs, via a live-heartbeat check).
 #
 # ── Ordering, and why there is no PartOf ────────────────────────────────────
-# After/WantedBy graphical-session.target so the unit starts once mango's
-# autostart has pushed WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS and friends
-# into the user manager environment (home-manager's autostart header runs
+# On non-mobile hosts, After/WantedBy graphical-session.target starts the unit
+# once mango's autostart has pushed WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS
+# and friends into the user manager environment (home-manager's autostart
+# header runs
 # `dbus-update-activation-environment --systemd --all`). Panes inherit the
 # server's environment, so starting earlier would hand every agent a session
 # env with no Wayland display and break wl-copy, xdg-open and `[ui.toast]
@@ -80,7 +81,7 @@
   ...
 }: let
   # Start at boot under the lingering user manager rather than at graphical
-  # login. Only changes WantedBy below — see the header note.
+  # login. Changes WantedBy and graphical-session ordering — see the header note.
   mobile = opts.mobileAgents.enable or false;
 
   herdr = inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default;
@@ -110,7 +111,7 @@ in {
       # lingering there may be no graphical session at all, so waiting on it
       # would mean never starting. Everything else about the unit is unchanged.
       After =
-        lib.optionals mobile ["graphical-session.target"]
+        lib.optionals (!mobile) ["graphical-session.target"]
         ++ ["sops-import-environment.service"];
       Wants = ["sops-import-environment.service"];
     };
@@ -164,8 +165,8 @@ in {
       WorkingDirectory = "%h";
     };
 
-    # 🔴 Mobile hosts start at boot instead of at graphical login. This is the
-    # ONLY difference from the desktop arrangement — see the header.
+    # 🔴 Mobile hosts start at boot instead of at graphical login. This is
+    # paired with omitting graphical-session ordering above — see the header.
     Install.WantedBy =
       if mobile
       then ["default.target"]

@@ -34,7 +34,7 @@ Three moving parts, three files, one flag.
 | --- | --- |
 | `nixos/config/system/mobile-agents.nix` | sshd `:2222` + `Match LocalPort` hardening, phone key, `linger`, bounded mosh |
 | `nixos/config/home/moshi-hook.nix` | `moshi-hook` package on PATH, `moshi-hook.service`, `moshi-agent-hooks` installer |
-| `nixos/config/home/herdr.nix` | **one line changed**: `WantedBy` becomes `default.target` when mobile is on |
+| `nixos/config/home/herdr.nix` | `WantedBy` becomes `default.target` and `After` omits `graphical-session.target` when mobile is on |
 
 Supporting changes: `nixos/pkgs/moshi-hook.nix` (pinned package + the bounded
 `mosh-server`), `nixos/options.nix` (the `mobileAgents` block),
@@ -275,9 +275,6 @@ Add these grants in the Tailscale admin console → Access Controls:
       "src":    ["tag:phone"],
       "dst":    ["tag:legion"],
       "ip":     ["tcp:2222", "udp:60000-60010"],
-      "app": {
-        "tailscale.com/cap": ["ssh"],
-      },
     },
   ],
 }
@@ -288,8 +285,11 @@ Two separate requirements, often confused:
 - **`tcp:2222`** — the SSH (and mosh bootstrap) connection.
 - **`udp:60000-60010`** — the mosh session itself. Missing this gives you a
   successful SSH that then fails to become a mosh session.
-- **port 22 / `tailscale.com/cap: ["ssh"]`** — the existing recovery path. Keep
-  whatever rule already covers it; this setup does not change it.
+
+The existing **Tailscale SSH recovery path on port 22** is separate: keep its
+network access rule and its top-level `"ssh"` rule. Tailscale SSH authorization
+is configured in that [top-level section](https://tailscale.com/kb/1337/policy-syntax#ssh),
+not as an `"app"` capability in the network grant above.
 
 Replace the tags with whatever identifies your devices today — literal IPs or
 existing groups are fine. Confirm with:
@@ -446,8 +446,21 @@ from `moshi-hook`, nothing from herdr beyond the terminal itself.
 
 ### Install Termux from the official source
 
-The F-Droid and Play Store builds are **stale**. Use the project's own
-releases:
+Choose a source using the project's [installation guidance](https://github.com/termux/termux-app#installation):
+
+- **F-Droid** provides stable builds; updates can arrive later than GitHub
+  because F-Droid builds and publishes them separately.
+- **GitHub Releases** provides upstream APKs directly, including builds for
+  specific architectures. Download only from the official repository below.
+- **Google Play** provides a separate experimental branch for Android 11+,
+  adapted to Play Store requirements, with functionality differences and bugs
+  compared with the stable builds. Prefer F-Droid or GitHub for this fallback.
+
+**Do not mix APKs from different sources:** Termux and all its plugins must come
+from the same source because their signing keys differ. Before switching,
+back up your data and uninstall Termux and all its plugins.
+
+For GitHub Releases:
 
 ```bash
 # In a browser on the phone, from the official GitHub repo:
@@ -663,8 +676,9 @@ intentionally **not** exported (OAuth is used instead); that exclusion is
 honoured by both the secrets template and the session variables.
 
 Do not print the environment to inspect it — use
-`systemctl --user show-environment | grep -c` or test for presence, and never
-echo a value.
+`systemctl --user show-environment | grep -c '^OPENAI_API_KEY='` to count
+matching entries (1 means present, 0 means absent) without printing the value.
+Replace `OPENAI_API_KEY` with the variable name you need to check.
 
 ### Duplicate notifications / duplicate hooks
 
@@ -732,8 +746,9 @@ agents — §12 says exactly what was and was not executed.
       verified live (`MOSH CONNECT 60000`).
 - [x] Exactly **one** herdr in the closure; `MOSHI_HERDR_PATH` is the same
       stable profile symlink herdr's own unit uses.
-- [x] herdr unit diff is confined to `WantedBy`; `ExecStart`, `ExecCondition`,
-      `KillMode=mixed`, `Restart=on-failure`, no `PartOf` all unchanged.
+- [x] herdr unit diff is confined to `WantedBy` and graphical-session `After`
+      ordering; `ExecStart`, `ExecCondition`, `KillMode=mixed`,
+      `Restart=on-failure`, no `PartOf` all unchanged.
 - [x] Warning emitted while `phoneAuthorizedKey` is null.
 
 ### Device-level — manual, after a real activation
@@ -744,8 +759,15 @@ agents — §12 says exactly what was and was not executed.
 - [ ] **Recovery on 22 still works.** `ssh -p 22 sonny@<ts-ip>` (Tailscale SSH)
       and LAN SSH both still succeed. Confirm `RunSSH: true`.
 - [ ] **New ports are unreachable from ordinary LAN/WAN.** From another machine
-      on the LAN: `nc -vz <legion-lan-ip> 2222` and the UDP range both fail.
-      Over the tailnet they succeed.
+      on the LAN, probe `nc -vz -w 5 <legion-lan-ip> 2222` and
+      `sudo nmap -sU -p 60000-60010 <legion-lan-ip>`. From a non-tailnet WAN
+      machine, probe `nc -vz -w 5 <legion-public-ip> 2222` and
+      `sudo nmap -sU -p 60000-60010 <legion-public-ip>` against each public
+      address (add `-6` for IPv6). UDP `open|filtered` is inconclusive: confirm
+      drops with firewall counters or packet capture while probing with a live
+      Mosh session. Leave this item unchecked until TCP 2222 and every UDP port
+      in 60000–60010 are confirmed unreachable from both vantage points.
+      Over the tailnet, SSH and Mosh must still succeed.
 - [ ] **The configured Mosh UDP range is actually used.** During a mosh session:
       `ss -lunp | grep mosh-server` shows a port within `60000-60010`.
 - [ ] **Closing and reopening Moshi preserves the same agent process.** Note
