@@ -12,7 +12,8 @@
 // notification daemon and therefore runs for the whole session.
 //
 //   power   : Quickshell.Services.UPower → power-profiles-daemon. Live D-Bus
-//             property, read and write. No process.
+//             property, read and write. No process. This is the CPU profile
+//             (intel_pstate / EPP), not the fan mode.
 //   audio   : Quickshell.Services.Pipewire. Live binding. No process.
 //   light   : `sys-daemon waybar light`  — brightness AND the eye-protection
 //   vpn     : `sys-daemon waybar vpn`      state in one stream. Both are read
@@ -51,9 +52,13 @@ Singleton {
     property bool statsActive: false
     property bool togglesActive: false
 
-    // ── Power profile ────────────────────────────────────────────────────
+    // ── CPU profile ──────────────────────────────────────────────────────
     // Quickshell.Services.UPower talks to power-profiles-daemon over D-Bus
     // directly: a live property, readable at startup and writable in place.
+    // This is the CPU-side policy (intel_pstate / EPP). It is deliberately
+    // independent of the Cooling card below; on the Legion PPD's
+    // platform_profile driver is blocked so the two cannot move each other
+    // (hosts/legion/power.nix).
     //
     // This used to read `sys-daemon waybar power` instead. That was a
     // permanently-running subprocess whose first line only arrived once PPD
@@ -404,6 +409,11 @@ Singleton {
     // powermode is hidden inside dashboard-fan's boost path, because the
     // firmware only honours fan_fullspeed there, so `fanModes` stays the three
     // profiles users actually pick on both machines.
+    //
+    // This card is COOLING only. It never reads or writes PPD, and PPD never
+    // writes the EC on the Legion — that separation is the whole point of
+    // hosts/legion/power.nix. A missing backend hides this card without
+    // affecting the CPU-profile card above it.
     //
     // Rides the same 3s tick as the stats above rather than owning a timer:
     // both are sysfs reads for the System tab, and one tick that spawns two

@@ -217,14 +217,19 @@
     fi
   '';
 
-  # ── Power profile: put back the profile the user actually chose ─────────
-  # Nothing in the idle chain proper touches the power profile, and nothing in
+  # ── CPU profile: put back the profile the user actually chose ───────────
+  # Nothing in the idle chain proper touches the CPU profile, and nothing in
   # it should: the profile PPD is *running* can be lost without anybody asking,
   # and in both known ways PPD's own persisted choice survives intact in
   # /var/lib/power-profiles-daemon/state.ini — the file PPD rewrites on every
-  # profile change, which is where waybar's pill, the dashboard's Power mode
+  # profile change, which is where waybar's pill, the dashboard's CPU profile
   # card and gamemode's scripts all end up persisted, with no bookkeeping on
   # this side. That file is therefore the record of what the user last picked.
+  #
+  # This restores the CPU profile only. It never touches the Legion cooling
+  # mode (powermode) — that is dashboard-fan's job, and on the Legion PPD's
+  # platform_profile driver is blocked so the two cannot move each other. See
+  # hosts/legion/power.nix.
   #
   # Why the running value can disagree with it:
   #

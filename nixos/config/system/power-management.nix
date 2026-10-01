@@ -19,18 +19,26 @@
   };
 
   # --- Primary Power Management Tool: power-profiles-daemon ---
-  # Modern, standards-based power profile management for laptops.
-  # Natively drives platform_profile (performance/balanced/power-saver) and provides polkit
-  # rules so your user can switch profiles without sudo. powerprofilesctl integrates seamlessly
-  # with gamemode for automatic performance/balanced switching during gameplay.
+  # Modern, standards-based power profile management for laptops. Provides
+  # polkit rules so the user can switch profiles without sudo, and
+  # powerprofilesctl integrates with gamemode for automatic
+  # performance/balanced switching during gameplay.
+  #
+  # PPD is the source of truth for CPU policy (intel_pstate / EPP). It is NOT
+  # the source of truth for cooling: on the Legion its platform_profile driver
+  # is blocked (hosts/legion/power.nix) because that driver and the Legion's
+  # powermode attribute are two doors onto the same EC register. See that file
+  # for the ownership split; the GS65 is unaffected.
   services.power-profiles-daemon.enable = true;
 
   # Disable conflicting power management daemons.
   services.system76-scheduler.enable = false;
   powerManagement.powertop.enable = false;
 
-  # Enable the thermal daemon for Intel CPUs to prevent overheating.
-  # It works alongside power-profiles-daemon and does not conflict.
+  # thermald is enabled by default here, but the Legion disables it
+  # (hosts/legion/power.nix): its adaptive policy cannot create zones on that
+  # model (missing PSVT sensors) and it falls back to a generic config that
+  # matches nothing. The GS65 keeps it.
   services.thermald.enable = true;
 
   # Audio fix: prevent HDA power-save from breaking sound on suspend/resume.

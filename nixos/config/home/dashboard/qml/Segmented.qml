@@ -3,7 +3,7 @@
 // An exclusive N-way selector: one track, one sliding indicator, exactly one
 // active segment — the shape a mutually exclusive value actually has.
 //
-// This exists because power mode used to be three independent `type = "toggle"`
+// This exists because the CPU profile used to be three independent `type = "toggle"`
 // buttons in swaync's buttons-grid (swaync.nix, now deleted). A checkbox grid
 // has no radio semantics, so it rendered three switches for one value and two
 // of them were always showing the wrong state.

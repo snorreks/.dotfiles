@@ -111,6 +111,11 @@ prime-run steam
 The dashboard's **System** tab (`SUPER+D`) reaches hardware the generic laptop
 stack does not, gated on the device being present rather than the hostname:
 
+- **CPU profile** — power-profiles-daemon's ActiveProfile: Performance /
+  Balanced / Power Saver, applied as `intel_pstate` EPP. This is the CPU-side
+  policy only. On the Legion PPD is started with
+  `--block-driver=platform_profile` (`hosts/legion/power.nix`) so it cannot
+  move the EC fan mode; on the GS65 PPD keeps its platform_profile driver.
 - **Cooling** — fan mode (a profile) and Cooler Boost (an override that pins
   both fans to max), from whichever EC backend is present. On the GS65 those
   are `msi-ec`'s silent / auto / advanced and `cooler_boost`
@@ -119,8 +124,15 @@ stack does not, gated on the device being present rather than the hostname:
   `legion-laptop` (`hosts/legion/fan-control.nix`). The Legion's `custom`
   powermode is deliberately not a mode: it is only where the firmware honours
   `fan_fullspeed`, so Cooler Boost enters it internally and restores your
-  profile on the way out. Where neither device binds, the card is absent
+  cooling mode on the way out. Where neither device binds, the card is absent
   rather than empty.
+
+CPU profile and Cooling are independent controls. On the Legion they used to be
+the same EC register — `platform_profile` and `powermode` are two doors onto
+the firmware's smart-fan mode — so "CPU Performance + quiet fans" was
+impossible. Blocking PPD's platform_profile driver fixes that at the ownership
+level: PPD owns EPP, `dashboard-fan` owns `powermode`, and neither writes the
+other's register.
 - **Keyboard light** — colour and brightness for the GS65's SteelSeries per-key
   RGB controller, via `msi-perkeyrgb` (`hosts/gs65/keyboard-rgb.nix`, packaged
   in `pkgs/`). The controller has no brightness register, so brightness scales

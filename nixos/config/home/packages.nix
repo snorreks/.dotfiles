@@ -121,7 +121,10 @@
     # System & Productivity
     lxmenu-data # Application menu entries for pcmanfm
     file-roller # Archive extraction GUI
-    libreoffice-fresh
+    # `libreoffice-fresh` was renamed upstream (the versioning scheme changed);
+    # `libreoffice` is the hiPrio alias of `libreoffice-stable`, i.e. the same
+    # package without the deprecation warning.
+    libreoffice
     hunspell # Spell checker backend for LibreOffice
     hunspellDicts.en_US
     hunspellDicts.nb_NO
@@ -146,7 +149,7 @@
     imagemagick # Command-line image manipulation suite
     gimp # Powerful image editor
     imv # A simple and scriptable image viewer for Wayland
-    inputs.curd.packages.${pkgs.stdenv.hostPlatform.system}.default # Command-line anime streaming
+    # inputs.curd.packages.${pkgs.stdenv.hostPlatform.system}.default # Command-line anime streaming
   ];
 
   wayland-utilities = with pkgs; [

@@ -32,40 +32,53 @@
 # none of their aliases overlap legion-laptop's, so Fn-key hotkeys etc. still
 # work through them.
 #
-# legion-laptop registers its own platform_profile too, so the existing
-# "Power mode" card (already reading/writing /sys/firmware/acpi/platform_profile
-# — see dashboard's Sys.qml) keeps working unchanged; this module doesn't add
-# a second one.
+# ── powermode is the COOLING control, not the CPU profile ───────────────────
+# legion-laptop registers a platform_profile, and on model_n2cn that handler
+# and the powermode sysfs attribute are two doors onto the SAME EC register:
 #
-# The nixpkgs package pin (2026-05-12) predates this machine: its optimistic
-# allowlist has no DMI 83DE / BIOS N2CN (Legion Pro 7 16IRX9H) entry, so probe
-# bails before fan control is ever reached:
+#   legion_platform_profile_set() -> write_powermode() -> wmi_write_powermode()
+#   powermode_store()             -> write_powermode() -> wmi_write_powermode()
+#                                                        -> SETSMARTFANMODE
+#
+# Verified live: `powerprofilesctl set performance` moved powermode 1 -> 3 and
+# thermalmode 1 -> 3; `set balanced` moved them to 2. So as long as PPD owns
+# platform_profile, the CPU profile and the fan mode are one knob and
+# "CPU performance + quiet fans" is impossible.
+#
+# hosts/legion/power.nix breaks that by starting PPD with
+# --block-driver=platform_profile, so PPD only drives intel_pstate/EPP and the
+# powermode writes below are the only thing that moves the EC cooling mode.
+# Read that file before changing anything here.
+#
+# ── Why there is no local src pin any more ──────────────────────────────────
+# This module used to override the nixpkgs package to the v0.0.26 tag, because
+# the nixpkgs pin at the time had no DMI 83DE / BIOS N2CN (Legion Pro 7
+# 16IRX9H) entry and the probe bailed before fan control was reached:
 #
 #   legion legion: is_denied: 0; is_allowed: 0; do_load_by_list: 0; do_load: 0
 #   legion legion: Module not usable ... it is not in allowlist. ... param force.
 #   legion legion: probe with driver legion failed with error -12
 #
-# force=1 is not a workaround: with no model match the probe falls back to
-# optimistic_allowlist[0], whose register map is the wrong one for this EC — the
-# exact class of mistake this repo refuses to make for msi-ec (see
-# gs65/fan-control.nix). Upstream added the 83DE/N2CN -> model_n2cn entry after
-# the pin, so the src is bumped to the v0.0.26 tag; delete the override once
-# nixpkgs' lenovo-legion-module advances past it.
+# nixpkgs has since caught up: its lenovo-legion-module is at rev e3b21167
+# (v0.0.26, 2026-09-11), the same revision the override pinned, and its model
+# table contains the 83DE / N2CN -> model_n2cn entry this machine needs.
+# Verified live on the running module:
+#
+#   legion legion: is_denied: 0; is_allowed: 1; do_load_by_list: 1; do_load: 1
+#   legion legion: Using configuration for system: N2CN
+#   legion legion: Read embedded controller ID 0x5507
+#
+# so the override is gone. Do not reintroduce a pin without checking
+# `nix eval .#nixosConfigurations.legion.config.boot.kernelPackages.lenovo-legion-module.version`
+# first, and never use force=1 to bypass model matching — with no model match
+# the probe falls back to optimistic_allowlist[0], whose register map is the
+# wrong one for this EC, the exact class of mistake this repo refuses to make
+# for msi-ec (see gs65/fan-control.nix).
 {
   config,
   pkgs,
   ...
 }: let
-  legion-module = config.boot.kernelPackages.lenovo-legion-module.overrideAttrs (_: {
-    version = "0.0.26";
-    src = pkgs.fetchFromGitHub {
-      owner = "johnfanv2";
-      repo = "LenovoLegionLinux";
-      rev = "e3b2116714b639c852133a44398d03fc64fe9217";
-      hash = "sha256-pXu0ZKUeZumvFic4rTDcXJW7alTUDie6RR2gTqjY4BI=";
-    };
-  });
-
   # Same shape as gs65/fan-control.nix's msi-ec-perms: these are sysfs
   # attributes on a platform device (and its hwmon child), not /dev nodes, so
   # udev's GROUP=/MODE= don't apply — permissions have to be set by hand from
@@ -82,11 +95,11 @@
     #                   powermode (see dashboard-fan.sh), which is why the
     #                   card enters custom around it.
     #   powermode     — the firmware's smartFanMode: quiet/balanced/
-    #                   performance/custom. This is the Legion's fan-mode
-    #                   selector (what the GS65 backs with fan_mode). The
-    #                   driver registers a platform_profile on top of it, so
-    #                   this is the same value the Power mode card drives
-    #                   through PPD; both write the same register.
+    #                   performance/custom. This is the Legion's COOLING
+    #                   selector (what the GS65 backs with fan_mode). It is
+    #                   NOT the CPU profile: PPD is started with
+    #                   --block-driver=platform_profile on this host (see
+    #                   power.nix), so nothing but dashboard-fan writes it.
     for attr in fan_fullspeed powermode; do
         [ -e "$dev/$attr" ] || continue
         ${pkgs.coreutils}/bin/chgrp users "$dev/$attr"
@@ -101,7 +114,7 @@
   '';
 in {
   boot.blacklistedKernelModules = ["lenovo_wmi_gamezone" "lenovo_wmi_other"];
-  boot.extraModulePackages = [legion-module];
+  boot.extraModulePackages = [config.boot.kernelPackages.lenovo-legion-module];
   boot.kernelModules = ["legion_laptop"];
 
   services.udev.extraRules = ''

@@ -87,6 +87,11 @@
     nm-applet.enable = true;
     nix-ld.enable = true;
     fuse.userAllowOther = true;
+
+    # Solaar's GUI, i.e. the tray/launcher entry that used to be
+    # `hardware.logitech.wireless.enableGraphical` before nixos renamed it.
+    # The daemon itself is enabled via hardware.logitech.wireless.enable below.
+    solaar.enable = true;
   };
 
   # nm-applet crashes with SIGSEGV inside the unmaintained libdbusmenu-glib
@@ -158,10 +163,7 @@
     };
 
     enableRedistributableFirmware = true;
-    logitech.wireless = {
-      enable = true;
-      enableGraphical = true;
-    };
+    logitech.wireless.enable = true;
   };
 
   # ratbagd (libratbag) is deliberately OFF: nothing here uses it — piper isn't

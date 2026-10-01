@@ -2,7 +2,7 @@
 //
 // Glanceable + immediately actionable: what's the weather, what's on today,
 // what's playing, and the handful of switches worth reaching for. Everything
-// heavier (utilisation, battery detail, power mode) lives in SystemView so
+// heavier (utilisation, battery detail, CPU profile) lives in SystemView so
 // this stays scannable.
 import QtQuick
 import QtQuick.Layouts

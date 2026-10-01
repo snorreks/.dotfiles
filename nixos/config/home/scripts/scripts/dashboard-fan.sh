@@ -13,12 +13,22 @@
 #             "modes"/"mode" fields the GS65's fan_mode uses. "boost" is
 #             fan_fullspeed, but the firmware only honours it while powermode
 #             is custom: outside custom the WMI write stores the flag, reads
-#             back 1, and the fan controller ignores it (the driver's own
-#             fanfullspeed_requires_custom_powermode documents the same thing
-#             for the LOQ 83SC). So the Legion boost path flips to custom
-#             first and restores the previous mode on the way out, and custom
-#             stays out of `modes`: it is an implementation detail of boost,
-#             not a profile the card should offer next to quiet/balanced/perf.
+#             back 1, and the fan controller ignores it. Measured on this
+#             machine: powermode=3 with fan_fullspeed=1 held ~2100 RPM, while
+#             powermode=255 with fan_fullspeed=1 held ~6000 RPM. So the Legion
+#             boost path flips to custom first and restores the previous mode
+#             on the way out, and custom stays out of `modes`: it is an
+#             implementation detail of boost, not a profile the card should
+#             offer next to quiet/balanced/perf.
+#
+# ── Cooling is not the CPU profile ──────────────────────────────────────────
+# On the Legion, powermode is the COOLING control. It used to be the same knob
+# as the CPU profile, because PPD's platform_profile driver and this attribute
+# are the same EC register; hosts/legion/power.nix now starts PPD with
+# --block-driver=platform_profile, so PPD only drives intel_pstate/EPP and this
+# script is the only writer of powermode. Nothing here reads or writes PPD, and
+# nothing here should: the saved boost state is the previous COOLING mode, not
+# the CPU profile.
 #
 # Everything here is sysfs, so a status read is a handful of file reads and no
 # subprocess chain; it rides the same 3s tick as dashboard-stats, and only
@@ -35,6 +45,12 @@ set -eu
 EC=/sys/devices/platform/msi-ec
 LEGION=/sys/devices/platform/legion
 
+# Where the Legion boost path stashes the cooling mode it is leaving. Next to
+# the session (gamemode.nix uses the same XDG_RUNTIME_DIR-or-/tmp trick); only
+# advisory, and a missing/garbage file falls back to performance rather than
+# blocking the write.
+legionState=${XDG_RUNTIME_DIR:-/tmp}/dashboard-fan-legion-powermode
+
 # json_list "auto\nsilent" -> ["auto","silent"]
 json_list() {
     printf '['
@@ -45,6 +61,28 @@ json_list() {
         sep=','
     done
     printf ']'
+}
+
+# write_attr <path> <value>
+#
+# Writes value and reads it back. Returns non-zero (with a message on stderr)
+# when the attribute did not take, so callers can report a real failure instead
+# of pretending the requested state was applied. The Legion driver's
+# powermode_store sleeps 500ms before returning, so the readback is not racing
+# the EC.
+write_attr() {
+    _path=$1
+    _want=$2
+    if ! printf '%s' "$_want" >"$_path" 2>/dev/null; then
+        echo "dashboard-fan: write to $_path failed" >&2
+        return 1
+    fi
+    _got=$(cat "$_path" 2>/dev/null || echo "")
+    if [ "$_got" != "$_want" ]; then
+        echo "dashboard-fan: $_path did not take '$_want' (reads back '$_got')" >&2
+        return 1
+    fi
+    return 0
 }
 
 status() {
@@ -107,9 +145,7 @@ mode)
         # The Legion's names are ours, not the driver's: powermode is an int
         # enum (the driver has no name table for it). `custom` is still
         # accepted here for the shell (and so `status`'s mode round-trips) even
-        # though the card doesn't offer it; picking any other mode drops a
-        # sticky boost, because the firmware would ignore it outside custom and
-        # the lit pill would be lying.
+        # though the card doesn't offer it.
         case "${2:?usage: dashboard-fan mode <name>}" in
         quiet) v=1 ;;
         balanced) v=2 ;;
@@ -120,8 +156,17 @@ mode)
             exit 1
             ;;
         esac
-        [ "$v" != 255 ] && printf '0' >"$LEGION/fan_fullspeed" 2>/dev/null || true
-        printf '%s' "$v" >"$LEGION/powermode"
+
+        # powermode first: it is the actual cooling mode. Only then drop a
+        # sticky boost, so a failed mode write cannot leave the EC in custom
+        # with the boost flag already cleared.
+        write_attr "$LEGION/powermode" "$v" || exit 1
+        if [ "$v" != 255 ]; then
+            # Picking a real profile leaves custom, where the firmware ignores
+            # fan_fullspeed; clear it so the boost pill cannot lie.
+            write_attr "$LEGION/fan_fullspeed" 0 || exit 1
+            rm -f "$legionState"
+        fi
         exit 0
     fi
 
@@ -157,28 +202,44 @@ boost)
             ;;
         esac
 
-        # fan_fullspeed is only honoured in custom powermode, so boosting
-        # always enters custom. Stash where the user was so un-boosting puts
-        # them back instead of assuming performance. The state lives next to
-        # the session (gamemode.nix uses the same XDG_RUNTIME_DIR-or-/tmp
-        # trick) and is only advisory — a missing/garbage file falls back to
-        # performance rather than blocking the write.
-        state=${XDG_RUNTIME_DIR:-/tmp}/dashboard-fan-legion-powermode
-
         if [ "$v" = "1" ]; then
-            cat "$LEGION/powermode" >"$state" 2>/dev/null || true
-            printf '255' >"$LEGION/powermode"
-            printf '1' >"$LEGION/fan_fullspeed"
-        else
-            printf '0' >"$LEGION/fan_fullspeed"
-            prev=$(cat "$state" 2>/dev/null || echo 3)
-            rm -f "$state"
-            case "$prev" in
-            1 | 2 | 3 | 255) ;;
-            *) prev=3 ;;
-            esac
-            printf '%s' "$prev" >"$LEGION/powermode"
+            # Remember the COOLING mode we are leaving — never the CPU profile,
+            # which PPD owns and this script must not touch. Only save when not
+            # already boosted: a second `boost on` would otherwise overwrite
+            # the real previous mode with 255, and `boost off` would restore
+            # custom instead of the user's profile.
+            if [ "$(cat "$LEGION/fan_fullspeed" 2>/dev/null || echo 0)" != "1" ]; then
+                cur=$(cat "$LEGION/powermode" 2>/dev/null || echo "")
+                case "$cur" in
+                1 | 2 | 3 | 255) printf '%s' "$cur" >"$legionState" 2>/dev/null || true ;;
+                *) rm -f "$legionState" ;;
+                esac
+            fi
+
+            # fan_fullspeed is only honoured in custom powermode, so boosting
+            # always enters custom. If either write fails, roll back to the
+            # saved mode rather than leaving the EC in custom with no boost.
+            write_attr "$LEGION/powermode" 255 || exit 1
+            if ! write_attr "$LEGION/fan_fullspeed" 1; then
+                prev=$(cat "$legionState" 2>/dev/null || echo 3)
+                case "$prev" in 1 | 2 | 3 | 255) ;; *) prev=3 ;; esac
+                write_attr "$LEGION/powermode" "$prev" || true
+                exit 1
+            fi
+            exit 0
         fi
+
+        # boost off: drop the flag first, then put the cooling mode back. The
+        # saved value is the previous cooling mode; a missing/garbage file
+        # falls back to performance rather than blocking the write.
+        write_attr "$LEGION/fan_fullspeed" 0 || exit 1
+        prev=$(cat "$legionState" 2>/dev/null || echo 3)
+        rm -f "$legionState"
+        case "$prev" in
+        1 | 2 | 3 | 255) ;;
+        *) prev=3 ;;
+        esac
+        write_attr "$LEGION/powermode" "$prev" || exit 1
         exit 0
     fi
 

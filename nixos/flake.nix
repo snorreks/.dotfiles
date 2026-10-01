@@ -73,6 +73,18 @@
     herdr = {
       url = "github:ogulcancelik/herdr";
       inputs.nixpkgs.follows = "nixpkgs";
+
+      # herdr pins rust-overlay to 4cdea39, which predates upstream commit
+      # 892c035 "treewide: stdenv.is* -> stdenv.hostPlatform.is*" — so building
+      # herdr's toolchain emitted two nixpkgs deprecation warnings from
+      # rust-overlay's lib/mk-aggregated.nix. herdr itself hasn't bumped its
+      # lock, so override the indirect input here and pin it to the fix commit.
+      # Drop this override once `nix flake update herdr` pulls a rust-overlay
+      # that has it.
+      inputs.rust-overlay = {
+        url = "github:oxalica/rust-overlay/892c035d7c2ff75acd5da10424a47ab454e1f3dc";
+        inputs.nixpkgs.follows = "nixpkgs";
+      };
     };
 
     # Terminal fire animation — clear your terminal with ASCII flames

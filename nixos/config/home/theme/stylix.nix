@@ -80,6 +80,14 @@
 
     targets.qt.enable = false;
 
+    # rofi is auto-enabled (stylix.autoEnable defaults to true), and at the
+    # pinned stylix version its target still sets `programs.rofi.font`, which
+    # home-manager renamed to `programs.rofi.settings.font` — every eval
+    # printed a deprecation warning. Nothing here uses rofi (fuzzel is the
+    # launcher), so disable the target; re-enable it if rofi ever comes back,
+    # together with a stylix that targets the new option name.
+    targets.rofi.enable = false;
+
     # targets.vscode.enable = false;
     targets.nixvim.enable = false;
     targets.zed.enable = false;

@@ -1,9 +1,14 @@
 // nixos/config/home/dashboard/qml/SystemView.qml
 //
 // The half that didn't exist before. Utilisation with real bars rather than
-// three bare percentages in a row, plus battery detail and the power-mode
-// selector — which is here, not on Home, because "how hard is this machine
-// working" and "how hard should it work" are one question.
+// three bare percentages in a row, plus battery detail, the CPU-profile
+// selector and the Cooling card — which are here, not on Home, because "how
+// hard is this machine working" and "how hard should it work" are one question.
+//
+// CPU profile and Cooling are separate controls on purpose: the first is
+// power-profiles-daemon's ActiveProfile (intel_pstate / EPP), the second is the
+// EC's fan mode. On the Legion they used to be the same register; see
+// hosts/legion/power.nix.
 //
 // Not a Flickable: the fixed cards are a known height, so the process list can
 // take `Layout.fillHeight` and absorb everything left over, scrolling inside
@@ -96,9 +101,11 @@ Item {
         anchors.fill: parent
         spacing: 10
 
-        // ── Power mode ───────────────────────────────────────────────────
+        // ── CPU profile ──────────────────────────────────────────────────
+        // PPD's ActiveProfile: the CPU-side policy (intel_pstate / EPP). This
+        // is not the fan mode — see the Cooling card below.
         Card {
-            title: "Power mode"
+            title: "CPU profile"
 
             Segmented {
                 // Segment ids are the PowerProfile enum values themselves, so
@@ -127,9 +134,12 @@ Item {
         }
 
         // ── Cooling ──────────────────────────────────────────────────────
-        // Directly under Power mode on purpose: this is the second half of
-        // the same question. Power mode asks the CPU how hard to work;
-        // this asks the fans how hard to answer.
+        // Directly under CPU profile on purpose: this is the second half of
+        // the same question, but a SEPARATE control. CPU profile asks the CPU
+        // how hard to work (PPD/EPP); Cooling asks the fans how hard to answer
+        // (the EC). On the Legion they used to be one register, so "CPU
+        // performance + quiet fans" was impossible; hosts/legion/power.nix
+        // blocks PPD's platform_profile driver to decouple them.
         //
         // Hidden entirely unless a fan backend is there: msi-ec on the GS65,
         // or the legion-laptop module on the Legion (see

@@ -2,9 +2,13 @@
 #
 # This file configures SYSTEM-LEVEL programs and settings for gaming.
 {pkgs, ...}: let
-  # Switch to performance profile during gameplay via power-profiles-daemon.
-  # This drives the firmware's ACPI platform_profile (performance/balanced/power-saver)
-  # and adjusts CPU/GPU power limits without requiring direct sysfs access.
+  # Switch to the performance CPU profile during gameplay via
+  # power-profiles-daemon. This drives intel_pstate / EPP (the CPU-side policy)
+  # and, on hosts where PPD's platform_profile driver is active, the firmware's
+  # ACPI platform_profile. On the Legion that driver is blocked
+  # (hosts/legion/power.nix), so this changes EPP only and leaves the EC
+  # cooling mode alone — measured PL1/PL2/PL3 on that machine are identical in
+  # every firmware mode, so there are no CPU/GPU power limits to adjust here.
   # gamemoded runs with a PATH of exactly one entry (the pkexec wrapper), so an
   # unqualified `powerprofilesctl` here is not found — and with `2>/dev/null ||
   # true` swallowing both the message and the exit code, the profile switch
@@ -102,7 +106,7 @@ in {
         #   ERROR: Failed to call gpuclockctl, could not apply optimisations!
         # in the journal on every single game launch, and changed nothing.
         # The dGPU clocks itself up under load anyway; the performance
-        # power-profile switch below is what actually has an effect.
+        # CPU-profile switch below is what actually has an effect.
 
         # Improve disk I/O performance.
         io = {

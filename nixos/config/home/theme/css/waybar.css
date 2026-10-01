@@ -224,7 +224,7 @@ window#waybar.empty #window,
 #bluetooth.connected  { color: @ok; } /* same green as battery.charging / custom-light.eye-on */
 #pulseaudio.muted     { color: @txt-dim; }
 
-/* ── Power mode ────────────────────────────────────────────────────── */
+/* ── CPU profile (custom/powermode) ────────────────────────────────── */
 #custom-powermode {
     color: @txt;
     font-size: 12px;

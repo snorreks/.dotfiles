@@ -23,7 +23,7 @@
 # (custom/agenda, custom/weather, custom/tomato) and the single-instance
 # status row (custom/notification + tray, which must not visually duplicate —
 # two trays would show every SNI icon twice, and the bell's unread count is
-# global, not per-screen). Power mode, brightness and VPN all stay.
+# global, not per-screen). CPU profile, brightness and VPN all stay.
 #
 # Group *ids* are reused rather than renamed so both bars share one
 # stylesheet: `group/center-clock` simply has different members on each.
@@ -289,6 +289,12 @@
       format = "{}";
       # Event-driven stream from the Rust daemon (PPD D-Bus subscription) —
       # no interval polling, no script spawns. Waybar reads each JSON line.
+      #
+      # This is the CPU profile (PPD ActiveProfile → intel_pstate / EPP), not
+      # the fan mode. The Cooling control lives in the dashboard's System tab;
+      # on the Legion the two are deliberately independent
+      # (hosts/legion/power.nix). The module id stays `custom/powermode` for
+      # stylesheet compatibility.
       exec = "sys-daemon waybar power";
       return-type = "json";
       restart-interval = 10;
@@ -435,7 +441,7 @@ in {
           # Drops custom/agenda, custom/weather and custom/tomato — the three
           # Python-interpreter modules. `group/quick-controls` is NOT
           # overridden here: it inherits `common`'s definition unchanged
-          # (custom/powermode, custom/light, battery), so power mode and
+          # (custom/powermode, custom/light, battery), so CPU profile and
           # brightness show on every screen, not just the primary one.
           "group/center-clock" = {
             orientation = "horizontal";

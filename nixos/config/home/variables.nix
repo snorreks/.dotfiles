@@ -84,6 +84,8 @@ in {
       TERMINAL = opts.defaultTerminal;
       XDG_BIN_HOME = lib.mkDefault "$HOME/.local/bin";
       XDG_SCREENSHOTS_DIR = "$HOME/Pictures/Screenshots";
+      PI_HARNESS_CACHE_ENABLED = "0";
+      PI_HARNESS_STORMBREAKER_ENABLED = "0";
     }
     // secretSessionVariables;
 }

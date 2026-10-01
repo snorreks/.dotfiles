@@ -1,4 +1,10 @@
-//! Power profile for waybar — event-driven.
+//! CPU profile for waybar — event-driven.
+//!
+//! This is the CPU side only: power-profiles-daemon's ActiveProfile, which
+//! drives intel_pstate / EPP. It is deliberately NOT the machine's cooling
+//! mode — on the Legion those used to be the same EC register, and
+//! hosts/legion/power.nix now blocks PPD's platform_profile driver so they are
+//! independent. See dashboard-fan.sh for the cooling control.
 //!
 //! Instead of `powerprofilesctl get` every N seconds (a subprocess spawn),
 //! this subscribes to `net.hadess.PowerProfiles` on the system bus and
@@ -118,17 +124,17 @@ fn render(profile: &str) -> (String, String, &'static str) {
     match profile {
         "performance" => (
             "󰓅".into(), // nf-fa-bolt
-            "Power Mode: Performance".into(),
+            "CPU Profile: Performance".into(),
             "power-performance",
         ),
         "power-saver" => (
             "󰾆".into(), // nf-md-battery_saver
-            "Power Mode: Power Saver".into(),
+            "CPU Profile: Power Saver".into(),
             "power-saver",
         ),
         _ => (
             "󰌪".into(), // nf-md-leaf (balanced)
-            "Power Mode: Balanced".into(),
+            "CPU Profile: Balanced".into(),
             "power-balanced",
         ),
     }
@@ -152,7 +158,7 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
             eprintln!("sys-daemon power: system bus unavailable ({e}); falling back to poll");
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            emit("󰚩", "Power Profiles: Bus unavailable", "power-unknown");
+            emit("󰚩", "CPU Profile: Bus unavailable", "power-unknown");
             loop {
                 tick.tick().await;
             }
@@ -161,7 +167,7 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
             eprintln!("sys-daemon power: system bus connect timed out; falling back to poll");
             let mut tick = tokio::time::interval(Duration::from_secs(10));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            emit("󰚩", "Power Profiles: Bus unavailable", "power-unknown");
+            emit("󰚩", "CPU Profile: Bus unavailable", "power-unknown");
             loop {
                 tick.tick().await;
             }

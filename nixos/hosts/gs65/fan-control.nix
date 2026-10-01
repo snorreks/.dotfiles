@@ -51,7 +51,7 @@
   #
   # shift_mode is in the list even though no dashboard card drives it: it is
   # the CPU-side half of the same EC, and exposing it would duplicate the
-  # Power mode card that already talks to power-profiles-daemon. Writable so
+  # CPU profile card that already talks to power-profiles-daemon. Writable so
   # it can be poked from a shell, not wired to a widget.
   msi-ec-perms = pkgs.writeShellScript "msi-ec-perms" ''
     dev=/sys/devices/platform/msi-ec
