@@ -39,4 +39,29 @@
 
   # 80 while it is a daily driver; 60 once it is parked and permanently on AC.
   batteryChargeLimit = 80;
+
+  # ── Phone → herdr over Tailscale ───────────────────────────────────────────
+  # The Legion is the host this is for: it stays on and runs the agents worth
+  # reaching from a phone. Opting in here adds, and only adds:
+  #
+  #   * a second sshd listener on 2222, key-only, reachable via tailscale0 —
+  #     port 22 and Tailscale SSH are left exactly as they were, as the
+  #     recovery path;
+  #   * mosh-server bounded to UDP 60000-60010, opened on no other interface;
+  #   * `linger`, so the herdr server starts at boot and survives logout;
+  #   * the moshi-hook daemon, which reports pi / Claude Code / OpenCode events
+  #     to the phone and serves the Chat View gateway on 127.0.0.1:24543.
+  #
+  # Deliberately INDEPENDENT of headless: this stays a normal three-monitor
+  # desktop that autologins into mango and sleeps when closed. Daily-driver use
+  # is unchanged.
+  #
+  # 🔴 phoneAuthorizedKey is still null. Fill in the key generated ON THE PHONE
+  # before this is useful — see docs/mobile-agents.md. Until then the build
+  # warns and port 2222 has no key authorized. Deliberately not invented here:
+  # a key generated on the host and copied down would defeat the point of the
+  # phone holding the only copy of its own key.
+  mobileAgents = {
+    enable = true;
+  };
 }
