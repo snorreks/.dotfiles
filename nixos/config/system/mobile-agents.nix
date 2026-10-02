@@ -1,12 +1,21 @@
 # nixos/config/system/mobile-agents.nix
 #
-# The system-level half of the phone→herdr setup: a second sshd listener for
-# Moshi's key authentication, and mosh bounded to a small UDP range.
+# The SYSTEM-level half of the phone-to-herdr setup, and the only part of it
+# that is client-agnostic:
 #
-# Gated on opts.mobileAgents.enable, which hosts/legion/options.nix sets. The
-# counterpart on the user side is config/home/moshi-hook.nix, and the third
-# piece is the WantedBy target in config/home/herdr.nix. Read docs/mobile-agents.md
-# before enabling it.
+#   * a second sshd listener for key-authenticated phone clients (Moshi, or a
+#     plain Termux ssh);
+#   * mosh bounded to a small UDP range;
+#   * linger, so the user manager (and with it herdr and Collie) exists when
+#     nobody is logged in;
+#   * the private Tailscale Serve mapping that fronts Collie.
+#
+# Gated on opts.mobileAgents.enable, which hosts/legion/options.nix sets. None
+# of it depends on Moshi being enabled: config/home/moshi-hook.nix is an
+# independent client behind its own flag, and config/home/collie.nix is
+# another. Turning both clients off leaves this module fully in place, which is
+# the property that keeps a working SSH/Mosh path for the phone. Read
+# docs/mobile-agents.md before enabling it.
 #
 # ── Why a second port instead of 22 ──────────────────────────────────────────
 # server.nix already runs `--ssh=true`, and Tailscale SSH answers on tailnet
@@ -150,12 +159,68 @@ in {
     })
   ];
 
-  warnings = lib.optional (cfg.enable && cfg.phoneAuthorizedKey == null) ''
-    mobile-agents: opts.mobileAgents.enable is true but phoneAuthorizedKey is
-    null, so port ${toString cfg.sshPort} has NO key authorized and the phone
-    cannot log in. Generate the key on the phone and set
-    opts.mobileAgents.phoneAuthorizedKey (options.nix, or nixos/local.nix).
-  '';
+  # ── Tailscale Serve: Collie's front door ───────────────────────────────────
+  #
+  # https://<serveHosts>  ->  http://127.0.0.1:<collie.port>, on tailnet :443.
+  #
+  # This is PRIVATE Serve, not Funnel. Serve terminates TLS with a real
+  # Let's Encrypt certificate for the .ts.net name and only answers for devices
+  # already on the tailnet; Funnel would publish the same mapping to the public
+  # internet. The unit runs `tailscale serve`, never `tailscale funnel`.
+  #
+  # The pinned services.tailscale.serve module creates svc:<name> Services,
+  # and `serve set-config --all` only applies those Services. Use the node-level
+  # CLI instead so HTTPS is served on this machine's MagicDNS hostname.
+  # Nix owns this unit; do not let `collie start` or `collie serve` manage it.
+  # This unit owns HTTPS 443 on the node. Check for an existing mapping there
+  # before enabling it; other ports and named Services are left alone.
+  systemd.services.tailscale-serve-collie = lib.mkIf (cfg.enable && cfg.collie.enable) {
+    description = "Collie on the node's private Tailscale HTTPS endpoint";
+    after = ["tailscaled.service" "tailscaled-autoconnect.service" "tailscaled-set.service"];
+    wants = ["tailscaled.service"];
+    wantedBy = ["multi-user.target"];
+
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${lib.getExe config.services.tailscale.package} serve --bg --https=443 http://127.0.0.1:${toString cfg.collie.port}";
+      ExecStop = "${lib.getExe config.services.tailscale.package} serve --https=443 off";
+    };
+  };
+
+  # ── Build-time warnings ────────────────────────────────────────────────────
+  #
+  # One list: `warnings` is a listOf, so a second assignment anywhere in this
+  # module is a conflict rather than an append. Every half-configured state
+  # here produces a phone that cannot get in, with nothing on the phone saying
+  # why, so each one earns a build-time word.
+  warnings =
+    lib.optional (cfg.enable && cfg.phoneAuthorizedKey == null) ''
+      mobile-agents: opts.mobileAgents.enable is true but phoneAuthorizedKey
+      is null, so port ${toString cfg.sshPort} has NO key authorized and the
+      phone cannot log in. Generate the key on the phone and set
+      opts.mobileAgents.phoneAuthorizedKey (options.nix, or nixos/local.nix).
+    ''
+    ++ lib.optional (cfg.enable && cfg.collie.enable && cfg.collie.serveHosts == []) ''
+      mobile-agents: opts.mobileAgents.collie.enable is true but
+      opts.mobileAgents.collie.serveHosts is empty. The Serve mapping will
+      exist, but Collie will refuse every request with "host not allowed",
+      because its Host-header gate is fail-closed and nothing injects the
+      tailnet name when Nix (rather than `collie start`) starts the service.
+
+      Set opts.mobileAgents.collie.serveHosts to this machine's MagicDNS name:
+
+        tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
+    ''
+    ++ lib.optional (cfg.enable && cfg.collie.enable && cfg.collie.trustedUser == null) ''
+      mobile-agents: opts.mobileAgents.collie.enable is true but
+      opts.mobileAgents.collie.trustedUser is null, so Collie would run with NO
+      identity gate, and any tailnet device that reaches the Serve URL gets
+      full write access to your agents' panes. config/home/collie.nix refuses to
+      build, so this generation will not activate until it is set:
+
+        tailscale status --json | jq -r '.Self.UserID.email'
+    '';
 
   # ── mosh ───────────────────────────────────────────────────────────────────
   #

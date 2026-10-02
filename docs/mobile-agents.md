@@ -1,12 +1,18 @@
 # Mobile Agents — reaching herdr from Android
 
-Reach the Legion from a phone over Tailscale and drive the **same** persistent
-herdr workspaces and pi / Claude Code / OpenCode agents you use at the desk.
-Same server, same panes, same agent processes. The phone is a second client, not
-a second stack.
+Reach the Legion from a phone and drive the **same** persistent herdr workspaces
+and pi / Claude Code / OpenCode agents you use at the desk. Same server, same
+panes, same agent processes. The phone is a second client, not a second stack.
 
-Moshi (Android, Play Store) is the client. Termux is documented at the end as a
-fully independent fallback that needs nothing from this setup beyond port 2222.
+**Collie** is the primary Android interface: a PWA served from the host's own
+loopback port through **private Tailscale Serve**, with HTTPS, a tailnet-identity
+gate, and per-device pairing. It needs nothing from SSH and nothing from Moshi.
+
+Two older paths remain available after provisioning the phone key (§8):
+
+- **SSH / Mosh on port 2222** — client-independent infrastructure. Moshi uses it;
+  so does Termux; so do you.
+- **Moshi** — optional, and **off** on legion now. One boolean away.
 
 ---
 
@@ -15,31 +21,57 @@ fully independent fallback that needs nothing from this setup beyond port 2222.
 ```
   Android phone                      Legion (daily-driver desktop)
  ┌──────────────────┐                ┌──────────────────────────────────────┐
- │ Moshi            │                │  tailscale0 ── trusted by firewall    │
- │  ├ biometric key │──── SSH 2222 ──▶│    sshd :2222  key-only (Match block) │
- │  ├ mosh (UDP)    │──── 60000-10 ──▶│    mosh-server  -p 60000:60010       │
- │  └ gateway fwd   │──── 127.0.0.1 ─▶│    moshi-hook :24543 (loopback only) │
- └──────────────────┘      :24543    │        │                             │
-                                       │        └── reads $HERDR_ENV         │
-                                       │  herdr.service ── ONE server         │
-                                       │   ├── workspace: aikami             │
-                                       │   ├── pane: pi   (6 agents live)     │
-                                       │   └── pane: claude                  │
-                                       └──────────────────────────────────────┘
+ │ Chrome / PWA     │                │                                      │
+ │  ├ Collie        │                │  tailscale0 ── trusted by firewall    │
+ │  │  (paired)     │── HTTPS :443 ─▶│    tailscaled Serve (private)         │
+ │  │               │  via tailscale  │      │                               │
+ │  │               │                │      ▼                               │
+ │  │               │                │    127.0.0.1:8787  collie _exec-bridge│
+ │  │               │                │        │                             │
+ │  └ Moshi (opt.)  │── SSH 2222 ───▶│    sshd :2222 (key-only, Match block)│
+ │     └ mosh (UDP) │── 60000-60010 ─▶│    mosh-server  -p 60000:60010       │
+ │     └ gw forward │── 127.0.0.1 ──▶│    moshi-hook :24543 (loopback only) │
+ │                  │      :24543     │        │                             │
+ └──────────────────┘                │  herdr.service ── ONE server         │
+                                     │   ├── workspace: aikami              │
+ Termux (fallback)                    │   ├── pane: pi   (6 agents live)      │
+   ssh -p 2222 ─────────────────────▶│   └── pane: claude                   │
+   mosh    60000-60010 ─────────────▶│                                      │
+                                     └──────────────────────────────────────┘
 ```
 
-Three moving parts, three files, one flag.
+Three layers, three files, three flags. They are separable on purpose.
 
-| File | Adds |
+| Layer | Option | Adds |
+| --- | --- | --- |
+| **Shared infrastructure** | `mobileAgents.enable` | `sshd :2222` + `Match LocalPort` hardening, phone key, bounded mosh, `linger`, and the herdr `WantedBy` change |
+| **Collie** (primary) | `mobileAgents.collie.enable` | `collie.service`, the private Tailscale Serve mapping, `COLLIE_TRUSTED_USER`, `COLLIE_PUBLIC_HOSTS` |
+| **Moshi** (optional) | `mobileAgents.moshi.enable` | `moshi-hook.service`, the Chat View gateway, the `moshi-agent-hooks` installer |
+
+| File | Role |
 | --- | --- |
-| `nixos/config/system/mobile-agents.nix` | sshd `:2222` + `Match LocalPort` hardening, phone key, `linger`, bounded mosh |
-| `nixos/config/home/moshi-hook.nix` | `moshi-hook` package on PATH, `moshi-hook.service`, `moshi-agent-hooks` installer |
-| `nixos/config/home/herdr.nix` | `WantedBy` becomes `default.target` and `After` omits `graphical-session.target` when mobile is on |
+| `nixos/config/system/mobile-agents.nix` | shared sshd/mosh/linger **+ the Tailscale Serve mapping** |
+| `nixos/config/home/collie.nix` | the Collie bridge as a Home Manager user service |
+| `nixos/config/home/moshi-hook.nix` | the optional Moshi daemon |
+| `nixos/config/home/herdr.nix` | `WantedBy` becomes `default.target` so the server starts at boot |
+| `nixos/pkgs/moshi-hook.nix` | pinned `moshi-hook` + the bounded `mosh-server` wrapper |
 
-Supporting changes: `nixos/pkgs/moshi-hook.nix` (pinned package + the bounded
-`mosh-server`), `nixos/options.nix` (the `mobileAgents` block),
-`nixos/hosts/legion/options.nix` (`enable = true`),
-`config/system/default.nix` + `config/home/default.nix` (imports).
+### Disabling Moshi does not disable remote access
+
+This is the property the whole option split exists to guarantee, so it is worth
+stating as a test rather than a promise:
+
+| | `mobileAgents.enable` | `collie.enable` | `moshi.enable` | phone can |
+| --- | --- | --- | --- | --- |
+| legion today | true | **true** | **false** | Collie PWA; SSH, Mosh, Termux after phone-key provisioning |
+| Moshi back on | true | true | true | Collie PWA; Moshi, SSH, Mosh, Termux after phone-key provisioning |
+| Collie off, Moshi on | true | false | true | Moshi, SSH, Mosh, Termux after phone-key provisioning |
+| **clients off** | true | false | false | **SSH, Mosh, Termux** after phone-key provisioning |
+
+The bottom row preserves the fallback infrastructure independently of the client
+flags. SSH/Mosh access also requires `phoneAuthorizedKey` to be provisioned (§8)
+and the tailnet policy to permit it (§4). On legion the key is currently `null`,
+so this fallback is not yet usable.
 
 ### Why port 2222 and not 22
 
@@ -47,22 +79,26 @@ Supporting changes: `nixos/pkgs/moshi-hook.nix` (pinned package + the bounded
 tailnet port 22 **before** the OS `sshd` sees the connection, authenticating
 with a Tailscale identity and bypassing `authorized_keys` entirely.
 
-Moshi authenticates with a key file and expects the host to check it. Against a
-Tailscale-SSH hijacked port 22 it stalls ~60 s then reports a misleading auth
-error even though the key is authorized and the host is reachable. It also
-breaks the mosh bootstrap, because mosh needs a real `sshd` to run
-`moshi-server new` through.
+A client that authenticates with a *key file* — Moshi, or Termux's plain `ssh`
+— against a Tailscale-SSH-hijacked port 22 stalls ~60 s and then fails with a
+misleading auth error even though the key is authorized and the host is
+reachable. It also breaks the mosh bootstrap, because mosh needs a real `sshd` to
+run `mosh-server new` through.
 
 So 2222 is ordinary OpenSSH. **Port 22 and Tailscale SSH are not touched** —
 they remain the recovery path, and nothing about Tailscale SSH is disabled.
+
+Collie uses neither. It is a browser on the tailnet and reaches nothing but port
+443.
 
 ### Why not headless
 
 `mobileAgents.enable` is independent of `opts.headless`. The Legion stays a
 three-monitor desktop: it still autologins into mango and still sleeps when
-closed. Verified: `gs65` (which has not opted in) evaluates to
-`ports = [22]`, `moshEnable = false`, `linger = null`, and no `moshi-hook`
-unit at all.
+closed. Verified: `gs65` (which has not opted in) evaluates to a byte-identical
+`system.build.toplevel` derivation before and after this change, with
+`ports = [22]`, `mosh.enable = false`, `linger = null`, no `moshi-hook` unit,
+no `collie` unit and no `tailscale-serve-collie` unit.
 
 ### What is genuinely given up
 
@@ -78,8 +114,9 @@ unit at all.
   live heartbeat.
 
   Three different things, worth not conflating: *reconnection* persistence (yes
-  — mosh + herdr), *workspace restore* (yes — layout and cwd), *agent command
-  resumption* (no, except contract runs).
+  — mosh + herdr; expected but unverified for Collie via the browser session),
+  *workspace restore* (yes — layout and cwd), *agent command resumption* (no,
+  except contract runs).
 
 ---
 
@@ -87,9 +124,9 @@ unit at all.
 
 Use `nswitch-safe` from a **separate tmux session**, not from a herdr pane.
 `nswitch-safe` refuses to run outside tmux/zellij/screen (it checks `TMUX`,
-`ZELLIJ`, `STY` — it does not know about herdr), which is exactly the
-behaviour you want here: a rebuild dropped by a lost connection must not also
-disturb the agents you are trying to keep alive.
+`ZELLIJ`, `STY` — it does not know about herdr), which is exactly the behaviour
+you want here: a rebuild dropped by a lost connection must not also disturb the
+agents you are trying to keep alive.
 
 > We deliberately did **not** teach `nswitch-safe` about herdr. Adding
 > `HERDR_ENV` to that check would make it accept a session whose lifetime is
@@ -101,825 +138,948 @@ disturb the agents you are trying to keep alive.
 tmux new -s rebuild
 
 # 2. In tmux, arm the rollback and rebuild
-nswitch-safe              # legion; ROLLBACK_TIMEOUT defaults to 20min
+nswitch-safe
 
 # 3. The script tells you to verify from a SECOND connection.
-#    Open Moshi (or Termux) and connect on 2222 — do not trust session 1.
-#    Confirm: herdr is attached, your agents are still there.
-
+#    Open the Collie PWA on the phone (or Termux on 2222) — do not trust
+#    session 1. Confirm: herdr is attached, your agents are still there.
 # 4. Only then:
-nswitch-confirm           # disarm; this generation is now permanent
+nswitch-confirm
 ```
+
+### What activation does and does not touch
+
+- **herdr is not restarted.** `herdr.service`'s unit text is byte-identical
+  before and after this change — verified by comparing the two generated unit
+  store paths. Nothing in the Collie or Moshi modules is `Requires=`,
+  `PartOf=` or `BindsTo=` herdr; both are `Wants=` after it.
+- **No reboot.** Activation installs the unit, enables the Serve mapping, and
+  starts `collie.service` in the (already running) user manager.
+- **sshd is not restarted** by the Collie half; that was already true of the
+  Moshi half.
+- **`tailscale serve` is re-applied at boot** by the Nix-owned
+  `tailscale-serve-collie.service`.
 
 ### Rollback
 
-Every change is behind one flag, so rollback is a one-line revert plus a
-rebuild:
+```fish
+# 1. Back to the previous generation, which is what nswitch-safe would have
+#    done for you:
+sudo nixos-rebuild switch-generation -   # or nixos-rollback-to <n> + reboot
 
-```nix
-# nixos/hosts/legion/options.nix
-mobileAgents = { enable = false; };   # was: true
+# 2. Or remove just the Collie half and keep the phone's SSH/Mosh path:
+#    in nixos/hosts/legion/options.nix
+#      mobileAgents.collie.enable = false;
+#    rebuild. Port 2222, mosh, linger and boot-time herdr are untouched, so
+#    configured fallback access is preserved. SSH/Mosh still requires the
+#    phone key (§8) and tailnet access policy (§4).
 ```
 
-That reverts **all** of it: port 2222 closes, the `Match` block goes, `linger`
-returns to unmanaged, mosh disappears, `moshi-hook` stops, and herdr's
-`WantedBy` goes back to `graphical-session.target`.
-
-To roll back a *running* system without a rebuild:
+Two things that must be undone by hand, because they are runtime state and not
+in the flake:
 
 ```fish
-# Disabling moshi-hook leaves ordinary herdr access fully working.
-systemctl --user stop moshi-hook.service
-systemctl --user disable moshi-hook.service
+# Removing tailscale-serve-collie.service runs its ExecStop to disable the
+# node's HTTPS 443 mapping. If a stale mapping remains after rollback:
+sudo tailscale serve --https=443 off
 
-# Stopping herdr DOES kill running agents. Only if you must:
-systemctl --user stop herdr.service
+# Collie's own pairing credentials and VAPID keys are NOT in Git and NOT in
+# the store. To forget a phone completely, revoke rather than delete:
+collie devices list
+collie devices revoke my-phone
+rm -rf ~/.config/collie ~/.local/state/collie   # only if you want a clean slate
 ```
 
 ### After changing the herdr unit
 
-If you change `herdr.nix` while agents are running, home-manager will restart
-the service on activation, and **that kills every agent in it**. Finish the work
-first:
-
-```fish
-herdr agent list            # confirm nothing is mid-turn
-```
-
-Wait for the runs you care about, then activate. If you want to apply the change
-without the restart risk, `loginctl` user services can be reloaded first:
-
-```fish
-systemctl --user daemon-reload
-systemctl --user cat herdr.service   # inspect the new unit without applying it
-```
-
-The unit text deliberately references `/etc/profiles/per-user/%u/bin/herdr`,
-not a store path, so ordinary `flake update` runs that change herdr's hash do
-**not** alter the unit and do **not** trigger a restart.
+Changing `herdr.nix` itself changes `herdr.service`'s text, and Home Manager
+will restart it. That kills live agents. It is unchanged by this work, but the
+rule stands: if you edit `herdr.nix`, do it with nothing important running.
 
 ---
 
-## 3. The Android public key
+## 3. Collie on the host
 
-Generate the key **on the phone**. Never generate it on the host and never copy
-a host private key down — the point is that the phone holds the only copy of its
-own key and the host only ever sees the public half.
+### What is installed, and who owns it
 
-**Option A — in Moshi.** Generate a key in the connection form (biometric
-protected, stored in the Android Keystore), then tap the key row and copy the
-public key.
+| Thing | Owner | How |
+| --- | --- | --- |
+| `collie` binary | Nix | pinned flake input `github:AltanS/collie/v1.15.3` |
+| `collie.service` | Nix | `systemd.user.services.collie` (Home Manager) |
+| `tailscale serve` mapping | Nix | `systemd.services.tailscale-serve-collie` |
+| VAPID keypair | you, manually | `collie push-keys` → `~/.config/collie/.env` (0600) |
+| pairing credentials | Collie | `~/.local/state/collie/` |
+| the **version** | Nix | `collie update` refuses; see below |
 
-**Option B — in Termux:**
+The service runs `collie _exec-bridge`, which is the bridge in the foreground
+and nothing else — no unit generation, no `tailscale serve`, no pidfile
+ownership record. Upstream documents exactly this for a supervisor-managed
+install.
 
-```bash
-ssh-keygen -t ed25519 -f ~/.ssh/moshi_phone -C moshi-phone
-cat ~/.ssh/moshi_phone.pub
+> ### 🔴 Never run `collie start`, `collie restart`, `collie stop` or `collie uninstall` on this host
+>
+> Each of them writes `~/.config/systemd/user/collie.service` and/or runs
+> `tailscale serve` — both of which Nix owns. Running one hands ownership to
+> Collie and the next reboot hands it back, with a window in between where the
+> phone has a front door nobody declared.
+>
+> **Restart with `systemctl --user restart collie`.**
+> **Read state with `collie status` / `collie url` / `collie logs` / `collie doctor` /
+> `collie pair` / `collie devices`.**
+
+`collie update` needs no such discipline: a Nix store path is read-only and
+outside `$HOME`, which is one of the shapes Collie reads as a *packaged*
+install, so it declines and names the package manager. Verified on this
+derivation — `collie update --check` reports
+`✓ package updates come from your package manager`.
+
+To move the version, edit the tag in `flake.nix` and `nix flake lock`. Note that
+a collie bump changes `ExecStart`, so Home Manager will restart the bridge on
+the next activation. That is intended, and it is harmless: the phone's
+websocket reconnects on its own.
+
+> The flake package at tag `v1.15.3` reports `1.15.0`. That is upstream's
+> `packaging/nix/sources.json` running one release behind, not a packaging
+> mistake — the package wraps the published, hashed release tarball rather than
+> building from source. The manifest in that file is what proves the payload is
+> genuine.
+
+### The two gates
+
+Collie's access control is two independent factors. Both are configured here.
+
+**1. Identity — who is asking.** `COLLIE_TRUSTED_USER` is your tailnet login.
+tailscaled puts it in the `Tailscale-User-Login` header on every request that
+arrives through Serve, and Collie rejects a mismatch. It also rejects an
+*absent* header: this gate fails closed, because an absent identity from a
+tailnet node is not a loopback caller, it is some other device.
+
+```fish
+tailscale status --json | jq -r '.Self.UserID.email'
+# -> snorrekstrand@hotmail.com   (lowercase, NO trailing dot)
 ```
 
-Then set it in `nixos/options.nix`:
+If you get the trailing dot, every request is refused with `identity not
+trusted` and the phone shows a blank page.
+
+> `COLLIE_SKIP_SERVE` is deliberately **not** set. Collie disables the identity
+> check entirely when it believes no Serve is in front — but Nix's
+> `tailscale-serve-collie.service` *is* a Serve in front, whatever Collie believes.
+> Leaving the flag unset buys fail-closed enforcement. The cost is cosmetic:
+> `collie status` cannot see a Serve mapping it did not create, so its
+> "serve config" section may read empty. It is not.
+
+**2. Pairing — which device.** Until a device is paired, anything that passes
+the identity gate can type into your panes. `collie pair` mints an 8-character
+code valid for 10 minutes; the phone exchanges it for a token it stores, and the
+host keeps only the hash. Pairing gates **writes** only — reads stay open to
+anything that clears the identity and Host gates.
+
+`config/home/collie.nix` rejects `trustedUser = null`, `trustedUser = ""`, and
+`serveHosts = []` when Collie is enabled, so a generation with a missing gate
+**does not build**. Collie itself treats an empty `COLLIE_TRUSTED_USER` as
+disabling the identity gate; the assertion prevents that configuration.
+
+### Check it
+
+```fish
+systemctl --user status collie.service
+journalctl --user -u collie -n 50
+collie status
+collie doctor
+```
+
+A healthy log starts with the bridge listening on `127.0.0.1:8787`. If you see
+`COLLIE_TRUSTED_USER is empty`, you are running a build that predates this
+change. If you see `no non-loopback Host is allowed`, `serveHosts` is wrong.
+
+---
+
+## 4. Tailscale HTTPS
+
+Three things have to be true. Two are in the flake; one is a one-time tailnet
+setting.
+
+**In the flake** — `nixos/hosts/legion/options.nix`:
 
 ```nix
-phoneAuthorizedKey = "ssh-ed25519 AAAA… moshi-phone";
+mobileAgents.collie = {
+  enable = true;
+  trustedUser = "snorrekstrand@hotmail.com";
+  serveHosts = ["legion.tailf24d02.ts.net"];
+};
 ```
 
-Or keep it out of Git entirely, in the gitignored `nixos/local.nix`:
+`serveHosts` must match this machine's MagicDNS name: the node-level Serve
+mapping uses that name automatically, and `serveHosts` supplies Collie's
+Host-header allowlist. Change it if the tailnet name ever changes.
 
-```nix
-{ mobileAgents.phoneAuthorizedKey = "ssh-ed25519 AAAA… moshi-phone"; }
-```
+**In the tailnet**, once, in the admin console → DNS → **Enable HTTPS**. Serve
+then obtains and renews a real Let's Encrypt certificate for
+`legion.tailf24d02.ts.net` automatically. Note that `server.nix` sets
+`--accept-dns=false`, which disables MagicDNS *resolution* on the host — it has
+no effect on HTTPS certificates.
 
-Until this is set the build emits a warning and port 2222 has **no** key
-authorized — deliberate, so a fresh clone still evaluates.
-
-Revoke the phone by removing that one line. Your desktop/GitHub key is a
-separate entry and is unaffected.
-
----
-
-## 4. Moshi connection settings
-
-Create a saved host:
-
-| Field | Value |
-| --- | --- |
-| Name | `legion` |
-| Host | `tailscale ip -4` output — the `100.x.y.z` address |
-| Port | `2222` |
-| Username | `sonny` |
-| Authentication | key — import the phone-generated private key |
-| Connection type | **Mosh** (or Auto, which tries Mosh first) |
-| Forward SSH Agent | **off** — see below |
-
-Mosh options (visible when Connection type = Mosh):
-
-| Field | Value |
-| --- | --- |
-| UDP port range | `60000-60010` |
-| Mosh path | leave blank — `/run/current-system/sw/bin` is on the non-interactive SSH PATH |
-
-**Use the Tailscale IP first.** MagicDNS names are optional on Android: the
-Tailscale app resolves them, but an IP removes a whole class of failure where
-the name does not resolve and the app gives up silently. `--accept-dns=false`
-is preserved on the host and dnscrypt-proxy still owns DNS there — do not change
-either.
-
-Never use the LAN IP, the public IP, or a Tailscale web-SSH proxy URL.
-
-### Agent forwarding is off, on purpose
-
-Moshi can forward its key as an SSH agent, but:
-
-- it **does not work over Mosh or Auto** — it is an SSH channel feature, and
-  mosh cannot carry SSH channels;
-- it is unnecessary — the host already has the Git and model credentials the
-  agents need, in `authorized_keys` and the sops-imported environment;
-- the server refuses it anyway (`AllowAgentForwarding no` on 2222), so a
-  compromised phone session cannot reach a signing key.
-
-Agents use **host-side** credentials. `git push` from a phone-attached pane
-works because the host can already push.
-
----
-
-## 5. Tailscale enrollment and policy
-
-### On the phone
-
-1. Install Tailscale from Google Play, sign in to the **same tailnet**.
-2. Confirm the Legion appears and is online.
-
-### On the host
-
-Already enrolled by `server.nix`. Nothing to do.
+**Verify:**
 
 ```fish
-tailscale status              # node is up
-tailscale ip -4               # the 100.x.y.z address for the Moshi Host field
-tailscale ping <phone>
+tailscale serve status
+# https://legion.tailf24d02.ts.net (tailnet only)
+# |-- / proxy http://127.0.0.1:8787
+
+curl -I https://legion.tailf24d02.ts.net/     # from a tailnet machine allowed TCP 443 by policy
 ```
+
+### Private, not Funnel
+
+The Nix-owned `tailscale-serve-collie.service` runs
+`tailscale serve --bg --https=443 http://127.0.0.1:8787`. Serve is private to
+the tailnet; this unit never enables Funnel.
+
+### Preserving existing Serve configuration
+
+The pinned NixOS `services.tailscale.serve.services.<name>` option creates
+`svc:<name>` Tailscale Services. Its `set-config --all` command manages those
+Services, not node hostname mappings. Collie therefore uses a dedicated
+Nix-owned unit to configure HTTPS 443 on the node's MagicDNS hostname.
+
+The unit owns the node's HTTPS 443 mapping; other ports and named Services
+remain separate. **Check before enabling Collie on a host:**
+
+```fish
+tailscale serve status --json
+```
+
+If HTTPS 443 already has handlers, reconcile them before enabling Collie:
+startup sets the root proxy, and stopping or removing the unit disables the
+node's entire HTTPS 443 listener. Do not share that listener with unrelated
+handlers. Restart the mapping with
+`sudo systemctl restart tailscale-serve-collie`.
 
 ### Tailnet access policy
 
-Host firewalling is **not** a substitute for tailnet policy. `tailscale0` being
-in `networking.firewall.trustedInterfaces` means *once a packet reaches this
-host over the tunnel*, the host accepts it. Whether it reaches the host at all
-is decided by the Tailscale ACL, upstream of that.
+The tailnet is the trust boundary, and the ACL is a separate layer from
+everything in this repository. A device not permitted by the ACL is refused
+before the host firewall or Collie is consulted.
 
-Add these grants in the Tailscale admin console → Access Controls:
+The effective policy must allow the operator's phone to reach the Legion on
+**TCP 443** for Collie, plus TCP 2222 and UDP 60000-60010 for the SSH/Mosh
+fallback. [Tailscale Serve remains subject to tailnet access rules](https://tailscale.com/kb/1312/serve).
+An existing broader allow rule may already cover 443; Serve does not bypass
+policy. `COLLIE_TRUSTED_USER` further narrows access inside Collie.
 
-```hujson
+For example, merge these grants into the tailnet policy, replacing
+`<legion-tailnet-ip>` with the node's actual Tailscale IP (from `tailscale ip -4`):
+
+```json
 {
   "grants": [
     {
-      "src":    ["tag:phone"],
-      "dst":    ["tag:legion"],
-      "ip":     ["tcp:2222", "udp:60000-60010"],
+      "src": ["snorrekstrand@hotmail.com"],
+      "dst": ["<legion-tailnet-ip>"],
+      "ip": ["tcp:443"]
     },
-  ],
+    {
+      "src": ["snorrekstrand@hotmail.com"],
+      "dst": ["<legion-tailnet-ip>"],
+      "ip": ["tcp:2222", "udp:60000-60010"]
+    }
+  ]
 }
 ```
 
-Two separate requirements, often confused:
+During setup, check the effective policy for the phone's identity and this
+node's TCP 443, then open the Serve URL from the phone. Check TCP 2222 and the
+UDP range too if provisioning the fallback. These rules are managed in the
+tailnet admin console, outside this repository.
 
-- **`tcp:2222`** — the SSH (and mosh bootstrap) connection.
-- **`udp:60000-60010`** — the mosh session itself. Missing this gives you a
-  successful SSH that then fails to become a mosh session.
-
-The existing **Tailscale SSH recovery path on port 22** is separate: keep its
-network access rule and its top-level `"ssh"` rule. Tailscale SSH authorization
-is configured in that [top-level section](https://tailscale.com/kb/1337/policy-syntax#ssh),
-not as an `"app"` capability in the network grant above.
-
-Replace the tags with whatever identifies your devices today — literal IPs or
-existing groups are fine. Confirm with:
-
-```fish
-tailscale ping <phone>        # tunnel is up
-# then from the phone, after connecting: the session must survive a Wi-Fi→cellular switch
-```
-
-**Out of scope, deliberately not configured:** no Funnel, no public tunnels, no
-router port-forwarding, no exit-node changes, no subnet routers. Everything
-rides the existing tailnet.
+Where a tailnet is shared with other people, `COLLIE_TRUSTED_USER` is the thing
+that makes this safe, and it is not optional.
 
 ---
 
-## 6. Pairing
+## 5. Pairing the phone
 
 Pairing is an explicit manual step. No token is stored in this repo, and no
 command below embeds one.
 
-### First, on the host
+### On the host
+
+```fish
+collie pair
+```
+
+Prints an 8-character code valid for **10 minutes**, plus a QR code that opens
+the pairing screen on the phone with the code already filled in.
+
+### On the phone
+
+1. Open **Tailscale** and turn it on. Everything below is unreachable without it.
+2. Open `https://legion.tailf24d02.ts.net` in Chrome.
+3. Go to **Settings → System → Paired devices**.
+4. Enter the code (or scan the QR), give the device a label — `pixel-8` — and
+   tap **Pair this device**.
+
+The phone stores the token; the host keeps only its hash. **Pair inside the
+installed PWA (§6), not in the browser tab** — the home-screen app keeps its own
+storage, so a pairing made in a tab does not carry over.
+
+No restart is needed: the running daemon applies pairings and revocations on the
+next request.
+
+### Revoking a device
+
+```fish
+collie devices list                    # labels, paired-at, last-seen
+collie devices revoke pixel-8          # live, no restart
+```
+
+Revocation takes effect on the next request from that device.
+
+### The Claude beacon hook (optional)
+
+Collie identifies which herdr pane a Claude Code session belongs to using a
+*beacon* written by an agent hook. Everything else — the dashboard, the terminal
+mirror, typing, approvals, notifications — works without it. Install it only if
+you want Claude sessions labelled per pane:
+
+```fish
+collie hooks install claude      # merges; leaves your own hooks alone
+collie hooks status
+collie hooks uninstall claude    # removes only what collie owns
+```
+
+> 🔴 `~/.claude/settings.json` on this host already carries a **herdr-managed
+> SessionStart hook**. `collie hooks install` merges rather than replaces, which
+> upstream is careful about, but "careful" is not the same as "safe to run on
+> every activation". Nothing in this repo runs it. Do it by hand, once.
+
+Collie has no hooks for pi or OpenCode; it identifies those panes from the
+multiplexer directly.---
+
+## 6. Install the PWA on Android
+
+Collie is a web app. The browser adds it to your home screen without an app
+store, giving it a standalone icon and a full-screen view.
+
+1. Open `https://legion.tailf24d02.ts.net` in **Chrome**.
+2. Open Collie's **Settings** and tap **Install** on the top card.
+3. If the card is not there, open Chrome's menu (⋮) → **Add to home screen** →
+   **Install**. Some Chrome builds label it **Install app**.
+
+Installing only adds the icon and full-screen mode — Android already supports
+Web Push in ordinary tabs. Pair **after** installing (§5), so the pairing lands
+in the app's own storage.
+
+Firefox and Samsung Internet use **Add to home screen** in their main menus.
+
+---
+
+## 7. Web Push (optional)
+
+Disabled by default. Collie is fully usable without it; it is what makes an
+approval request arrive while the phone is in a pocket.
+
+```fish
+collie push-keys mailto:you@example.com
+systemctl --user restart collie
+```
+
+`push-keys` generates the keypair and writes `COLLIE_VAPID_PUBLIC` and
+`COLLIE_VAPID_PRIVATE` into `~/.config/collie/.env` **at mode 600**. That file
+is outside Git and outside the Nix store. Never put the private key in
+`secrets.yaml`, never commit it, never copy it to the phone.
+
+`--force` overwrites, and **replacing the keys invalidates every existing
+subscription** — every device must re-subscribe before notifications work again.
+Passing a subject on an existing configuration updates only the contact address
+and preserves the keys.
+
+Then on the phone: **Settings → Alerts**, and turn on **Needs input** (on by
+default).
+
+Test it:
+
+```fish
+collie push-test
+collie push list            # subscribed endpoints
+collie push forget <substring>|--all
+```
+
+Notifications are derived by Collie **polling the multiplexer**, not from agent
+hooks. The host observes a pane change and signs the push with the VAPID key
+above. Collie does not use its own application cloud service, but delivery
+requests are still sent through the browser's push service.
+
+---
+
+## 8. SSH / Mosh fallback (independent of both clients)
+
+Fully independent: needs only port 2222, the phone key and Tailscale. Nothing
+from Collie, nothing from moshi-hook, nothing from herdr beyond the terminal.
+
+### The phone's public key
+
+Generate it **on the phone**. Never create it on the host and never copy a host
+private key down — the point is that the phone holds the only copy of its own
+key and the host only ever sees the public half.
+
+```fish
+# in Termux, or Moshi → Settings → the key row → generate
+ssh-keygen -t ed25519 -f ~/.ssh/phone -C phone
+cat ~/.ssh/phone.pub
+```
+
+Put the `.pub` line in `nixos/hosts/legion/options.nix` (or the gitignored
+`nixos/local.nix`):
+
+```nix
+mobileAgents.phoneAuthorizedKey = "ssh-ed25519 AAAA... phone";
+```
+
+Until you do, the build warns and port 2222 has **no key authorized**. That is
+deliberate — a null key must not silently look like a working setup.
+
+### Install Termux from the official source
+
+Use the project's [installation guidance](https://github.com/termux/termux-app#installation).
+The Play Store build is unmaintained and lags; get the APK from the official
+GitHub releases instead:
+
+```
+https://github.com/termux/termux-app/releases
+→ termux-app_*-arm64-v8a.apk
+```
+
+```fish
+pkg update && pkg install -y openssh mosh git
+pkg install -y nodejs-lts     # only if you want pi/claude/opencode on the phone too
+```
+
+### Connect
+
+```fish
+# bring Tailscale up in the Tailscale app first
+ssh -p 2222 -i ~/.ssh/phone sonny@legion      # add a Host block so you can just `ssh legion`
+```
+
+Mosh must be told the port: the `moshPortRange` above bounds the server to
+60000-60010, and mosh's default `60000-61000` search can land outside the tailnet
+ACL. Point it at the exact range:
+
+```fish
+mosh --ssh="ssh -p 2222 -i ~/.ssh/phone" --port=60000:60010 legion
+```
+
+Verify the range is honoured server-side during a session:
+
+```fish
+ss -lunp | grep mosh-server      # a port inside 60000-60010
+```
+
+If Mosh fails over cellular specifically, some carriers shape UDP. Fall back to
+plain SSH: you lose seamless roaming, not function.
+
+### Attach herdr
+
+```fish
+herdr attach        # or: herdr  (inside the remote shell)
+```
+
+Reconnection — switching Wi-Fi ↔ cellular, backgrounding the app, locking the
+screen — is mosh's job, and the agent processes keep running because they live
+in the host's herdr server, not in your phone.
+
+### Terminal keys on a phone
+
+- **Termux** — the notification-bar **extra keys row** gives you `Ctrl`, `Alt`,
+  `Esc` and `Tab`, which is the difference between a usable agent and a
+  frustrating one. Turn it on in Termux → Settings → Keyboard.
+- **Moshi** — has its own key row and a palette; see §9 for the fallback notes.
+
+---
+
+## 9. Moshi (optional)
+
+Off on legion. Everything below is what you get back by setting
+`mobileAgents.moshi.enable = true` and rebuilding; nothing below is required for
+Collie or for the SSH fallback.
+
+### What it adds
+
+The moshi-hook daemon, an Inbox of agent events, approval prompts, Chat View, and
+a diff / browser preview served on `127.0.0.1:24543`, reached from the phone by
+forwarding that port over the same SSH connection on 2222. That is why the sshd
+`Match` block for 2222 carries `AllowTcpForwarding yes`.
+
+### Connection settings in the app
+
+| Field | Value |
+| --- | --- |
+| Host | `<ts-ip>` or the MagicDNS name |
+| Port | `2222` |
+| Username | `sonny` |
+| Key | the phone key from §8 |
+| Auth | public key |
+| Connection type | `SSH`, or `Mosh` with the range from §8 |
+| Forward | `127.0.0.1:24543` |
+
+`AllowAgentForwarding` is **off** on 2222, deliberately. It is unnecessary — the
+host already holds the Git and model credentials in `authorized_keys` and the
+sops environment — and it would put a phone-held key in reach of anything that
+lands in a shell here. It also cannot work over mosh, which cannot carry SSH
+channels.
+
+### Pairing Moshi
 
 ```fish
 # Nix owns the version: stop the daemon from checking for its own updates.
+# `auto` would download a release and replace the running binary with
+# something outside the store.
 moshi-hook set auto-update off
 
-# 🔴 Nix owns the version. `auto` would download a release and replace the
-# running binary with something outside the store.
-```
-
-### Then, in the app
-
-Open Moshi → **Settings → Hooks** → copy the pairing token.
-
-### Then, on the host
-
-```fish
-# Type or paste the token at the prompt. Prefer this over putting it in your
-# shell history or a command line other processes can read:
+# In the app: Settings → Hooks → copy the pairing token. Then:
 read -rs MOSHI_TOKEN && echo
 moshi-hook pair --token "$MOSHI_TOKEN"
 unset MOSHI_TOKEN
 ```
 
-The host secret lands in `~/.config/moshi/secrets.json` at mode `0600` — outside
-Git and outside the Nix store. Never add it to `secrets.yaml`, never commit it.
+The host secret lands in `~/.config/moshi/secrets.json` at mode 0600 — outside
+Git and outside the store.
 
-### Install the agent hooks
-
-Only after pairing, and only by hand — **no activation path runs this**:
+### Agent hooks (Moshi's own, distinct from Collie's)
 
 ```fish
 moshi-agent-hooks        # backs up, then installs for agents actually present
-```
-
-The helper wires only `claude`, `opencode` and `pi`, and only if their config
-directories exist. It backs up every file it is about to touch to
-`~/.local/state/moshi/hook-backups/<UTC timestamp>/` (mode `0700`) and restores
-that backup if the install fails partway. It is safe to re-run.
-
-Why it is not automatic: `moshi-hook install` writes into
-`~/.claude/settings.json`, which on this host **already contains a herdr-managed
-`SessionStart` hook**, and into `~/.pi/agent/extensions/`, which herdr owns and
-rewrites on reinstall. A silent activation-time edit to files another unit
-manages is how you get a duplicated notification path or a mysteriously reset
-hook. Upstream merges rather than overwrites, and the helper only adds a backup
-and a rollback around it.
-
-To undo everything Moshi added:
-
-```fish
-moshi-hook uninstall
-```
-
-### Verify
-
-```fish
 moshi-hook doctor
 ```
 
-Expected: daemon ✓, gateway ✓, `herdr ✓` at
-`/etc/profiles/per-user/sonny/bin/herdr`, pairing ✓, and the installed agents ✓.
-Anything `✗` prints numbered fixes.
+This wires `claude`, `opencode` and `pi` only if their config directories exist,
+after backing up every file it touches. Manual, and idempotent — no activation
+path runs it, because `~/.claude/settings.json` already carries a herdr-managed
+SessionStart hook and `~/.pi/agent/extensions/` is herdr-owned.
 
-Currently unpaired and unhooked on this host (by design — see §11).
+> **Moshi's hooks and Collie's hooks are different things.** Collie's Claude hook
+> writes a *pane-identity beacon*; Moshi's hooks push *events to Moshi's
+> servers*. Installing both is not a duplicate hook, but it is two independent
+> event pipelines.
 
----
-
-## 7. Android notifications and battery
-
-Push is what makes the phone useful: an approval request or a finished build
-arriving while the phone is in a pocket.
+### Notifications, honestly
 
 Reached by the phone, when Moshi works:
 
-- **Inbox event summaries** — one small record per event
-  (`approval_required`, `task_complete`, `session_started`, `session_ended`,
-  `tool_running`, `tool_finished`).
-- **Up to 200 characters of your prompt**, as the event body.
-- **Up to 80 characters of the assistant's reply**, as the event title.
-- **Up to 256 characters of the command or question** behind an approval
-  request, so you can decide from the notification.
-- **Metadata**: project name, session ID, agent, model, tool name, terminal
-  identifiers, account ID, context-window percentage.
-- Pairing, usage sync, approval decisions, WebSocket control traffic.
+- small per-event summaries, up to 200 characters of your prompt as the body,
+  up to 80 characters of the reply as the title, up to 256 characters of the
+  command behind an approval request, plus project / session / agent / model /
+  tool / context-window metadata;
+- pairing, usage sync, approval decisions and WebSocket control traffic.
 
-Stays between your host and your phone:
+Stays between host and phone: full transcripts (streamed through the SSH-forwarded
+loopback gateway), diff payloads, your files, and all terminal traffic.
 
-- **Full agent transcripts.** Chat View streams them from the host through the
-  SSH-forwarded loopback gateway; they never pass through Moshi's backend.
-- **Diff payloads**, read locally on the host.
-- **Your source files** — file contents are never part of the cloud payload.
-- **Terminal traffic**, which rides your own Tailscale tunnel.
-
-So: notifications are **not** cloud-free, and this doc will not pretend
-otherwise. Transcripts, diffs and terminal traffic are; prompt/reply/approval
-snippets and metadata are not. If that trade is wrong for a given agent, leave
-that agent's hooks uninstalled — the terminal still works over SSH/Mosh.
-
-Verified controls, all of which the daemon exposes:
+So Moshi is **not** cloud-free and this doc will not pretend otherwise. Those
+controls exist if you want them:
 
 ```fish
-moshi-hook set usage-collection off   # stop rate-limit polling + snapshot uploads
-moshi-hook set always-on-discovery off # stop idle dev-server/simulator scans
-moshi-hook set suppress-nested-agent-push on  # drop events from agents spawned by agents
-moshi-hook set scan-ports 3000,5173,8000-8010  # restrict Browser Preview probing
+moshi-hook set usage-collection off        # stop rate-limit polling + snapshots
+moshi-hook set always-on-discovery off     # stop idle dev-server scans
+moshi-hook set suppress-nested-agent-push on
+moshi-hook set scan-ports 3000,5173,8000-8010
 ```
 
-### Battery and background
+If that trade is wrong for a given agent, leave its hooks uninstalled — the
+terminal still works over SSH/Mosh.
 
-If reconnect or notifications misbehave, check these first:
+### Chat View: UNVERIFIED on Android
 
-- **Tailscale app** — Android can kill it. Exempt it: Settings → Apps → Tailscale
-  → Battery → *Unrestricted*. Without this the tunnel drops and Moshi cannot
-  reach the host at all.
-- **Moshi app** — Settings → Apps → Moshi → Battery → *Unrestricted*.
-- **Notifications allowed for Moshi** — Settings → Apps → Moshi → Notifications.
-  Without this, pushes arrive silently or not at all. `moshi-hook doctor` lists
-  this as a "check these yourself" item.
-- **Battery optimisation / Data saver** — both can suspend the Tailscale tunnel.
-  Disable for Tailscale and Moshi.
+Upstream's Chat View page is written entirely around iOS (Live Activity, Apple
+Watch, Command-Enter, iCloud sync). Android has the app and the hooks, but
+Chat View parity is not documented. Confirm in-app before relying on it; the
+plain terminal is the supported path either way.
+
+### Android battery and background
+
+Check these first if reconnect or notifications misbehave — and they apply to
+**Tailscale** and **Chrome** for Collie just as much as to Moshi:
+
+- **Tailscale** — Settings → Apps → Tailscale → Battery → *Unrestricted*.
+  Without this Android kills the tunnel and the phone cannot reach the host at
+  all. This is the single most common failure.
+- **Chrome** — Background activity: *Allowed*.
+- **Notifications for Chrome** — Settings → Apps → Chrome → Notifications.
+  Web Push needs this; without it pushes arrive silently.
 - **Private DNS / VPN stacking** — Android's per-app VPN settings can exclude
-  Tailscale and send Moshi traffic out unencrypted. Leave Tailscale exempt.
-- **Mosh on cellular** — verify the UDP range works on mobile data specifically;
-  some carriers shape UDP. If it fails, set Connection type to **SSH**: you lose
-  roaming, not function.
+  Tailscale and send traffic out unencrypted. Leave Tailscale exempt.
 
 ---
 
-## 8. Termux fallback
+## 10. Notifications: one, not two
 
-Fully independent: needs only port 2222, the phone key, and Tailscale. Nothing
-from `moshi-hook`, nothing from herdr beyond the terminal itself.
+With both clients enabled the phone receives **two** notifications for the same
+agent waiting for input:
 
-### Install Termux from the official source
+- moshi-hook posts agent events to Moshi's servers;
+- Collie polls the multiplexer and pushes through this host's own VAPID keys.
 
-Choose a source using the project's [installation guidance](https://github.com/termux/termux-app#installation):
+They are separate pipelines and there is no upstream way to merge them. That is
+why `moshi.enable = false` on legion rather than "leave it on and ignore the
+spams".
 
-- **F-Droid** provides stable builds; updates can arrive later than GitHub
-  because F-Droid builds and publishes them separately.
-- **GitHub Releases** provides upstream APKs directly, including builds for
-  specific architectures. Download only from the official repository below.
-- **Google Play** provides a separate experimental branch for Android 11+,
-  adapted to Play Store requirements, with functionality differences and bugs
-  compared with the stable builds. Prefer F-Droid or GitHub for this fallback.
+If you run both deliberately, turn notifications off in whichever one you are
+not using, rather than turning the host's reporting off.
 
-**Do not mix APKs from different sources:** Termux and all its plugins must come
-from the same source because their signing keys differ. Before switching,
-back up your data and uninstall Termux and all its plugins.
-
-For GitHub Releases:
-
-```bash
-# In a browser on the phone, from the official GitHub repo:
-#   https://github.com/termux/termux-app/releases
-# Download termux-app_*-arm64-v8a.apk and install it.
-```
-
-Verify:
-
-```bash
-pkg update && pkg upgrade
-pkg install openssh mosh-netcat
-```
-
-### Connect
-
-```bash
-# Over Tailscale — bring it up first in the Tailscale app
-TS_IP=$(echo "<100.x.y.z from tailscale ip -4 on the host>")
-ssh -p 2222 -i ~/.ssh/moshi_phone sonny@"$TS_IP"
-```
-
-Save it as a host alias so reconnects are one word:
-
-```bash
-cat >> ~/.ssh/config <<'EOF'
-Host legion
-  HostName 100.x.y.z
-  Port 2222
-  User sonny
-  IdentityFile ~/.ssh/moshi_phone
-EOF
-ssh legion
-```
-
-### Mosh
-
-```bash
-mosh legion
-```
-
-If UDP is blocked, plain `ssh legion` still works — mosh is the resilience layer,
-not the transport everything depends on.
-
-### Attach herdr
-
-```bash
-herdr                        # attach the default session
-herdr session list           # list sessions
-herdr session attach work    # a named one
-```
-
-Then start agents with the wrappers you already use — `pi`, `claude`. They
-launch through herdr exactly as they do on the desktop.
-
-### Detach and reconnect
-
-- **Detach:** `Ctrl-B` then `q`. The agent keeps running.
-- **Reconnect:** `herdr` (or `herdr session attach <name>`).
-
-This attaches to the **existing** session. It does not start a second agent —
-see the duplicate-agent check in §11.
+Neither client's *hooks* cause duplicate notifications: Collie's Claude hook
+only writes a pane-identity beacon and Collie derives every notification from
+polling.
 
 ---
 
-## 9. Terminal keys on a phone
+## 11. Troubleshooting
 
-Moshi pre-binds herdr's prefix chords (`Ctrl-B` + key). Moshi's **Settings →
-Shortcuts → Herdr** must match `~/.config/herdr/config` — default prefix is
-`Ctrl-B`.
+### The phone shows a blank page
 
-| Action | Keys |
-| --- | --- |
-| New tab | `Ctrl-B` `C` |
-| Next / previous tab | `Ctrl-B` `N` / `Ctrl-B` `P` |
-| Next / previous pane | two-finger swipe |
-| Workspace navigator | `Ctrl-B` `W` (or two-finger vertical swipe) |
-| Goto prompt | `Ctrl-B` `G` |
-| **Zoom pane** | pinch, or `Ctrl-B` `Z` |
-| Kill pane | `Ctrl-B` `X` |
-| **Detach** | `Ctrl-B` `Q` |
+Almost always one of two gates, both of which refuse rather than half-work.
 
-Gestures: one-finger swipe = next/prev tab, two-finger swipe = next/prev pane,
-two-finger vertical swipe = workspace navigator, pinch = zoom a pane
-full-screen. All use the configured prefix and are remappable under **Settings →
-Input → Gestures**.
+```fish
+journalctl --user -u collie -n 50 | grep -iE "warning|refus|not allowed|identity"
+```
 
-- **Ctrl-C** interrupts whatever the focused pane is running. Through a prefix
-  chord, `Ctrl-B` `C` is a *new tab* — these are different.
-- **Escape** is sent as Escape. It is also what Chat View's stop button sends.
-- **Multiline prompts:** agents accept pasted multi-line text. Prefer paste over
-  typing newlines — a literal Enter may submit.
-- **Paste:** long-press to paste, or use the clipboard row. Large pastes into
-  an agent prompt are more reliable than in a raw shell.
-- **Resize:** resizing the Moshi window reflows the remote terminal — mosh sends
-  the new geometry and the TUI redraws. Full-screen on a phone is usually best;
-  landscape helps with wide diffs. Tabs beat panes at phone width.
-- **If the keyboard or rendering misbehaves**, switch that connection to
-  Connection type **SSH**. You lose roaming and reconnect, not function.
+| Log line | Cause | Fix |
+| --- | --- | --- |
+| `host not allowed` | `serveHosts` is empty or stale | `tailscale status --json \| jq -r '.Self.DNSName \| rtrimstr(".")'` and put it in `serveHosts` |
+| `identity not trusted` | `trustedUser` has a trailing dot, or is a different login | `tailscale status --json \| jq -r '.Self.UserID.email'` |
+| `identity required` | the request arrived without a Serve header | you are reaching `127.0.0.1:8787` directly, or `tailscale serve` is not running — check `tailscale serve status` |
+| `no non-loopback Host is allowed` | `COLLIE_PUBLIC_HOSTS` empty | `serveHosts` again |
+| `COLLIE_TRUSTED_USER is empty` | running a generation that predates this change | rebuild |
 
----
+### `collie status` says the serve config is empty
 
-## 10. Troubleshooting
+Expected, and explained in §3. `collie status` reports what *it* would publish;
+Nix publishes this one. `tailscale serve status` is the truthful command here.
+
+### The phone can load Collie but cannot type into anything
+
+Unpaired. Writes need a paired device even when the identity gate passes:
+
+```fish
+collie devices list
+```
+
+### `collie start` / `restart` was run by accident
+
+Nix owns the unit and the Serve mapping. The next activation takes both back:
+
+```fish
+systemctl --user stop collie          # do not run `collie stop`, it deletes the unit
+# rebuild; the unit and the mapping return to Nix's versions
+```
+
+### `systemd` did not restart Collie after an upgrade
+
+Check that Home Manager wrote the unit:
+
+```fish
+systemctl --user cat collie.service | grep ExecStart
+```
+
+If it names an old store path, the activation did not run. If it names the new
+one and the process is old, `systemctl --user restart collie`.
+
+### Collie cannot see any panes
+
+It is pointed at the wrong multiplexer or socket:
+
+```fish
+systemctl --user show collie -p Environment | tr ' ' '\n' | grep -E 'HERDR_SOCKET_PATH|COLLIE_MUX'
+herdr status server                    # must say: status: running
+```
 
 ### `sshd.conf-final` fails with exit code 137
 
-```
-error: Cannot build '/nix/store/…-sshd.conf-final.drv'.
-  Reason: builder failed with exit code 137.
-```
+Pre-existing trap, documented so it is not re-diagnosed: `extraConfig` in
+`mobile-agents.nix` is rendered through an **unquoted** heredoc, so a backtick,
+`$` or backslash in that block is executed by `/bin/sh` while the config is
+built. A stray backtick makes the build run `yes`, which never returns, and the
+OOM killer surfaces it as `Cannot build '…-sshd.conf-final.drv' … exit code 137`
+— pointing at a config that has nothing to do with sshd. Plain prose only.
 
-**This is a heredoc bug in the sshd config, not a memory problem.** 137 is SIGKILL,
-so it *looks* like the OOM killer — and it usually is, as the last resort for a
-build that has been spinning — but the cause is a one-line typo in
-`services.openssh.extraConfig`.
+### `mosh-server` not found / Mosh connects then dies
 
-nixpkgs renders `extraConfig` through an **unquoted** heredoc:
+- The bounded wrapper lives in `/run/current-system/sw/bin` (`programs.mosh`), not
+  on the stable per-user symlink. If mosh was bumped, restart whatever depends
+  on it and reconnect.
+- Over cellular, test plain SSH first. UDP shaping by the carrier is the usual
+  cause and there is no fix on this side.
 
-```nix
-sshconf = pkgs.runCommand "sshd.conf-final" { } ''
-  cat ${configFile} - >$out <<EOL
-  ${cfg.extraConfig}
-  EOL
-'';
-```
+### Gateway forwarding / Chat View fails, terminal is fine (Moshi only)
 
-`<<EOL`, not `<<'EOL'`, so the shell performs parameter expansion, command
-substitution and backslash processing on that text. A comment containing
-backticks — `` global `yes` on this host `` — makes the shell execute `yes`,
-which never returns. The build hangs until something kills it, and the log tail
-shows only that innocent-looking block, so it reads like an unrelated failure.
-
-**Check for shell metacharacters in the rendered text:**
+Port 2222's `Match` block carries `AllowTcpForwarding yes`. Verify it survived:
 
 ```fish
-nix eval --raw --impure --expr \
-  '(builtins.getFlake (toString ./.)).nixosConfigurations.legion.config.services.openssh.extraConfig' \
-  | grep -n '[$`\\]'
+sshd -T -C user=sonny,host=legion,addr=<ts-ip>,lport=2222 | grep -i allowtcpforwarding
 ```
-
-Any output means the config will misbehave. Use plain prose in those comments.
-The block in `config/system/mobile-agents.nix` carries a warning about this for
-the same reason.
-
-Note this makes `check-sshd-config` fail too, and then `etc` and the whole
-toplevel — a four-derivation cascade that points nowhere near the cause.
-
-### Moshi cannot find `herdr`
-
-`herdr` is not on the **non-interactive** SSH PATH, which is what Moshi probes.
-
-```fish
-ssh <host> 'echo $PATH; command -v herdr'
-ssh <host> 'sh -lc "command -v herdr"'    # what the "not installed" dot uses
-```
-
-On this host both already resolve to `/etc/profiles/per-user/sonny/bin/herdr`.
-If a future change breaks it, fix the PATH rather than reaching for
-`PermitUserEnvironment` — that is global, affects every user, and is not a PATH
-tool.
-
-### Daemon cannot find herdr, but the app can
-
-`moshi-hook doctor` says *"installed, but the moshi-hook daemon cannot find it"*.
-The app probes through a shell; the daemon does not. The unit already sets
-`MOSHI_HERDR_PATH` and an explicit `PATH`. Check they survived:
-
-```fish
-systemctl --user show moshi-hook.service -p Environment
-systemctl --user restart moshi-hook.service
-```
-
-### ~60 s hang, then an auth error, key is definitely authorized
-
-Tailscale SSH has hijacked port 22. Confirm with:
-
-```fish
-tailscale debug prefs | grep RunSSH     # RunSSH: true
-```
-
-The fix here is port 2222 (real OpenSSH), not disabling Tailscale SSH. If you
-deliberately connect to 22 from Moshi, empty the password and key fields and let
-Tailscale authenticate — but key auth will not work there, and mosh cannot
-bootstrap through it.
-
-### `mosh-server` not found
-
-Mosh bootstraps through a non-interactive SSH session, which loads no rc file.
-Our unit puts `/run/current-system/sw/bin` on the daemon's PATH. Verify:
-
-```fish
-ssh -p 2222 sonny@<host> 'command -v mosh-server'
-```
-
-If blank, set **Mosh path** in the connection's Mosh options to the absolute
-path, or check `programs.mosh.enable`.
-
-### Mosh connects then dies; UDP blocked
-
-```fish
-ss -lunp | grep mosh-server        # must be within 60000-60010
-tailscale ping <phone>
-```
-
-If the port is in range and `tailscale ping` works but mosh still fails, the
-**tailnet ACL** is dropping UDP. Confirm the `udp:60000-60010` grant exists —
-remember that is enforced before the host firewall is consulted. Carrier UDP
-shaping on cellular is the other candidate; use Connection type SSH.
-
-### Gateway forwarding / Chat View fails, terminal is fine
-
-The gateway must stay on loopback and be reached over the same SSH connection.
-On the host:
-
-```fish
-systemctl --user is-active moshi-hook.service
-ss -tlnp | grep 24543               # expect 127.0.0.1:24543, NOT 0.0.0.0
-```
-
-In the app: reconnect the terminal session so the forward is re-established. If
-Moshi says "disconnected", the tunnel is down, not the daemon.
-
-If `ss` shows `0.0.0.0:24543`, something overrode
-`MOSHI_HOOK_GATEWAY_LISTEN` — that would publish diffs and approval endpoints to
-every interface.
-
-### Chat View never becomes available
-
-Chat View relays prompts through tmux or herdr, so an agent in a **bare shell**
-is terminal-only no matter how the hooks are configured. Start it inside herdr
-(`pi` and `claude` do this for you). Also check **Settings → Chat Mode → Chat
-View → Enable Chat** is on. It is experimental and needs a live gateway.
 
 ### herdr will not start at boot
 
 ```fish
-loginctl show-user sonny -p Linger   # must be Linger=yes
+loginctl show-user sonny -p Linger        # must be Linger=yes
+systemctl --user is-enabled herdr.service
 systemctl --user status herdr.service
-journalctl --user -u herdr.service -b
 ```
-
-If `Linger=no`, the user manager starts at first login — the mobile flag sets
-`users.users.sonny.linger = true`, so re-check that `mobileAgents.enable` is
-still true and rebuild.
 
 ### Secrets missing after a cold boot
 
+`herdr.service` and `collie.service` both run `After=`/`Wants=`
+`sops-import-environment.service`. If the sops age key is missing, agents start
+without credentials:
+
 ```fish
 systemctl --user status sops-import-environment.service
-ls -l ~/.config/sops/secrets-env      # must exist and be readable
 ```
 
-herdr and moshi-hook both `After`/`Want` that unit, so the user manager
-environment is populated before either starts. `ANTHROPIC_API_KEY` is
-intentionally **not** exported (OAuth is used instead); that exclusion is
-honoured by both the secrets template and the session variables.
+### Duplicate notifications
 
-Do not print the environment to inspect it — use
-`systemctl --user show-environment | grep -c '^OPENAI_API_KEY='` to count
-matching entries (1 means present, 0 means absent) without printing the value.
-Replace `OPENAI_API_KEY` with the variable name you need to check.
-
-### Duplicate notifications / duplicate hooks
-
-```fish
-herdr agent list | grep -c '"agent"'      # expect one entry per agent
-grep -c moshi ~/.claude/settings.json     # one Moshi entry
-ls ~/.pi/agent/extensions/ | grep moshi   # exactly one moshi-hooks.ts
-```
-
-Two notification paths mean both a herdr hook and a Moshi hook are firing.
-Remove Moshi's entries with `moshi-hook uninstall`, then re-run
-`moshi-agent-hooks` if you still want them. Do not hand-edit
-`~/.pi/agent/extensions/herdr-agent-state.ts` — herdr owns and rewrites it.
+See §10. It is two enabled clients, not a bug, and the fix is a flag.
 
 ### Reconnect launched a second agent
 
-`herdr` on the host, from a second SSH session:
-
-```fish
-herdr agent list
-herdr workspace list
-```
-
-Attaching must not spawn anything. If a second agent appeared, it came from
-starting an agent again rather than from attaching — the wrappers reuse a fresh
-agent of the same kind in the same cwd, and only when one is not already
-running. Close the duplicate pane (`Ctrl-B` `X`) rather than killing the server.
+Reconnection must never start a process. If it seems to, the terminal client
+started one itself (a bare `pi` in the pane) rather than attaching. Check
+`herdr agent list` for two entries in one pane and delete the duplicate.
 
 ### Something is in the way after a rebuild
 
-```fish
-nswitch-confirm            # if you already verified, make it permanent
-nixos-rollback-to <gen>    # otherwise, revert and reboot
-```
+`nswitch-safe` arms a dead-man timer. If the rebuild finished but you did not
+run `nswitch-confirm`, the host reverts on its own:
 
-If the rebuild succeeded but a unit did not reload,
-`systemctl --user daemon-reload`.
+```fish
+nswitch-confirm
+```
 
 ---
 
-## 11. Acceptance checklist
+## 12. Migration from the Moshi-only setup
 
-Two columns: **build-level** (safe, done from this repo) and **device-level**
-(needs the phone and a real rebuild). Nothing disruptive was run against live
-agents — §12 says exactly what was and was not executed.
+Nothing here is destructive, and the order is chosen so the phone is never
+without a way in.
 
-### Build-level
+**Before:** PR #1 configured port 2222, bounded mosh and `linger`; herdr starts
+at boot. The phone key is still `null` in the checked-in configuration. Provision
+`phoneAuthorizedKey` using §8, rebuild, verify the tailnet policy (§4), and test
+SSH/Mosh from the phone before treating the fallback as live or disabling Moshi.
 
-- [x] `alejandra --check` passes on all changed files.
-- [x] `nix eval` clean for `legion`: ports `[2222]`, `openFirewall false`,
-      `linger true`, `moshEnable true`, `moshFw false`, `withUtempter false`,
-      no 60000-61000 in `allowedUDPPortRanges`.
-- [x] `nix eval` clean for `gs65` (leak check): `ports [22]`, `moshEnable
-      false`, `linger null`, no `moshi-hook` unit, herdr still
-      `graphical-session.target`.
-- [x] `sshd -t` accepts the generated config, and `sshd -T -C …lport=…` shows
-      port 22 keeping today's live settings while 2222 resolves to
-      `PasswordAuthentication no` / `KbdInteractiveAuthentication no` /
-      `PermitRootLogin no` / `AllowAgentForwarding no` / `AllowTcpForwarding yes`.
-      Verified against the config Nix actually built
-      (`system.build.etc/etc/ssh/sshd_config`), not a hand-assembled copy.
-- [x] Rendered `extraConfig` contains no backtick, `$` or backslash, since
-      nixpkgs renders it through an unquoted heredoc (§10).
-- [x] `moshi-hook 0.4.11` builds from the pinned hash, which matches upstream's
-      published `checksums.txt`.
-- [x] The bounded `mosh-server` wrapper is the one on PATH, asserted at build
-      time by comparing link targets.
-- [x] `moshi-server` with `-p 60000:60010` binds a port **inside** the range —
-      verified live (`MOSH CONNECT 60000`).
-- [x] Exactly **one** herdr in the closure; `MOSHI_HERDR_PATH` is the same
-      stable profile symlink herdr's own unit uses.
-- [x] herdr unit diff is confined to `WantedBy` and graphical-session `After`
-      ordering; `ExecStart`, `ExecCondition`, `KillMode=mixed`,
-      `Restart=on-failure`, no `PartOf` all unchanged.
-- [x] Warning emitted while `phoneAuthorizedKey` is null.
+**The change** is: add Collie, turn Moshi off.
+
+```nix
+# nixos/hosts/legion/options.nix
+mobileAgents = {
+  enable = true;
+  collie = {
+    enable = true;
+    trustedUser = "snorrekstrand@hotmail.com";        # tailscale status --json | jq -r '.Self.UserID.email'
+    serveHosts = ["legion.tailf24d02.ts.net"];        # tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
+  };
+  moshi = {
+    enable = false;
+  };
+};
+```
+
+**Then**, in order:
+
+1. Enable HTTPS for the tailnet (admin console → DNS → Enable HTTPS), once,
+   and verify the effective TCP 443 allow rule for the phone → Legion (§4).
+2. Add the `collie` flake input and rebuild (`nix flake lock`, then
+   `nswitch-safe` from tmux). **herdr is not restarted**; its unit text is
+   unchanged.
+3. `systemctl --user status collie` and `curl -I https://legion.tailf24d02.ts.net/`.
+4. Install the PWA on the phone (§6).
+5. `collie pair` and pair inside the app (§5).
+6. Optional: `collie push-keys`, restart, enable Alerts (§7).
+7. Optional: `collie hooks install claude` (§5).
+8. Only now uninstall Moshi from the phone if you are done with it. The host
+   side is already gone — `moshi-hook` is no longer on `PATH` and no unit exists.
+
+**Roll back at any point:** `mobileAgents.collie.enable = false` and rebuild.
+The configured SSH/Mosh fallback is preserved; access depends on the phone key
+and tailnet policy verified above.
+
+---
+
+## 13. Acceptance tests
+
+Two columns. Checked **build-level** items record prior validation, with focused
+checks of the updated assertion and Serve unit noted below. **Device-level** needs
+the phone and a real activation, and nothing disruptive was run against live
+agents.
+
+### Build-level — historical results and focused rechecks
+
+- [x] `alejandra --check` passes on every changed file. (`config/home/default.nix`
+      has a pre-existing deviation that master also has; left alone rather than
+      reformatted, to keep the diff reviewable.)
+- [x] `nix eval` clean for `legion`: `sshd.ports [22 2222]`, `openFirewall false`,
+      `allowedTCPPorts` unchanged, `linger true`, bounded `mosh-server`
+      wrapper, `WARNING` emitted while `phoneAuthorizedKey` is null.
+- [x] `nix eval` clean for `gs65`, and `gs65` + `gs65-fast` produce a
+      **byte-identical `system.build.toplevel` derivation** before and after this
+      change — no option leakage to a host that did not opt in. `legion` and
+      `legion-fast` differ, as intended.
+- [x] The `collie` flake package **builds** (including upstream's `doInstallCheck`,
+      which runs `collie --version` on the patchedelf'd binary) and installs
+      upstream's `$out/lib/collie` + `$out/bin/collie` symlink layout, which is
+      what `bridge/root.ts` resolves its install root through.
+- [x] The generated `collie.service` contains `COLLIE_TRUSTED_USER=<email>`,
+      `COLLIE_PUBLIC_HOSTS=<host>`, `HERDR_SOCKET_PATH=%h/.config/herdr/herdr.sock`,
+      `COLLIE_MUX=herdr`, `ExecStart=… _exec-bridge`, `EnvironmentFile=-…`,
+      `NoNewPrivileges`, `PrivateTmp`, `StartLimitIntervalSec=0`,
+      `After/Wants = herdr.service sops-import-environment.service`, and **no**
+      `Requires`/`PartOf`/`BindsTo` on herdr.
+- [x] `collie update --check` on this derivation reports
+      `updates come from your package manager` — the packaged-install
+      classification works, so the updater cannot replace the Nix-owned binary.
+- [x] Focused NixOS module evaluation: the generated `tailscale-serve-collie.service` runs
+      `tailscale serve --bg --https=443 http://127.0.0.1:8787` and stops with
+      `tailscale serve --https=443 off`; no `svc:collie` is configured. Both
+      enable flags and a custom Collie port were checked; activation was not.
+- [x] `herdr.service`'s generated unit is **byte-identical** before and after this
+      change (same store path) — activation will not restart it, and no live
+      agent is interrupted.
+- [x] `home.packages` still contains exactly **one** herdr, plus `collie-1.15.0`;
+      `environment.systemPackages` count is unchanged (208 → 208).
+- [x] `sshd -T -C …lport=…` against the config Nix actually built: port 22 keeps
+      `PasswordAuthentication yes` / `KbdInteractiveAuthentication yes` /
+      `PermitRootLogin prohibit-password`, while 2222 resolves to `no` / `no` /
+      `no` with `AllowTcpForwarding yes` and `AllowAgentForwarding no`.
+- [x] `tailscale serve status` reported `No serve config` (and `--json` `{}`)
+      before the change, so nothing is being overwritten.
+- [x] Focused assertion evaluation: `trustedUser = null`, `trustedUser = ""`,
+      and `serveHosts = []` each produce a false assertion when enabled. A valid
+      identity and host pass; disabling Collie still permits null/empty values.
+- [x] The Moshi-off path and the Moshi-on path both evaluate; with
+      `moshi.enable = true` the unit reappears at
+      `MOSHI_HOOK_GATEWAY_LISTEN=127.0.0.1:24543` from
+      `opts.mobileAgents.moshi.gatewayPort`.
+- [x] `gs65` still evaluates with zero warnings.
 
 ### Device-level — manual, after a real activation
 
-- [ ] **SSH 2222 authenticates with the phone key through Tailscale.**
-      `ssh -p 2222 -i ~/.ssh/moshi_phone sonny@<ts-ip>` works; an unauthorized
-      key does not.
-- [ ] **Recovery on 22 still works.** `ssh -p 22 sonny@<ts-ip>` (Tailscale SSH)
-      and LAN SSH both still succeed. Confirm `RunSSH: true`.
-- [ ] **New ports are unreachable from ordinary LAN/WAN.** From another machine
-      on the LAN, probe `nc -vz -w 5 <legion-lan-ip> 2222` and
-      `sudo nmap -sU -p 60000-60010 <legion-lan-ip>`. From a non-tailnet WAN
-      machine, probe `nc -vz -w 5 <legion-public-ip> 2222` and
-      `sudo nmap -sU -p 60000-60010 <legion-public-ip>` against each public
-      address (add `-6` for IPv6). UDP `open|filtered` is inconclusive: confirm
-      drops with firewall counters or packet capture while probing with a live
-      Mosh session. Leave this item unchecked until TCP 2222 and every UDP port
-      in 60000–60010 are confirmed unreachable from both vantage points.
-      Over the tailnet, SSH and Mosh must still succeed.
-- [ ] **The configured Mosh UDP range is actually used.** During a mosh session:
-      `ss -lunp | grep mosh-server` shows a port within `60000-60010`.
-- [ ] **Closing and reopening Moshi preserves the same agent process.** Note
-      `herdr agent list` PIDs, background the app, reopen, confirm unchanged.
-- [ ] **Wi-Fi → cellular preserves the same process.** Same check across the
-      switch. This is the headline Mosh benefit — confirm it.
-- [ ] **Desktop-to-phone attachment does not duplicate agents.** Attach from the
-      phone while watching `herdr agent list` on the desktop: count unchanged.
-- [ ] **Logout does not terminate the server.** Log out on the desktop; the
-      phone can still attach and the same PIDs are there.
-- [ ] **Scheduled cold-boot test.** Schedule a reboot with nothing to save.
-      After boot, *without logging in*, from the phone: herdr is reachable, and
-      agents can start with credentials present. Verify unattended startup and
-      secrets readiness:
+Each line says what "working" looks like. None has been run.
+
+- [ ] **Collie loads on the phone** at `https://legion.tailf24d02.ts.net`, over
+      the tailnet, with Tailscale on. The dashboard lists the herdr workspaces
+      and panes that exist right now.
+- [ ] **Private, not public.** From a machine *not* on the tailnet, the URL does
+      not resolve and does not connect. From a phone on the tailnet, it does.
+- [ ] **Tailnet policy.** Confirm the effective rule permits the phone → Legion
+      on TCP 443, then load the Serve URL. A source denied TCP 443 by policy
+      cannot connect. Check TCP 2222 and UDP 60000-60010 for the fallback too.
+- [ ] **Identity gate.** From a tailnet device permitted TCP 443 by policy but
+      belonging to another user (or a tagged node), confirm Collie refuses the
+      request. This checks `COLLIE_TRUSTED_USER` independently of the ACL.
+- [ ] **Pairing.** Before pairing, typing into a pane from the phone is refused
+      (`device not paired`). After pairing it works.
+- [ ] **pi.** Start `pi` in a herdr pane from the phone; the terminal mirror
+      updates; a prompt sent from the phone reaches the running agent.
+- [ ] **Claude Code.** Same, in a pane running Claude Code. If the beacon hook is
+      installed, the pane is labelled with the session; without it, the pane is
+      still usable, just less well labelled.
+- [ ] **OpenCode.** Same, in a pane running OpenCode.
+- [ ] **No agent is duplicated by attaching.** Note `herdr agent list` PIDs on
+      the desktop, browse from the phone, confirm the count is unchanged.
+- [ ] **Reconnect.** With a session open, switch Wi-Fi → cellular → Wi-Fi, and
+      separately lock and unlock the screen, and separately background Chrome
+      for a minute. The page reconnects and the same agent process answers.
+      (For a *shell* reconnect this is mosh's job — see §8 — not Collie's.)
+- [ ] **Desktop logout does not terminate the server.** Log out on the desktop;
+      the phone still reaches every pane with the same PIDs.
+- [ ] **Cold boot, no login.** Reboot with nothing to save. After boot,
+      *without logging in*, from the phone:
       ```fish
-      loginctl show-user sonny -p Linger        # Linger=yes
-      systemctl --user is-active herdr.service  # active, no login
-      systemctl --user is-active moshi-hook.service
+      loginctl show-user sonny -p Linger          # Linger=yes
+      systemctl --user is-active herdr.service    # active
+      systemctl --user is-active collie.service   # active
       ```
-      Confirm no desktop login was needed. Note the Wayland caveat from §1.
-- [ ] **`moshi-hook doctor`** reports daemon, gateway, herdr, pairing, and each
-      installed agent ✓.
-- [ ] **Notifications and supported approvals work.** Trigger an approval prompt
-      from a host-side agent; it appears on the phone and Approve/Deny acts on
-      the live session.
-- [ ] **Disabling moshi-hook leaves ordinary herdr access working.**
-      `systemctl --user stop moshi-hook.service`, then attach from the phone and
-      run `pi`: the terminal, herdr and the agents are all fine; only the Inbox,
-      Chat View and diff/browser preview are gone.
-- [ ] **Termux fallback works.** `ssh legion`, `mosh legion`, `herdr`, start `pi`.
-- [ ] **Android Chat View: UNVERIFIED.** See below.
+      Confirm Collie shows the panes. Note the Wayland caveat from §1.
+- [ ] **Web Push, if enabled.** `collie push-test` produces a notification on the
+      phone. Then a real agent needing input produces exactly **one** push
+      within ~30 s of `COLLIE_NOTIFY_DELAY_MS`.
+- [ ] **Exactly one notification per event.** With Moshi off, an agent waiting
+      for input produces one notification, not two.
+- [ ] **Device revocation.** `collie devices revoke <label>`, then try to type
+      from that phone: refused, without restarting the daemon.
+- [ ] **Disabling Collie preserves configured fallback access.** Run only after
+      `phoneAuthorizedKey` is configured and SSH/Mosh access is verified (§8);
+      otherwise this check is blocked.
+      `systemctl --user stop collie`, then attach over SSH 2222 from Termux and
+      run `pi`: the terminal, herdr and the agents are all fine; only the web UI
+      is gone.
+- [ ] **Moshi still works when re-enabled** (§9), or is confirmed unwanted.
 
-### Android-specific feature status
+### Feature status
 
-Marked honestly rather than assumed. Everything above the divider was verified on
-this host; everything below needs a physical Android device and has not been
-tested.
+The table distinguishes prior host validation from the updated mapping and
+physical Android checks that remain unverified.
 
 | Feature | Status |
 | --- | --- |
-| SSH on 2222 with phone key | **UNVERIFIED on device** (config verified via `sshd -T`) |
-| Mosh over Tailscale, UDP range honoured | **UNVERIFIED on device** (server-side binding verified live) |
-| Reconnect / Wi-Fi→cellular persistence | **UNVERIFIED on device** |
-| Moshi session picker listing herdr | **UNVERIFIED on device** |
-| Agent hooks: pi, Claude Code, OpenCode | **UNVERIFIED on device** (not yet installed; `moshi-hook doctor` reports "hooks out of date" for all three) |
-| Inbox notifications | **UNVERIFIED on device** (host is not paired) |
-| Chat View | **UNVERIFIED — treat as iOS-first.** Upstream's Chat View page is written entirely around iOS (Live Activity, Apple Watch, Command-Enter, iCloud sync). Android has the app and the hooks, but Chat View parity is not documented. Confirm in-app before relying on it; the plain terminal is the supported path either way. |
-| Biometric key storage | **UNVERIFIED** (app-side) |
-| Push notification permission flow | **UNVERIFIED** (app-side) |
+| Collie package builds, pinned, updater-declining | **verified** |
+| Nix-owned unit + private Tailscale Serve mapping | **verified (focused module eval); activation UNVERIFIED** |
+| `COLLIE_TRUSTED_USER` and `COLLIE_PUBLIC_HOSTS` emitted | **verified (unit text)** |
+| herdr untouched by activation | **verified (identical unit)** |
+| No impact on `gs65` | **verified (identical derivation)** |
+| Collie PWA on Android | **UNVERIFIED on device** |
+| Pairing flow end to end | **UNVERIFIED on device** |
+| pi / Claude Code / OpenCode from the phone | **UNVERIFIED on device** |
+| Reconnect persistence (WebSocket) | **UNVERIFIED on device** |
+| Device revocation, live | **UNVERIFIED on device** (upstream-documented) |
+| Web Push delivery on Android | **UNVERIFIED on device** |
+| SSH on 2222 with the phone key | **UNVERIFIED on device** (`sshd -T` verified) |
+| Mosh over the tailnet, range honoured | **UNVERIFIED on device** (server binding verified live) |
+| Moshi Chat View on Android | **UNVERIFIED — treat as iOS-first** |
 
 ---
 
-## 12. What was and was not executed
+## 14. What was and was not executed
 
 **Executed (build validation):**
 
-- `alejandra --check` on all changed `.nix` files — passes.
-- `nix eval` of `legion` and `gs65` — both clean; option values recorded in §11.
-- `sshd -t` plus `sshd -T -C …lport=22` and `…lport=2222` against this host's
-  OpenSSH 10.5p1, run against the config Nix actually produced
-  (`system.build.etc/etc/ssh/sshd_config`), with only the `HostKey` lines
-  redirected at throwaway keys in `/tmp` so the check does not need the real
-  ones. The **live** sshd was not reconfigured or restarted.
-- `nix build .#nixosConfigurations.legion.config.system.build.toplevel` at `-j2`
-  → exit 0.
-- Built `moshi-hook 0.4.11` from the pinned hash; verified the hash against
-  upstream's `checksums.txt` and against `sha256sum` of the downloaded
-  archive.
-- Built the bounded mosh package; verified by `readlink` that the wrapper, not
-  the real binary, is `bin/mosh-server`; ran `mosh-server` with a fake SSH
-  backend and confirmed via `ss` and the `MOSH CONNECT` line that it allocates
-  only within `60000-60010`.
-- `nix build` of `programs.mosh.package` for `legion`.
-- Read-only probes against the live host: `moshi-hook doctor`,
-  `herdr status server`, `herdr agent list`, one loopback `ssh` to inspect
-  `$PATH`, `systemctl cat` / `show` on units, `/etc/ssh/sshd_config`.
+- `alejandra --check` on all changed files.
+- `nix flake lock`, and a full build of the pinned `collie` package including
+  upstream's `doInstallCheck`.
+- `nix eval` of `legion`, `legion-fast`, `gs65` and `gs65-fast`, old and new,
+  comparing `system.build.toplevel.drvPath`.
+- Reading the generated `collie.service`, the original named-Service JSON
+  and `ExecStart` of `tailscale-serve.service` (superseded by the node-level
+  `tailscale-serve-collie.service`; its activation remains unverified),
+  `home.packages`, `environment.systemPackages`, the firewall, DNS and
+  Tailscale flag lists.
+- `sshd -T -C …lport=22` and `…lport=2222` against the sshd config Nix actually
+  built, with only the `HostKey` lines redirected at throwaway keys in `/tmp`.
+- `collie update --check`, `collie version`, `collie help`, `collie status` and
+  `collie url` against the built package, with `HOME` pointed at a throwaway
+  directory so nothing touched real state.
+- Both fail-closed assertions, and both `moshi.enable` values.
 
-**NOT executed (deliberately):**
+**Not executed — deliberately, and each is a manual step in this document:**
 
-- `nixos-rebuild switch` — the live generation was **not** switched. Port 2222
-  is not open yet; that needs the activation in §2.
-- No reboot, no `switch-to-configuration`, no `systemctl restart sshd`.
-- **herdr was not stopped or restarted.** `herdr status server` reported
-  `running` throughout and the 6 live pi agents were untouched. Every herdr check
-  above is an eval of the generated unit, not a runtime change.
-- `moshi-hook` was **not** installed, paired, or started on the live host; no
-  agent hooks were written to `~/.claude`, `~/.pi` or `~/.config/opencode`. No
-  existing agent config was modified. `doctor` was run read-only.
-- No key was generated, and `phoneAuthorizedKey` is still `null`.
-- No tailnet ACL was changed.
-- Every device-level checkbox in §11 remains untested.
-- `pkgs.mosh` is **patched only inside this closure** (`-std=c++20`, in
-  `pkgs/moshi-hook.nix`). Any other consumer of mosh from this flake's nixpkgs
-  gets the unpatched derivation and would fail to build. Revisit when nixpkgs
-  fixes mosh.
+- `nixos-rebuild` / `switch-to-configuration` of any kind. **No generation was
+  activated.**
+- Any reboot.
+- Any restart, stop or reload of `herdr`, `sshd`, `tailscaled`, `moshi-hook` or
+  anything else live. **No agent was interrupted.**
+- `tailscale serve` — the mapping was evaluated, never applied.
+- `collie pair`, `collie push-keys`, `collie push-test`, `collie hooks install`,
+  `collie devices revoke`, `moshi-agent-hooks`.
+- Every device test in §13.
+- Editing `~/.claude/settings.json`, `~/.pi/agent/extensions/`, or any file a
+  herdr-managed hook owns.
 
-### Known blocker
+**Known limitation, carried over from PR #1:** `phoneAuthorizedKey` is still
+`null`, so port 2222 has no key authorized and the build warns. Collie does not
+need it; the SSH/Mosh fallback does.
 
-`moshi-hook` 0.4.11 requires Moshi Pro (or an active trial) for **Chat View**;
-the terminal, Mosh, herdr and the agent hooks do not require it. Everything else
-in this document works on the free tier.
-
-### Out of scope for this change
-
-Optional **OpenCode Web** and **Claude Remote Control** are deliberately not
-part of the initial implementation. This setup reaches the agents already
-running inside herdr; adding a second, web-based control surface would be a
-different architecture with a different trust story.
+**Out of scope for this change:** crew / multi-machine, speech-to-text,
+attachments, themes and quick replies, `config.toml`, anything involving a
+reverse proxy, and any Tailnet ACL edit. ACL grants are documented in §4 for you
+to apply.

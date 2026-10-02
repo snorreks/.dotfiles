@@ -92,6 +92,36 @@
       url = "github:shreyanth-sureshkrishnaa/pyroclear";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Collie — the phone web UI for the SAME herdr workspaces and agents: a
+    # PWA served over private Tailscale Serve, gated on a Tailscale identity
+    # and paired per device. See docs/mobile-agents.md.
+    #
+    # PINNED BY TAG, not by branch. A tag is a `chore(release): x.y.z` commit,
+    # so moving the binary is the explicit `nix flake update collie`; a branch
+    # would move under a plain `nix flake update` and swap the daemon a phone
+    # is talking to with no reviewable diff. The rev and narHash that this tag
+    # resolved to are both recorded in flake.lock.
+    #
+    # nixpkgs.follows: upstream pins its own nixpkgs revision for the BUILD
+    # ENVIRONMENT (bun, node, tmux, zellij), which we have no use for. Only
+    # `packages.<system>.{collie,default}` is consumed, and that derivation is
+    # `pkgs.callPackage ./packaging/nix/collie.nix` over a `fetchurl` of the
+    # published release tarball — so following our nixpkgs changes which
+    # autoPatchelfHook rewrites the ELF interpreter in, and nothing about the
+    # payload itself.
+    #
+    # ⚠ The package WRAPS a published release tarball; it never builds from
+    # source (`bun install` needs the network, a Nix derivation has none). Its
+    # version comes from `packaging/nix/sources.json` at that tag, and upstream
+    # refreshes that file ONE RELEASE LATE: at tag v1.15.3 it still names
+    # v1.15.0. So `collie version` under this input reports 1.15.0+<rev>. That
+    # is upstream's lag, not a Nix packaging mistake — the manifest and hashes
+    # in that file are what prove the payload is the real signed release.
+    collie = {
+      url = "github:AltanS/collie/v1.15.3";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
   outputs = {nixpkgs, ...} @ inputs: let
     system = "x86_64-linux";
