@@ -258,7 +258,7 @@ rec {
       #
       # Exactly the string Tailscale puts in the `Tailscale-User-Login`
       # header: your tailnet email, lowercase, NO trailing dot. Check it with
-      #   tailscale status --json | jq -r '.Self.UserID.email'
+      #   tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
       #
       # This is the outer of two independent gates. It answers "is this the
       # operator?" and fails CLOSED: a request that arrives with no

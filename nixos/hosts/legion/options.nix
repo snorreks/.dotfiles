@@ -85,8 +85,19 @@
       # from someone else. config/home/collie.nix asserts it is non-null and
       # non-empty, so a generation with no gate at all will not build.
       #
-      # Verify with: tailscale status --json | jq -r '.Self.UserID.email'
-      trustedUser = "snorrekstrand@hotmail.com";
+      # Verify with: tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
+      #
+      # 🔴 THIS IS THE TAILNET LOGIN, NOT opts.gitEmail. Those are two
+      # different addresses and using the wrong one is invisible here: the
+      # value is non-empty, so the assertion passes, the page still loads, and
+      # every API call is refused with `identity not trusted`. The Collie UI
+      # reports that refusal as "couldn't reach the bridge to pair", because
+      # paired-devices.tsx catches every rejection into one message.
+      #
+      # `tailscale status` truncates the local part, so snorristrand@gmail.com
+      # and any other snorristrand* address print identically in that listing.
+      # Only the UserProfile command above is unambiguous.
+      trustedUser = "snorristrand@gmail.com";
 
       # This machine's MagicDNS name. Check it any time with:
       #   tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'

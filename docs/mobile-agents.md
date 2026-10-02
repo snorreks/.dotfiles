@@ -255,8 +255,8 @@ arrives through Serve, and Collie rejects a mismatch. It also rejects an
 tailnet node is not a loopback caller, it is some other device.
 
 ```fish
-tailscale status --json | jq -r '.Self.UserID.email'
-# -> snorrekstrand@hotmail.com   (lowercase, NO trailing dot)
+tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
+# -> snorristrand@gmail.com   (lowercase, NO trailing dot)
 ```
 
 If you get the trailing dot, every request is refused with `identity not
@@ -305,7 +305,7 @@ setting.
 ```nix
 mobileAgents.collie = {
   enable = true;
-  trustedUser = "snorrekstrand@hotmail.com";
+  trustedUser = "snorristrand@gmail.com";
   serveHosts = ["legion.tailf24d02.ts.net"];
 };
 ```
@@ -375,12 +375,12 @@ For example, merge these grants into the tailnet policy, replacing
 {
   "grants": [
     {
-      "src": ["snorrekstrand@hotmail.com"],
+      "src": ["snorristrand@gmail.com"],
       "dst": ["<legion-tailnet-ip>"],
       "ip": ["tcp:443"]
     },
     {
-      "src": ["snorrekstrand@hotmail.com"],
+      "src": ["snorristrand@gmail.com"],
       "dst": ["<legion-tailnet-ip>"],
       "ip": ["tcp:2222", "udp:60000-60010"]
     }
@@ -406,8 +406,13 @@ command below embeds one.
 ### On the host
 
 ```fish
-collie pair
+HERDR_PLUGIN_CONFIG_DIR=~/.config/collie collie pair
 ```
+
+The prefix is for consistency with §7, not because pairing needs it: pairing
+state lives in `~/.local/state/collie/`, which the CLI and the bridge both
+resolve the same way without it. It costs nothing and it removes one more
+place for the two to disagree.
 
 Prints an 8-character code valid for **10 minutes**, plus a QR code that opens
 the pairing screen on the phone with the code already filled in.
@@ -481,9 +486,51 @@ Disabled by default. Collie is fully usable without it; it is what makes an
 approval request arrive while the phone is in a pocket.
 
 ```fish
-collie push-keys mailto:you@example.com
+HERDR_PLUGIN_CONFIG_DIR=~/.config/collie \
+  collie push-keys mailto:you@example.com
 systemctl --user restart collie
 ```
+
+#### 🔴 `HERDR_PLUGIN_CONFIG_DIR` is load-bearing here
+
+Without that prefix the keys land in the **wrong file** and push stays silently
+disabled. Verified on this host, and the failure is quiet:
+
+```
+$ collie push-keys mailto:…
+✓ wrote … to /home/sonny/.config/herdr/plugins/config/herdr.collie/.env (mode 600)
+$ ls ~/.config/collie/          # still empty — that is where the bridge reads
+```
+
+The bridge is Nix-supervised and reads the path its unit declares,
+`HERDR_PLUGIN_CONFIG_DIR=%h/.config/collie`. The **CLI** resolves the same
+variable itself, and its precedence is (from `cli/context.ts`):
+
+1. `HERDR_PLUGIN_CONFIG_DIR` from the environment, if set — **the only one that
+   wins unconditionally**;
+2. `herdr plugin config-dir herdr.collie`, *but only if a `.env` already exists
+   there*;
+3. `~/.config/collie`;
+4. `~/.config/collie`, else herdr's answer anyway.
+
+On a host with `herdr` on PATH and no `herdr.collie` plugin installed, step 2
+misses (no `.env` there), step 3 misses, so it falls to the last line and
+**herdr's answer wins**. And `herdr plugin config-dir herdr.collie` returns
+`~/.config/herdr/plugins/config/herdr.collie` even when `herdr plugin list`
+says *No plugins installed* — so it always looks like the right answer.
+
+Hence the prefix: it pins the CLI to the same directory the service reads, and
+it is the only one of the four paths that does not depend on what happens to be
+on disk. Pin every `collie` verb that writes config for the same reason.
+
+Confirm it worked — the log line is the only signal, because nothing else fails:
+
+```fish
+journalctl --user -u collie -n 5 --no-pager | grep '\[push\]'
+# [push] enabled (0 saved subscription(s))
+```
+
+`disabled (no VAPID keys configured)` means the keys went somewhere else.
 
 `push-keys` generates the keypair and writes `COLLIE_VAPID_PUBLIC` and
 `COLLIE_VAPID_PRIVATE` into `~/.config/collie/.env` **at mode 600**. That file
@@ -501,9 +548,9 @@ default).
 Test it:
 
 ```fish
-collie push-test
-collie push list            # subscribed endpoints
-collie push forget <substring>|--all
+HERDR_PLUGIN_CONFIG_DIR=~/.config/collie collie push-test
+HERDR_PLUGIN_CONFIG_DIR=~/.config/collie collie push list   # subscribed endpoints
+HERDR_PLUGIN_CONFIG_DIR=~/.config/collie collie push forget <substring>|--all
 ```
 
 Notifications are derived by Collie **polling the multiplexer**, not from agent
@@ -747,7 +794,7 @@ journalctl --user -u collie -n 50 | grep -iE "warning|refus|not allowed|identity
 | Log line | Cause | Fix |
 | --- | --- | --- |
 | `host not allowed` | `serveHosts` is empty or stale | `tailscale status --json \| jq -r '.Self.DNSName \| rtrimstr(".")'` and put it in `serveHosts` |
-| `identity not trusted` | `trustedUser` has a trailing dot, or is a different login | `tailscale status --json \| jq -r '.Self.UserID.email'` |
+| `identity not trusted` | `trustedUser` has a trailing dot, or is a different login | `tailscale debug prefs \| jq -r '.Config.UserProfile.LoginName'` |
 | `identity required` | the request arrived without a Serve header | you are reaching `127.0.0.1:8787` directly, or `tailscale serve` is not running — check `tailscale serve status` |
 | `no non-loopback Host is allowed` | `COLLIE_PUBLIC_HOSTS` empty | `serveHosts` again |
 | `COLLIE_TRUSTED_USER is empty` | running a generation that predates this change | rebuild |
@@ -773,6 +820,44 @@ Nix owns the unit and the Serve mapping. The next activation takes both back:
 systemctl --user stop collie          # do not run `collie stop`, it deletes the unit
 # rebuild; the unit and the mapping return to Nix's versions
 ```
+
+> ### 🔴 Ignore anything that tells you to reach Collie through a herdr plugin
+>
+> `collie push-keys` prints `herdr plugin action invoke restart --plugin
+> herdr.collie`, and `collie pair` and `collie start` print the same shape of
+> instruction. **On this host there is no such plugin** — `herdr plugin list`
+> says *No plugins installed*, because Collie is supervised by the Nix unit, not
+> by herdr. Running the printed command either fails or, worse, stands up a
+> second Collie beside the one systemd already owns.
+>
+> Every one of those becomes `systemctl --user restart collie`.
+
+### Push stays disabled after `collie push-keys`
+
+```
+[push] disabled (no VAPID keys configured)
+```
+
+The keys went to a file the bridge does not read. Check *both* locations:
+
+```fish
+ls -la ~/.config/collie/.env                                  # the bridge reads this
+ls -la ~/.config/herdr/plugins/config/herdr.collie/.env 2>/dev/null   # the CLI may write this
+```
+
+A file in the second place with an empty first place is §7's config-dir
+redirect, not a broken keypair. Move it:
+
+```fish
+mv ~/.config/herdr/plugins/config/herdr.collie/.env ~/.config/collie/.env
+chmod 600 ~/.config/collie/.env
+rmdir ~/.config/herdr/plugins/config/herdr.collie
+systemctl --user restart collie
+```
+
+Then `journalctl --user -u collie -n 5 --no-pager | grep '\[push\]'` must say
+`enabled`. Push reads its keys **at start only**, so a restart is required
+after moving them — no other change is.
 
 ### `systemd` did not restart Collie after an upgrade
 
@@ -876,7 +961,7 @@ mobileAgents = {
   enable = true;
   collie = {
     enable = true;
-    trustedUser = "snorrekstrand@hotmail.com";        # tailscale status --json | jq -r '.Self.UserID.email'
+    trustedUser = "snorristrand@gmail.com";        # tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
     serveHosts = ["legion.tailf24d02.ts.net"];        # tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
   };
   moshi = {

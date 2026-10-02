@@ -10,6 +10,21 @@
   environment.systemPackages = with pkgs; [
     openresolv
     wireguard-tools
+
+    # Herdr's agent-state hooks are shell scripts that shell out to python3 —
+    # ~/.claude/hooks/herdr-agent-state.sh and the per-agent equivalents. The
+    # guard on that is `command -v python3 >/dev/null || exit 0`, which is why
+    # this failure is invisible: without python3 the hook EXITS 0 while doing
+    # nothing, so herdr never learns which pane an agent session belongs to and
+    # `collie doctor` is the only thing that reports it (`error: hook-python3`).
+    #
+    # SYSTEM-WIDE, not home.packages, and that is the load-bearing choice: an
+    # agent's hook runs inside a herdr pane, and panes inherit the server's
+    # environment. herdr starts at boot under the lingering user manager with no
+    # login session behind it, so /run/current-system/sw/bin is the only PATH
+    # that is reliably present. The desktop PATH also has it after a rebuild,
+    # but the boot-time one would not.
+    python3
   ];
 
   # Passwordless sudo for VPN actions triggered from Waybar (no TTY).
