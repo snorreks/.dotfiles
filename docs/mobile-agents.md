@@ -565,6 +565,49 @@ Input → Gestures**.
 
 ## 10. Troubleshooting
 
+### `sshd.conf-final` fails with exit code 137
+
+```
+error: Cannot build '/nix/store/…-sshd.conf-final.drv'.
+  Reason: builder failed with exit code 137.
+```
+
+**This is a heredoc bug in the sshd config, not a memory problem.** 137 is SIGKILL,
+so it *looks* like the OOM killer — and it usually is, as the last resort for a
+build that has been spinning — but the cause is a one-line typo in
+`services.openssh.extraConfig`.
+
+nixpkgs renders `extraConfig` through an **unquoted** heredoc:
+
+```nix
+sshconf = pkgs.runCommand "sshd.conf-final" { } ''
+  cat ${configFile} - >$out <<EOL
+  ${cfg.extraConfig}
+  EOL
+'';
+```
+
+`<<EOL`, not `<<'EOL'`, so the shell performs parameter expansion, command
+substitution and backslash processing on that text. A comment containing
+backticks — `` global `yes` on this host `` — makes the shell execute `yes`,
+which never returns. The build hangs until something kills it, and the log tail
+shows only that innocent-looking block, so it reads like an unrelated failure.
+
+**Check for shell metacharacters in the rendered text:**
+
+```fish
+nix eval --raw --impure --expr \
+  '(builtins.getFlake (toString ./.)).nixosConfigurations.legion.config.services.openssh.extraConfig' \
+  | grep -n '[$`\\]'
+```
+
+Any output means the config will misbehave. Use plain prose in those comments.
+The block in `config/system/mobile-agents.nix` carries a warning about this for
+the same reason.
+
+Note this makes `check-sshd-config` fail too, and then `etc` and the whole
+toplevel — a four-derivation cascade that points nowhere near the cause.
+
 ### Moshi cannot find `herdr`
 
 `herdr` is not on the **non-interactive** SSH PATH, which is what Moshi probes.
@@ -738,6 +781,10 @@ agents — §12 says exactly what was and was not executed.
       port 22 keeping today's live settings while 2222 resolves to
       `PasswordAuthentication no` / `KbdInteractiveAuthentication no` /
       `PermitRootLogin no` / `AllowAgentForwarding no` / `AllowTcpForwarding yes`.
+      Verified against the config Nix actually built
+      (`system.build.etc/etc/ssh/sshd_config`), not a hand-assembled copy.
+- [x] Rendered `extraConfig` contains no backtick, `$` or backslash, since
+      nixpkgs renders it through an unquoted heredoc (§10).
 - [x] `moshi-hook 0.4.11` builds from the pinned hash, which matches upstream's
       published `checksums.txt`.
 - [x] The bounded `mosh-server` wrapper is the one on PATH, asserted at build
@@ -827,8 +874,12 @@ tested.
 - `alejandra --check` on all changed `.nix` files — passes.
 - `nix eval` of `legion` and `gs65` — both clean; option values recorded in §11.
 - `sshd -t` plus `sshd -T -C …lport=22` and `…lport=2222` against this host's
-  OpenSSH 10.5p1, using a scratch config and a throwaway host key in
-  `/tmp`. The **live** sshd was not reconfigured or restarted.
+  OpenSSH 10.5p1, run against the config Nix actually produced
+  (`system.build.etc/etc/ssh/sshd_config`), with only the `HostKey` lines
+  redirected at throwaway keys in `/tmp` so the check does not need the real
+  ones. The **live** sshd was not reconfigured or restarted.
+- `nix build .#nixosConfigurations.legion.config.system.build.toplevel` at `-j2`
+  → exit 0.
 - Built `moshi-hook 0.4.11` from the pinned hash; verified the hash against
   upstream's `checksums.txt` and against `sha256sum` of the downloaded
   archive.

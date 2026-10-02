@@ -1,0 +1,33 @@
+--- a/protonup/api.py
++++ b/protonup/api.py
+@@ -98,11 +98,12 @@
+             print('[ERROR] invalid tag / binary not found')
+         return False
+     # fixes new naming scheme ##################
+-    protondir = installdir
+-    if not version or version.startswith('GE-'):
+-        protondir += data['version']
+-    else:
+-        protondir += 'Proton-' + data['version']
++    # Since GE-Proton 11-6 each release ships one tarball per architecture
++    # (GE-ProtonX-Y-x86_64.tar.gz, GE-ProtonX-Y-aarch64.tar.gz) and each one
++    # extracts into a directory carrying the same suffix. The install directory
++    # therefore has to follow the asset name, not the release tag, otherwise the
++    # sha512sum marker is written to a directory that was never created.
++    protondir = installdir + data['download'].rsplit('/', 1)[-1][:-len('.tar.gz')]
+     ############################################
+     checksum_dir = protondir + '/sha512sum'
+     source_checksum = requests.get(data['checksum']).text if 'checksum' in data else None
+@@ -191,4 +192,12 @@
+     if os.path.exists(target):
+         shutil.rmtree(target)
+         return True
++    # Per-architecture releases install as '<version>-x86_64' / '-aarch64',
++    # so accept an unsuffixed tag as long as it matches exactly one install.
++    installdir = install_directory()
++    matches = [folder for folder in installed_versions()
++               if folder == version or folder.startswith(version + "-")]
++    if len(matches) == 1:
++        shutil.rmtree(installdir + matches[0])
++        return True
+     return False

@@ -58,6 +58,34 @@ in {
   services.openssh.openFirewall = lib.mkIf cfg.enable false;
   networking.firewall.allowedTCPPorts = lib.mkIf cfg.enable [22];
 
+  # 🔴🔴 The string below is interpolated into an UNQUOTED heredoc by the
+  # sshd module:
+  #
+  #   sshconf = pkgs.runCommand "sshd.conf-final" { } ''
+  #     cat ${configFile} - >$out <<EOL
+  #     ${cfg.extraConfig}
+  #     EOL
+  #   '';
+  #
+  # Note `<<EOL`, not `<<'EOL'`. The shell therefore performs parameter
+  # expansion, command substitution and backslash processing on this text.
+  #
+  # So: NO backticks, and be careful with $ and \. A comment here reading
+  # "global `yes` on a desktop host" makes the shell run `yes`, which never
+  # returns: the build hangs for a minute and is then killed by the OOM killer,
+  # which surfaces as the deeply misleading
+  #
+  #   error: Cannot build '…-sshd.conf-final.drv'.
+  #     Reason: builder failed with exit code 137.
+  #
+  # on the config that has nothing to do with sshd at all. That is not a
+  # hypothetical — it is exactly how this branch broke the first rebuild, and it
+  # cost a confusing debugging session because the log tail shows only this
+  # innocent-looking block. Plain prose, no shell metacharacters.
+  #
+  # $(...) and ${...} are equally unsafe; `lib.sshConf` does not need any of
+  # them here, which is why none appear below.
+
   # `Match LocalPort` scopes the hardening to 2222 alone. Verified against this
   # host's OpenSSH 10.5p1 with `sshd -T -C ...lport=…`: port 22 keeps
   # PasswordAuthentication/KbdInteractiveAuthentication yes and
@@ -66,10 +94,12 @@ in {
   # rather than global `settings` — hardening the port the phone uses must not
   # lock anyone out of the port that rescues the box.
   services.openssh.extraConfig = lib.mkIf cfg.enable ''
+    # 🔴 Read the heredoc warning above before adding any text here. The
+    # rendered text must contain no backticks, dollar signs or backslashes.
     Match LocalPort ${toString cfg.sshPort}
       # Key-only. PasswordAuthentication and KbdInteractiveAuthentication are
-      # global `yes` on a desktop host (server.nix only pins them off when
-      # headless = true, and Legion is not headless), so a phone-facing
+      # globally enabled on a desktop host (server.nix only pins them off when
+      # headless = true, and the Legion is not headless), so a phone-facing
       # listener would otherwise be a password-guessable one.
       PasswordAuthentication no
       KbdInteractiveAuthentication no
