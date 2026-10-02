@@ -124,6 +124,27 @@
         "type": "github"
       }
     },
+    "collie": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790932122,
+        "narHash": "sha256-KO8FGm6411axP/V3nE+gKS4xdr/ovqc+52watujnR3Y=",
+        "owner": "AltanS",
+        "repo": "collie",
+        "rev": "033bf1f546c14afae930f2358de80ab554794c2e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "AltanS",
+        "ref": "v1.15.3",
+        "repo": "collie",
+        "type": "github"
+      }
+    },
     "curd": {
       "inputs": {
         "nixpkgs": [
@@ -649,6 +670,7 @@
     "root": {
       "inputs": {
         "alejandra": "alejandra",
+        "collie": "collie",
         "curd": "curd",
         "disko": "disko",
         "herdr": "herdr",

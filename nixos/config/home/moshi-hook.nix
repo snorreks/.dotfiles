@@ -5,9 +5,29 @@
 # diff/browser preview served over a localhost gateway the phone reaches by
 # forwarding a port over the same SSH connection.
 #
-# Gated on opts.mobileAgents.enable (hosts/legion/options.nix). The system half
-# is config/system/mobile-agents.nix; the herdr unit is config/home/herdr.nix.
-# Full procedure in docs/mobile-agents.md.
+# Gated on opts.mobileAgents.enable AND opts.mobileAgents.moshi.enable. The
+# shared mobile infrastructure is config/system/mobile-agents.nix; the herdr
+# unit is config/home/herdr.nix; the primary Android interface is
+# config/home/collie.nix. Full procedure in docs/mobile-agents.md.
+#
+# ── Why this is separately switchable ───────────────────────────────────────
+#
+# Everything that makes the host reachable from a phone — the 2222 sshd
+# listener, the phone key, bounded mosh, `linger`, and the boot-time herdr
+# WantedBy — lives in the shared layer and does NOT depend on this module.
+# Turning Moshi off removes this unit and the installer helper and leaves the
+# phone a working Collie PWA and a working Termux/SSH fallback. That is the
+# whole reason the flag moved out of mobileAgents.enable: remote access and
+# client choice are different decisions.
+#
+# 🔴 Duplicate notifications. If this is on AND Collie is on, the phone can
+# receive TWO notifications for the same agent needing input — moshi-hook's from
+# agent events pushed to Moshi's servers, Collie's from its own mux poll pushed
+# by your own VAPID keys. They are different pipelines, not one deduplicated
+# one. Collie's agent hook (`collie hooks install claude`) does NOT contribute
+# here: it only writes a pane-identity beacon, and Collie derives every
+# notification from polling the multiplexer. So the two are independent, and
+# the fix is a switch, not a merge: on legion, moshi.enable = false.
 #
 # ── What this deliberately does NOT do ───────────────────────────────────────
 #
@@ -36,7 +56,7 @@
   ...
 }: let
   cfg = opts.mobileAgents;
-  enable = cfg.enable;
+  enable = cfg.enable && cfg.moshi.enable;
 
   moshiHook = import ../../pkgs/moshi-hook.nix {
     inherit
@@ -121,7 +141,7 @@ in {
         # of that to every interface on the machine. Moshi reaches it by SSH
         # forwarding (AllowTcpForwarding in mobile-agents.nix), not by
         # connecting directly, so loopback is sufficient and correct.
-        "MOSHI_HOOK_GATEWAY_LISTEN=127.0.0.1:24543"
+        "MOSHI_HOOK_GATEWAY_LISTEN=127.0.0.1:${toString cfg.moshi.gatewayPort}"
 
         # Absolute path, no PATH lookup. See the herdrPath note above.
         "MOSHI_HERDR_PATH=${herdrPath}"

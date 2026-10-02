@@ -79,7 +79,7 @@ AI-agent-heavy dev workflow.
 | [`docs/bootstrap.md`](./docs/bootstrap.md)                           | Fresh machine setup, Bitwarden/sops bootstrap, GS65 first install, using **disko** for a from-scratch install |
 | [`docs/impermanence-migration.md`](./docs/impermanence-migration.md) | Converting an existing (already-installed, dual-boot) disk to the impermanence layout in place                |
 | [`docs/headless-server.md`](./docs/headless-server.md)               | Running a host as an always-on, tailnet-only box: `headless = true`, safe remote rebuilds, remote builds      |
-| [`docs/mobile-agents.md`](./docs/mobile-agents.md)                   | Reaching the same herdr workspaces and agents from an Android phone over Tailscale (Moshi, or Termux)     |
+| [`docs/mobile-agents.md`](./docs/mobile-agents.md)                   | Reaching the same herdr workspaces and agents from an Android phone (Collie PWA over Tailscale Serve; SSH/Mosh and Termux as fallbacks) |
 | [`docs/forking.md`](./docs/forking.md)                               | Adapting this repo to your own identity, hardware, and accounts                                               |
 
 ## NixOS Management
@@ -196,7 +196,7 @@ See `.pi/skills/nixos-kernel-bump/SKILL.md` for full diagnosis steps.
 │ ├── bootstrap.md # New machine setup + disko usage
 │ ├── impermanence-migration.md # Migrating an existing install
 │ ├── headless-server.md # Always-on tailnet-only host mode
-│ ├── mobile-agents.md # Phone → herdr over Tailscale (Moshi, Termux fallback)
+│ ├── mobile-agents.md # Phone → herdr (Collie PWA, SSH/Mosh + Termux fallback)
 │ └── forking.md # Adapting this repo to your own setup
 ├── nixos/
 │ ├── flake.nix
@@ -204,6 +204,7 @@ See `.pi/skills/nixos-kernel-bump/SKILL.md` for full diagnosis steps.
 │ ├── secrets.yaml # Encrypted secrets (sops + Age)
 │ ├── options.nix
 │ ├── pkgs/ # Packages not in nixpkgs (msi-perkeyrgb, moshi-hook)
+│ ├── flake.nix # collie is a PINNED flake input (AltanS/collie), not a local package
 │ ├── system.nix
 │ ├── hosts/
 │ │ └── legion/ # Hardware configs
