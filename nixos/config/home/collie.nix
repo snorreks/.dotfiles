@@ -20,7 +20,7 @@
 # both facts are already in this repository:
 #
 #   the unit            → systemd.user.services.collie, below
-#   the front door      → services.tailscale.serve, in mobile-agents.nix
+#   the front door      → systemd.services.tailscale-serve-collie, in mobile-agents.nix
 #
 # So this module runs `collie _exec-bridge`, the "everything it needs is on its
 # own command line" entry point, which upstream documents as exactly what a
@@ -86,13 +86,12 @@ in {
   # almost always an oversight, and it is the one oversight in this whole setup
   # whose failure mode is silent and total. So: refuse to build instead.
   #
-  # Null is the reason the assertion exists. An empty string would pass it and
-  # disable the gate, which is the thing being prevented.
+  # Reject both null and the empty string: either would leave the gate unset.
   assertions = [
     {
-      assertion = !cfg.enable || cfg.trustedUser != null;
+      assertion = !cfg.enable || (cfg.trustedUser != null && cfg.trustedUser != "");
       message = ''
-        opts.mobileAgents.collie.trustedUser is not set, so Collie would run with
+        opts.mobileAgents.collie.trustedUser is null or empty, so Collie would run with
         NO identity gate: every tailnet device that can reach the Serve URL gets
         full write access to your agents' panes.
 
@@ -116,7 +115,7 @@ in {
 
         Set it to this machine's MagicDNS name:
 
-          tailscale status --json | jq -r '.Self.DNSName' | tr -d '.'
+          tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
       '';
     }
   ];
@@ -224,7 +223,7 @@ in {
         # and Collie rejects a mismatch — and rejects an ABSENT header, because
         # this gate fails closed. That last part is why COLLIE_SKIP_SERVE is
         # deliberately NOT set: Collie disables the identity check entirely when
-        # it believes no Serve is in front, and `services.tailscale.serve` in
+        # it believes no Serve is in front, and `tailscale-serve-collie` in
         # mobile-agents.nix is exactly a Serve in front, whatever Collie
         # believes. Leaving it unset buys fail-closed enforcement; the cost is
         # that `collie status` cannot see the Serve mapping, since it only

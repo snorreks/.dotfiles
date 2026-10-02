@@ -82,14 +82,14 @@
       # The tailnet login allowed to drive the agents, i.e. exactly the value
       # of the Tailscale-User-Login header. This gate FAILS CLOSED: with it
       # unset or wrong, Collie refuses every request rather than every request
-      # from someone else. config/home/collie.nix asserts it is non-null, so a
-      # generation with no gate at all will not build.
+      # from someone else. config/home/collie.nix asserts it is non-null and
+      # non-empty, so a generation with no gate at all will not build.
       #
       # Verify with: tailscale status --json | jq -r '.Self.UserID.email'
       trustedUser = "snorrekstrand@hotmail.com";
 
       # This machine's MagicDNS name. Check it any time with:
-      #   tailscale status --json | jq -r '.Self.DNSName' | tr -d '.'
+      #   tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
       # It is both the Serve hostname and Collie's Host-header allowlist, and a
       # stale value here is the single most likely cause of a phone that loads
       # a blank page with no error.

@@ -166,53 +166,25 @@ in {
   # This is PRIVATE Serve, not Funnel. Serve terminates TLS with a real
   # Let's Encrypt certificate for the .ts.net name and only answers for devices
   # already on the tailnet; Funnel would publish the same mapping to the public
-  # internet. Nothing here can turn into Funnel -- the NixOS module writes a
-  # services config file that has no funnel field at all -- so the public door
-  # is closed by construction, not by remembering not to type --funnel.
+  # internet. The unit runs `tailscale serve`, never `tailscale funnel`.
   #
-  # WHY NIX OWNS IT. Upstream, `collie start` runs `tailscale serve` itself.
-  # That is a runtime mutation of tailscaled's config by a process Nix also has
-  # an opinion about, and the two would fight every rebuild: Nix writes the file
-  # with `tailscale serve set-config --all`, Collie would add its own mapping,
-  # and the next boot would discard it. Declaring it here means the mapping is
-  # reviewed in a diff and restored on every boot.
-  #
-  # CONSEQUENTLY: do not run `collie serve`, `collie start`, `collie restart` or
-  # `collie unserve` on this host. They all write the mapping this owns.
-  # Restart the bridge with `systemctl --user restart collie` instead.
-  #
-  # PRESERVING EXISTING SERVE CONFIG. Two levels, and the distinction matters:
-  #
-  #   * Within Nix, this is an ordinary merge. `services` is an attrset, so any
-  #     other module or host override declaring its own service lands in the
-  #     SAME generated file alongside `collie`. Declare extra front doors as
-  #     services.tailscale.serve.services.<name> and they are preserved rather
-  #     than overwritten.
-  #   * Outside Nix, it is not preserved. The module runs `tailscale serve
-  #     set-config --all <file>`, and --all REPLACES this node's entire serve
-  #     configuration. Any mapping added at runtime with a bare `tailscale
-  #     serve` command is therefore lost at the next boot.
-  #
-  # On this host there is nothing to lose: verified `tailscale serve status`
-  # reports "No serve config" and `tailscale serve status --json` returns {},
-  # both before and after this change. A host that DOES have hand-added
-  # mappings must move them into services.tailscale.serve.services.<name>
-  # (options.nix, or local.nix) before enabling collie; docs/mobile-agents.md
-  # says so and gives the command to check.
-  services.tailscale.serve = lib.mkIf (cfg.enable && cfg.collie.enable) {
-    enable = true;
+  # The pinned services.tailscale.serve module creates svc:<name> Services,
+  # and `serve set-config --all` only applies those Services. Use the node-level
+  # CLI instead so HTTPS is served on this machine's MagicDNS hostname.
+  # Nix owns this unit; do not let `collie start` or `collie serve` manage it.
+  # This unit owns HTTPS 443 on the node. Check for an existing mapping there
+  # before enabling it; other ports and named Services are left alone.
+  systemd.services.tailscale-serve-collie = lib.mkIf (cfg.enable && cfg.collie.enable) {
+    description = "Collie on the node's private Tailscale HTTPS endpoint";
+    after = ["tailscaled.service" "tailscaled-autoconnect.service" "tailscaled-set.service"];
+    wants = ["tailscaled.service"];
+    wantedBy = ["multi-user.target"];
 
-    services.collie = {
-      # tcp:443 is the machine's MagicDNS name on standard HTTPS. tailscaled
-      # obtains and renews the certificate itself; --accept-dns=false
-      # (server.nix) disables MagicDNS RESOLUTION on this host, not HTTPS
-      # certificates.
-      endpoints."tcp:443" = "http://127.0.0.1:${toString cfg.collie.port}";
-
-      # `advertised` defaults to true, which for Serve means the service accepts
-      # connections. Stated rather than left implicit so nobody has to go read
-      # upstream's docs to learn that this is not the Funnel switch.
-      advertised = true;
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${lib.getExe config.services.tailscale.package} serve --bg --https=443 http://127.0.0.1:${toString cfg.collie.port}";
+      ExecStop = "${lib.getExe config.services.tailscale.package} serve --https=443 off";
     };
   };
 
@@ -238,7 +210,7 @@ in {
 
       Set opts.mobileAgents.collie.serveHosts to this machine's MagicDNS name:
 
-        tailscale status --json | jq -r '.Self.DNSName' | tr -d '.'
+        tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
     ''
     ++ lib.optional (cfg.enable && cfg.collie.enable && cfg.collie.trustedUser == null) ''
       mobile-agents: opts.mobileAgents.collie.enable is true but

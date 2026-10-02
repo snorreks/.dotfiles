@@ -8,10 +8,10 @@ panes, same agent processes. The phone is a second client, not a second stack.
 loopback port through **private Tailscale Serve**, with HTTPS, a tailnet-identity
 gate, and per-device pairing. It needs nothing from SSH and nothing from Moshi.
 
-Two older paths remain and both still work:
+Two older paths remain available after provisioning the phone key (§8):
 
 - **SSH / Mosh on port 2222** — client-independent infrastructure. Moshi uses it;
-  so does Termux; so does you.
+  so does Termux; so do you.
 - **Moshi** — optional, and **off** on legion now. One boolean away.
 
 ---
@@ -63,14 +63,15 @@ stating as a test rather than a promise:
 
 | | `mobileAgents.enable` | `collie.enable` | `moshi.enable` | phone can |
 | --- | --- | --- | --- | --- |
-| legion today | true | **true** | **false** | Collie PWA, SSH, Mosh, Termux |
-| Moshi back on | true | true | true | all of the above |
-| Collie off, Moshi on | true | false | true | Moshi, SSH, Mosh, Termux |
-| **clients off** | true | false | false | **SSH, Mosh, Termux** — never nothing |
+| legion today | true | **true** | **false** | Collie PWA; SSH, Mosh, Termux after phone-key provisioning |
+| Moshi back on | true | true | true | Collie PWA; Moshi, SSH, Mosh, Termux after phone-key provisioning |
+| Collie off, Moshi on | true | false | true | Moshi, SSH, Mosh, Termux after phone-key provisioning |
+| **clients off** | true | false | false | **SSH, Mosh, Termux** after phone-key provisioning |
 
-The bottom row is the one that matters. `mobileAgents.enable` alone is enough
-for a phone to get in, and no combination of client flags can leave you with a
-host no phone can reach.
+The bottom row preserves the fallback infrastructure independently of the client
+flags. SSH/Mosh access also requires `phoneAuthorizedKey` to be provisioned (§8)
+and the tailnet policy to permit it (§4). On legion the key is currently `null`,
+so this fallback is not yet usable.
 
 ### Why port 2222 and not 22
 
@@ -97,7 +98,7 @@ three-monitor desktop: it still autologins into mango and still sleeps when
 closed. Verified: `gs65` (which has not opted in) evaluates to a byte-identical
 `system.build.toplevel` derivation before and after this change, with
 `ports = [22]`, `mosh.enable = false`, `linger = null`, no `moshi-hook` unit,
-no `collie` unit and no `services.tailscale.serve`.
+no `collie` unit and no `tailscale-serve-collie` unit.
 
 ### What is genuinely given up
 
@@ -113,9 +114,9 @@ no `collie` unit and no `services.tailscale.serve`.
   live heartbeat.
 
   Three different things, worth not conflating: *reconnection* persistence (yes
-  — mosh + herdr, and yes for Collie via the browser session), *workspace
-  restore* (yes — layout and cwd), *agent command resumption* (no, except
-  contract runs).
+  — mosh + herdr; expected but unverified for Collie via the browser session),
+  *workspace restore* (yes — layout and cwd), *agent command resumption* (no,
+  except contract runs).
 
 ---
 
@@ -156,8 +157,8 @@ nswitch-confirm
   starts `collie.service` in the (already running) user manager.
 - **sshd is not restarted** by the Collie half; that was already true of the
   Moshi half.
-- **`tailscale serve` is re-applied at boot** by `tailscale-serve.service` from
-  the file Nix generated.
+- **`tailscale serve` is re-applied at boot** by the Nix-owned
+  `tailscale-serve-collie.service`.
 
 ### Rollback
 
@@ -170,18 +171,17 @@ sudo nixos-rebuild switch-generation -   # or nixos-rollback-to <n> + reboot
 #    in nixos/hosts/legion/options.nix
 #      mobileAgents.collie.enable = false;
 #    rebuild. Port 2222, mosh, linger and boot-time herdr are untouched, so
-#    the phone is still reachable — you have lost only the web UI.
+#    configured fallback access is preserved. SSH/Mosh still requires the
+#    phone key (§8) and tailnet access policy (§4).
 ```
 
 Two things that must be undone by hand, because they are runtime state and not
 in the flake:
 
 ```fish
-# The Serve mapping is declarative, so a rebuild that removes the
-# services.tailscale.serve entry removes the mapping with it. Nothing to do.
-# But if you are rolling back to a generation that NEVER had Collie, and a
-# stale mapping is somehow still in place, this clears it:
-sudo tailscale serve reset
+# Removing tailscale-serve-collie.service runs its ExecStop to disable the
+# node's HTTPS 443 mapping. If a stale mapping remains after rollback:
+sudo tailscale serve --https=443 off
 
 # Collie's own pairing credentials and VAPID keys are NOT in Git and NOT in
 # the store. To forget a phone completely, revoke rather than delete:
@@ -206,7 +206,7 @@ rule stands: if you edit `herdr.nix`, do it with nothing important running.
 | --- | --- | --- |
 | `collie` binary | Nix | pinned flake input `github:AltanS/collie/v1.15.3` |
 | `collie.service` | Nix | `systemd.user.services.collie` (Home Manager) |
-| `tailscale serve` mapping | Nix | `services.tailscale.serve.services.collie` |
+| `tailscale serve` mapping | Nix | `systemd.services.tailscale-serve-collie` |
 | VAPID keypair | you, manually | `collie push-keys` → `~/.config/collie/.env` (0600) |
 | pairing credentials | Collie | `~/.local/state/collie/` |
 | the **version** | Nix | `collie update` refuses; see below |
@@ -264,7 +264,7 @@ trusted` and the phone shows a blank page.
 
 > `COLLIE_SKIP_SERVE` is deliberately **not** set. Collie disables the identity
 > check entirely when it believes no Serve is in front — but Nix's
-> `services.tailscale.serve` *is* a Serve in front, whatever Collie believes.
+> `tailscale-serve-collie.service` *is* a Serve in front, whatever Collie believes.
 > Leaving the flag unset buys fail-closed enforcement. The cost is cosmetic:
 > `collie status` cannot see a Serve mapping it did not create, so its
 > "serve config" section may read empty. It is not.
@@ -275,9 +275,10 @@ code valid for 10 minutes; the phone exchanges it for a token it stores, and the
 host keeps only the hash. Pairing gates **writes** only — reads stay open to
 anything that clears the identity and Host gates.
 
-`config/home/collie.nix` asserts both `trustedUser` and `serveHosts` are
-non-empty, so a generation with a missing gate **does not build** rather than
-shipping wide open.
+`config/home/collie.nix` rejects `trustedUser = null`, `trustedUser = ""`, and
+`serveHosts = []` when Collie is enabled, so a generation with a missing gate
+**does not build**. Collie itself treats an empty `COLLIE_TRUSTED_USER` as
+disabling the identity gate; the assertion prevents that configuration.
 
 ### Check it
 
@@ -309,9 +310,9 @@ mobileAgents.collie = {
 };
 ```
 
-`serveHosts` is this machine's MagicDNS name, and it has two jobs: it is what
-Tailscale Serve serves the machine as, and it becomes Collie's Host-header
-allowlist. Change it if the tailnet name ever changes.
+`serveHosts` must match this machine's MagicDNS name: the node-level Serve
+mapping uses that name automatically, and `serveHosts` supplies Collie's
+Host-header allowlist. Change it if the tailnet name ever changes.
 
 **In the tailnet**, once, in the admin console → DNS → **Enable HTTPS**. Serve
 then obtains and renews a real Let's Encrypt certificate for
@@ -326,35 +327,34 @@ tailscale serve status
 # https://legion.tailf24d02.ts.net (tailnet only)
 # |-- / proxy http://127.0.0.1:8787
 
-curl -I https://legion.tailf24d02.ts.net/     # from any tailnet machine
+curl -I https://legion.tailf24d02.ts.net/     # from a tailnet machine allowed TCP 443 by policy
 ```
 
 ### Private, not Funnel
 
-`services.tailscale.serve` writes a services config file that has no funnel
-field at all, so the public-internet door is closed by construction rather than
-by remembering not to type `--funnel`. Only devices already on the tailnet can
-reach the URL.
+The Nix-owned `tailscale-serve-collie.service` runs
+`tailscale serve --bg --https=443 http://127.0.0.1:8787`. Serve is private to
+the tailnet; this unit never enables Funnel.
 
 ### Preserving existing Serve configuration
 
-- **Within Nix**, it is an ordinary merge. `services` is an attrset, so any other
-  module or host override declaring `services.tailscale.serve.services.<name>`
-  lands in the same generated file alongside `collie`.
-- **Outside Nix**, it is not preserved. The module runs
-  `tailscale serve set-config --all <file>`, and `--all` replaces this node's
-  *entire* serve configuration. Anything you added at runtime with a bare
-  `tailscale serve` command is lost at the next boot.
+The pinned NixOS `services.tailscale.serve.services.<name>` option creates
+`svc:<name>` Tailscale Services. Its `set-config --all` command manages those
+Services, not node hostname mappings. Collie therefore uses a dedicated
+Nix-owned unit to configure HTTPS 443 on the node's MagicDNS hostname.
 
-On this host there is nothing to lose: `tailscale serve status` reported
-`No serve config` and `tailscale serve status --json` returned `{}` both before
-and after this change. **Check before you enable Collie on another host:**
+The unit owns the node's HTTPS 443 mapping; other ports and named Services
+remain separate. **Check before enabling Collie on a host:**
 
 ```fish
 tailscale serve status --json
-# {} is fine. Anything else: move it into
-# services.tailscale.serve.services.<name> first.
 ```
+
+If HTTPS 443 already has handlers, reconcile them before enabling Collie:
+startup sets the root proxy, and stopping or removing the unit disables the
+node's entire HTTPS 443 listener. Do not share that listener with unrelated
+handlers. Restart the mapping with
+`sudo systemctl restart tailscale-serve-collie`.
 
 ### Tailnet access policy
 
@@ -362,10 +362,36 @@ The tailnet is the trust boundary, and the ACL is a separate layer from
 everything in this repository. A device not permitted by the ACL is refused
 before the host firewall or Collie is consulted.
 
-Two grants are needed for the whole setup: TCP 2222 and UDP 60000-60010 for the
-SSH/Mosh fallback. **Port 443 needs no grant** — Serve is served by the node
-itself and reachable by any tailnet member; the second gate (`COLLIE_TRUSTED_USER`)
-is what narrows it to you.
+The effective policy must allow the operator's phone to reach the Legion on
+**TCP 443** for Collie, plus TCP 2222 and UDP 60000-60010 for the SSH/Mosh
+fallback. [Tailscale Serve remains subject to tailnet access rules](https://tailscale.com/kb/1312/serve).
+An existing broader allow rule may already cover 443; Serve does not bypass
+policy. `COLLIE_TRUSTED_USER` further narrows access inside Collie.
+
+For example, merge these grants into the tailnet policy, replacing
+`<legion-tailnet-ip>` with the node's actual Tailscale IP (from `tailscale ip -4`):
+
+```json
+{
+  "grants": [
+    {
+      "src": ["snorrekstrand@hotmail.com"],
+      "dst": ["<legion-tailnet-ip>"],
+      "ip": ["tcp:443"]
+    },
+    {
+      "src": ["snorrekstrand@hotmail.com"],
+      "dst": ["<legion-tailnet-ip>"],
+      "ip": ["tcp:2222", "udp:60000-60010"]
+    }
+  ]
+}
+```
+
+During setup, check the effective policy for the phone's identity and this
+node's TCP 443, then open the Serve URL from the phone. Check TCP 2222 and the
+UDP range too if provisioning the fallback. These rules are managed in the
+tailnet admin console, outside this repository.
 
 Where a tailnet is shared with other people, `COLLIE_TRUSTED_USER` is the thing
 that makes this safe, and it is not optional.
@@ -481,9 +507,9 @@ collie push forget <substring>|--all
 ```
 
 Notifications are derived by Collie **polling the multiplexer**, not from agent
-hooks. It is a self-contained pipeline: the host observes a pane change, and the
-push is signed with the VAPID key above. Nothing is sent to a third-party
-service.
+hooks. The host observes a pane change and signs the push with the VAPID key
+above. Collie does not use its own application cloud service, but delivery
+requests are still sent through the browser's push service.
 
 ---
 
@@ -535,7 +561,6 @@ pkg install -y nodejs-lts     # only if you want pi/claude/opencode on the phone
 ```fish
 # bring Tailscale up in the Tailscale app first
 ssh -p 2222 -i ~/.ssh/phone sonny@legion      # add a Host block so you can just `ssh legion`
-mosh --ssh="ssh -p 2222 -i ~/.ssh/phone" legion
 ```
 
 Mosh must be told the port: the `moshPortRange` above bounds the server to
@@ -721,7 +746,7 @@ journalctl --user -u collie -n 50 | grep -iE "warning|refus|not allowed|identity
 
 | Log line | Cause | Fix |
 | --- | --- | --- |
-| `host not allowed` | `serveHosts` is empty or stale | `tailscale status --json \| jq -r '.Self.DNSName' \| tr -d '.'` and put it in `serveHosts` |
+| `host not allowed` | `serveHosts` is empty or stale | `tailscale status --json \| jq -r '.Self.DNSName \| rtrimstr(".")'` and put it in `serveHosts` |
 | `identity not trusted` | `trustedUser` has a trailing dot, or is a different login | `tailscale status --json \| jq -r '.Self.UserID.email'` |
 | `identity required` | the request arrived without a Serve header | you are reaching `127.0.0.1:8787` directly, or `tailscale serve` is not running — check `tailscale serve status` |
 | `no non-loopback Host is allowed` | `COLLIE_PUBLIC_HOSTS` empty | `serveHosts` again |
@@ -838,8 +863,10 @@ nswitch-confirm
 Nothing here is destructive, and the order is chosen so the phone is never
 without a way in.
 
-**Before:** port 2222, the phone key, bounded mosh and `linger` are already live
-(PR #1), and Moshi works. herdr already starts at boot.
+**Before:** PR #1 configured port 2222, bounded mosh and `linger`; herdr starts
+at boot. The phone key is still `null` in the checked-in configuration. Provision
+`phoneAuthorizedKey` using §8, rebuild, verify the tailnet policy (§4), and test
+SSH/Mosh from the phone before treating the fallback as live or disabling Moshi.
 
 **The change** is: add Collie, turn Moshi off.
 
@@ -850,7 +877,7 @@ mobileAgents = {
   collie = {
     enable = true;
     trustedUser = "snorrekstrand@hotmail.com";        # tailscale status --json | jq -r '.Self.UserID.email'
-    serveHosts = ["legion.tailf24d02.ts.net"];        # tailscale status --json | jq -r '.Self.DNSName' | tr -d '.'
+    serveHosts = ["legion.tailf24d02.ts.net"];        # tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
   };
   moshi = {
     enable = false;
@@ -860,7 +887,8 @@ mobileAgents = {
 
 **Then**, in order:
 
-1. Enable HTTPS for the tailnet (admin console → DNS → Enable HTTPS), once.
+1. Enable HTTPS for the tailnet (admin console → DNS → Enable HTTPS), once,
+   and verify the effective TCP 443 allow rule for the phone → Legion (§4).
 2. Add the `collie` flake input and rebuild (`nix flake lock`, then
    `nswitch-safe` from tmux). **herdr is not restarted**; its unit text is
    unchanged.
@@ -873,17 +901,19 @@ mobileAgents = {
    side is already gone — `moshi-hook` is no longer on `PATH` and no unit exists.
 
 **Roll back at any point:** `mobileAgents.collie.enable = false` and rebuild.
-The phone is left with SSH/Mosh, which never stopped working.
+The configured SSH/Mosh fallback is preserved; access depends on the phone key
+and tailnet policy verified above.
 
 ---
 
 ## 13. Acceptance tests
 
-Two columns. **Build-level** was run against this change. **Device-level** needs
+Two columns. Checked **build-level** items record prior validation, with focused
+checks of the updated assertion and Serve unit noted below. **Device-level** needs
 the phone and a real activation, and nothing disruptive was run against live
 agents.
 
-### Build-level — verified
+### Build-level — historical results and focused rechecks
 
 - [x] `alejandra --check` passes on every changed file. (`config/home/default.nix`
       has a pre-existing deviation that master also has; left alone rather than
@@ -908,9 +938,10 @@ agents.
 - [x] `collie update --check` on this derivation reports
       `updates come from your package manager` — the packaged-install
       classification works, so the updater cannot replace the Nix-owned binary.
-- [x] `services.tailscale.serve` renders to
-      `{"collie":{"advertised":true,"endpoints":{"tcp:443":"http://127.0.0.1:8787"}}}`
-      and the unit runs `tailscale serve set-config --all <that file>`.
+- [x] Focused NixOS module evaluation: the generated `tailscale-serve-collie.service` runs
+      `tailscale serve --bg --https=443 http://127.0.0.1:8787` and stops with
+      `tailscale serve --https=443 off`; no `svc:collie` is configured. Both
+      enable flags and a custom Collie port were checked; activation was not.
 - [x] `herdr.service`'s generated unit is **byte-identical** before and after this
       change (same store path) — activation will not restart it, and no live
       agent is interrupted.
@@ -922,9 +953,9 @@ agents.
       `no` with `AllowTcpForwarding yes` and `AllowAgentForwarding no`.
 - [x] `tailscale serve status` reported `No serve config` (and `--json` `{}`)
       before the change, so nothing is being overwritten.
-- [x] The fail-closed assertions **fire**: setting `trustedUser = null` or
-      `serveHosts = []` makes evaluation fail with an actionable message instead
-      of producing an ungated service.
+- [x] Focused assertion evaluation: `trustedUser = null`, `trustedUser = ""`,
+      and `serveHosts = []` each produce a false assertion when enabled. A valid
+      identity and host pass; disabling Collie still permits null/empty values.
 - [x] The Moshi-off path and the Moshi-on path both evaluate; with
       `moshi.enable = true` the unit reappears at
       `MOSHI_HOOK_GATEWAY_LISTEN=127.0.0.1:24543` from
@@ -940,8 +971,12 @@ Each line says what "working" looks like. None has been run.
       and panes that exist right now.
 - [ ] **Private, not public.** From a machine *not* on the tailnet, the URL does
       not resolve and does not connect. From a phone on the tailnet, it does.
-- [ ] **Identity gate.** Reaching the URL from a tailnet device that is not the
-      operator (another user, or a tagged node) is refused, not served.
+- [ ] **Tailnet policy.** Confirm the effective rule permits the phone → Legion
+      on TCP 443, then load the Serve URL. A source denied TCP 443 by policy
+      cannot connect. Check TCP 2222 and UDP 60000-60010 for the fallback too.
+- [ ] **Identity gate.** From a tailnet device permitted TCP 443 by policy but
+      belonging to another user (or a tagged node), confirm Collie refuses the
+      request. This checks `COLLIE_TRUSTED_USER` independently of the ACL.
 - [ ] **Pairing.** Before pairing, typing into a pane from the phone is refused
       (`device not paired`). After pairing it works.
 - [ ] **pi.** Start `pi` in a herdr pane from the phone; the terminal mirror
@@ -973,7 +1008,9 @@ Each line says what "working" looks like. None has been run.
       for input produces one notification, not two.
 - [ ] **Device revocation.** `collie devices revoke <label>`, then try to type
       from that phone: refused, without restarting the daemon.
-- [ ] **Disabling Collie leaves the phone reachable.**
+- [ ] **Disabling Collie preserves configured fallback access.** Run only after
+      `phoneAuthorizedKey` is configured and SSH/Mosh access is verified (§8);
+      otherwise this check is blocked.
       `systemctl --user stop collie`, then attach over SSH 2222 from Termux and
       run `pi`: the terminal, herdr and the agents are all fine; only the web UI
       is gone.
@@ -981,13 +1018,13 @@ Each line says what "working" looks like. None has been run.
 
 ### Feature status
 
-Everything above the line is verified on this host. Everything below needs a
-physical Android device and has **not** been tested.
+The table distinguishes prior host validation from the updated mapping and
+physical Android checks that remain unverified.
 
 | Feature | Status |
 | --- | --- |
 | Collie package builds, pinned, updater-declining | **verified** |
-| Nix-owned unit + private Tailscale Serve mapping | **verified (config)** |
+| Nix-owned unit + private Tailscale Serve mapping | **verified (focused module eval); activation UNVERIFIED** |
 | `COLLIE_TRUSTED_USER` and `COLLIE_PUBLIC_HOSTS` emitted | **verified (unit text)** |
 | herdr untouched by activation | **verified (identical unit)** |
 | No impact on `gs65` | **verified (identical derivation)** |
@@ -1012,8 +1049,9 @@ physical Android device and has **not** been tested.
   upstream's `doInstallCheck`.
 - `nix eval` of `legion`, `legion-fast`, `gs65` and `gs65-fast`, old and new,
   comparing `system.build.toplevel.drvPath`.
-- Reading the generated `collie.service`, the rendered
-  `services.tailscale.serve` JSON, the `ExecStart` of `tailscale-serve.service`,
+- Reading the generated `collie.service`, the original named-Service JSON
+  and `ExecStart` of `tailscale-serve.service` (superseded by the node-level
+  `tailscale-serve-collie.service`; its activation remains unverified),
   `home.packages`, `environment.systemPackages`, the firewall, DNS and
   Tailscale flag lists.
 - `sshd -T -C …lport=22` and `…lport=2222` against the sshd config Nix actually
@@ -1030,7 +1068,7 @@ physical Android device and has **not** been tested.
 - Any reboot.
 - Any restart, stop or reload of `herdr`, `sshd`, `tailscaled`, `moshi-hook` or
   anything else live. **No agent was interrupted.**
-- `tailscale serve set-config` — the mapping was evaluated, never applied.
+- `tailscale serve` — the mapping was evaluated, never applied.
 - `collie pair`, `collie push-keys`, `collie push-test`, `collie hooks install`,
   `collie devices revoke`, `moshi-agent-hooks`.
 - Every device test in §13.

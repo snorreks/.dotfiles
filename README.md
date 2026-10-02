@@ -199,12 +199,11 @@ See `.pi/skills/nixos-kernel-bump/SKILL.md` for full diagnosis steps.
 │ ├── mobile-agents.md # Phone → herdr (Collie PWA, SSH/Mosh + Termux fallback)
 │ └── forking.md # Adapting this repo to your own setup
 ├── nixos/
-│ ├── flake.nix
+│ ├── flake.nix # collie is a PINNED flake input (AltanS/collie), not a local package
 │ ├── flake.lock
 │ ├── secrets.yaml # Encrypted secrets (sops + Age)
 │ ├── options.nix
 │ ├── pkgs/ # Packages not in nixpkgs (msi-perkeyrgb, moshi-hook)
-│ ├── flake.nix # collie is a PINNED flake input (AltanS/collie), not a local package
 │ ├── system.nix
 │ ├── hosts/
 │ │ └── legion/ # Hardware configs
