@@ -219,7 +219,7 @@ in {
       full write access to your agents' panes. config/home/collie.nix refuses to
       build, so this generation will not activate until it is set:
 
-        tailscale debug prefs | jq -r '.UserProfile.LoginName'
+        tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
     '';
 
   # ── mosh ───────────────────────────────────────────────────────────────────

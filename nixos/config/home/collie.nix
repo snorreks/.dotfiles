@@ -98,7 +98,7 @@ in {
         Find your tailnet login and put it in nixos/hosts/<host>/options.nix (or
         nixos/local.nix):
 
-          tailscale debug prefs | jq -r '.UserProfile.LoginName'
+          tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
 
         The value is the lowercase email with NO trailing dot — exactly what
         Tailscale puts in the Tailscale-User-Login header.

@@ -255,7 +255,7 @@ arrives through Serve, and Collie rejects a mismatch. It also rejects an
 tailnet node is not a loopback caller, it is some other device.
 
 ```fish
-tailscale debug prefs | jq -r '.UserProfile.LoginName'
+tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
 # -> snorristrand@gmail.com   (lowercase, NO trailing dot)
 ```
 
@@ -793,8 +793,8 @@ journalctl --user -u collie -n 50 | grep -iE "warning|refus|not allowed|identity
 
 | Log line | Cause | Fix |
 | --- | --- | --- |
-| `host not allowed` | `serveHosts` is empty or stale | `tailscale debug prefs \| jq -r '.UserProfile.LoginName'| jq -r '.Self.DNSName \| rtrimstr(".")'` and put it in `serveHosts` |
-| `identity not trusted` | `trustedUser` has a trailing dot, or is a different login | `tailscale debug prefs \| jq -r '.UserProfile.LoginName'|tailscale debug prefs \| jq -r '.UserProfile.LoginName'` |
+| `host not allowed` | `serveHosts` is empty or stale | `tailscale status --json \| jq -r '.Self.DNSName \| rtrimstr(".")'` and put it in `serveHosts` |
+| `identity not trusted` | `trustedUser` has a trailing dot, or is a different login | `tailscale debug prefs \| jq -r '.Config.UserProfile.LoginName'` |
 | `identity required` | the request arrived without a Serve header | you are reaching `127.0.0.1:8787` directly, or `tailscale serve` is not running — check `tailscale serve status` |
 | `no non-loopback Host is allowed` | `COLLIE_PUBLIC_HOSTS` empty | `serveHosts` again |
 | `COLLIE_TRUSTED_USER is empty` | running a generation that predates this change | rebuild |
@@ -961,7 +961,7 @@ mobileAgents = {
   enable = true;
   collie = {
     enable = true;
-    trustedUser = "snorristrand@gmail.com";        # tailscale debug prefs | jq -r '.UserProfile.LoginName'
+    trustedUser = "snorristrand@gmail.com";        # tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
     serveHosts = ["legion.tailf24d02.ts.net"];        # tailscale status --json | jq -r '.Self.DNSName | rtrimstr(".")'
   };
   moshi = {

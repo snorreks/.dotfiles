@@ -85,7 +85,7 @@
       # from someone else. config/home/collie.nix asserts it is non-null and
       # non-empty, so a generation with no gate at all will not build.
       #
-      # Verify with: tailscale debug prefs | jq -r '.UserProfile.LoginName'
+      # Verify with: tailscale debug prefs | jq -r '.Config.UserProfile.LoginName'
       #
       # 🔴 THIS IS THE TAILNET LOGIN, NOT opts.gitEmail. Those are two
       # different addresses and using the wrong one is invisible here: the
