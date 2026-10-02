@@ -33,10 +33,37 @@
 # and no controlling terminal, so no pty hangup can ever reach it, and it is
 # supervised and restarted instead of silently vanishing.
 #
+# ── The mobile-agents exception ───────────────────────────────────────────────
+# On a host with opts.mobileAgents.enable (hosts/legion/options.nix), WantedBy
+# below becomes default.target rather than graphical-session.target, so the
+# server starts at boot under the lingering user manager instead of at
+# graphical login. Without that the server exists only while somebody is
+# physically logged in, which defeats the point of reaching it from a phone.
+# The user half of that is `linger` in config/system/mobile-agents.nix.
+#
+# What is genuinely given up: at cold boot the server has no WAYLAND_DISPLAY,
+# because nothing has run mango's autostart yet. Agents started into it before
+# you log in cannot use wl-copy or xdg-open; they behave normally once you are
+# logged in. That is inherent to "reachable when nobody is at the desk", and
+# docs/mobile-agents.md says so rather than hiding it.
+#
+# 🔴 Do not add a second Wants here, or split the mobile path into its own
+# unit: the server must have exactly one owner. ExecCondition below already
+# treats "already listening" as a clean skip, and two owners would turn that
+# into a restart that silently does nothing.
+#
+# 🔴 What this does NOT buy you: a process cannot survive a reboot. Across a
+# reboot, herdr restores workspaces, tabs, panes and their cwds — but NOT their
+# commands, because session.json has no command field. So after a reboot you
+# get your layout back with bare shells in it, and an interactive agent has to
+# be restarted by hand. See the herdr-contract-resume unit below for the one
+# case that IS automated (headless contract runs, via a live-heartbeat check).
+#
 # ── Ordering, and why there is no PartOf ────────────────────────────────────
-# After/WantedBy graphical-session.target so the unit starts once mango's
-# autostart has pushed WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS and friends
-# into the user manager environment (home-manager's autostart header runs
+# On non-mobile hosts, After/WantedBy graphical-session.target starts the unit
+# once mango's autostart has pushed WAYLAND_DISPLAY, DBUS_SESSION_BUS_ADDRESS
+# and friends into the user manager environment (home-manager's autostart
+# header runs
 # `dbus-update-activation-environment --systemd --all`). Panes inherit the
 # server's environment, so starting earlier would hand every agent a session
 # env with no Wayland display and break wl-copy, xdg-open and `[ui.toast]
@@ -48,9 +75,15 @@
 # running agent — untouched.
 {
   inputs,
+  lib,
+  opts,
   pkgs,
   ...
 }: let
+  # Start at boot under the lingering user manager rather than at graphical
+  # login. Changes WantedBy and graphical-session ordering — see the header note.
+  mobile = opts.mobileAgents.enable or false;
+
   herdr = inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
   # The repo whose contract pipeline the resume unit watches. Only aikami runs
@@ -61,13 +94,25 @@ in {
   # pipeline both resolve `herdr` from PATH, and the unit resolves from the
   # stable home-manager profile symlink (/etc/profiles/per-user/%u) so the
   # unit text is stable across herdr version bumps — no forced restarts.
+  #
+  # 🔴 This stays the ONLY herdr in the closure. The mobile setup must not add
+  # a second copy: Moshi's doctor explicitly flags two installs when the daemon
+  # and the running server disagree, and a second binary would also break
+  # MOSHI_HERDR_PATH's promise that it points at the running server. One
+  # package, one server — config/home/moshi-hook.nix reuses this one.
   home.packages = [herdr];
 
   systemd.user.services.herdr = {
     Unit = {
       Description = "herdr — persistent terminal workspace server for AI agents";
       Documentation = ["https://herdr.dev"];
-      After = ["graphical-session.target" "sops-import-environment.service"];
+
+      # The mobile path does NOT wait for graphical-session.target: with
+      # lingering there may be no graphical session at all, so waiting on it
+      # would mean never starting. Everything else about the unit is unchanged.
+      After =
+        lib.optionals (!mobile) ["graphical-session.target"]
+        ++ ["sops-import-environment.service"];
       Wants = ["sops-import-environment.service"];
     };
 
@@ -120,7 +165,12 @@ in {
       WorkingDirectory = "%h";
     };
 
-    Install.WantedBy = ["graphical-session.target"];
+    # 🔴 Mobile hosts start at boot instead of at graphical login. This is
+    # paired with omitting graphical-session ordering above — see the header.
+    Install.WantedBy =
+      if mobile
+      then ["default.target"]
+      else ["graphical-session.target"];
   };
 
   # ── Contract-run resume after a restart ───────────────────────────────────

@@ -147,4 +147,69 @@ rec {
   # default — hosts opt in explicitly with enablePersistence = true in
   # hosts/<host>/options.nix. See docs/impermanence-migration.md.
   enablePersistence = false;
+
+  # ── Mobile agents (phone → herdr) ───────────────────────────────────────────
+  # Reach the host from an Android phone (Moshi over Tailscale) and drive the
+  # SAME persistent herdr workspaces and pi / Claude Code / OpenCode agents the
+  # desktop uses — not a second stack, not a tmux-inside-herdr.
+  #
+  # Per-host opt-in, exactly like headless. Off by default; hosts/legion/options.nix
+  # turns it on. It is deliberately independent of headless: this stays a normal
+  # three-monitor desktop that merely also answers on the tailnet.
+  #
+  # What enabling it does, in one place: config/system/mobile-agents.nix (sshd
+  # mobile port + mosh), config/home/moshi-hook.nix (the agent-hook daemon), and
+  # the WantedBy target in config/home/herdr.nix. Read docs/mobile-agents.md
+  # before flipping it — pairing is a manual step and the phone's public key has
+  # to be filled in below.
+  mobileAgents = {
+    enable = false;
+
+    # The mobile sshd listener. NOT 22, and that is the whole point.
+    #
+    # `services.tailscale.extraSetFlags` carries --ssh=true, and Tailscale SSH
+    # answers on tailnet port 22 *before* the OS sshd ever sees the connection,
+    # authenticating with a Tailscale identity and bypassing authorized_keys
+    # entirely. Moshi authenticates with a key file, so a Tailscale-SSH hijacked
+    # port 22 stalls ~60s and then fails with a misleading auth error. Port 2222
+    # is ordinary OpenSSH, so the phone's key is actually checked, while 22
+    # stays exactly as it is as the recovery path.
+    sshPort = 2222;
+
+    # 🔴 THE PHONE'S PUBLIC KEY GOES HERE (or in nixos/local.nix, which is
+    # gitignored and merged over the top of this file by flake.nix).
+    #
+    # Generate it ON THE PHONE — Moshi Settings → the key row → generate, or in
+    # Termux `ssh-keygen -t ed25519 -f ~/.ssh/moshi_phone -C moshi-phone`, then
+    # `cat ~/.ssh/moshi_phone.pub`. Never create it here and never copy a host
+    # private key down to the phone: the point is that the phone holds the only
+    # copy of its own key and the host only ever sees the public half.
+    #
+    # Left null so a fresh clone still evaluates; mobile-agents.nix turns that
+    # into a build warning rather than a hard failure, so you can land this
+    # first and add the real key in a second, smaller commit.
+    phoneAuthorizedKey = null;
+
+    # mosh's UDP port range. Bounded rather than mosh's 60000-61000 default so
+    # the tailnet ACL and the host firewall both carry a short, auditable list.
+    #
+    # ⚠ This does NOT restrict the server by itself. NixOS's programs.mosh has
+    # no allocation-range option — it only offers openFirewall, which opens
+    # 60000-61000 on *every* interface. mobile-agents.nix therefore turns
+    # openFirewall off and ships a mosh-server wrapper that passes `-p
+    # 60000:60010`, which is the only thing that actually bounds it. Change both
+    # ends together or mosh will silently fall back to SSH.
+    moshPortRange = {
+      from = 60000;
+      to = 60010;
+    };
+
+    # mosh-server. mosh is a convenience, not the transport everything depends
+    # on: with this off, port 2222 + Moshi's "Connection type: SSH" is a
+    # complete, working setup on its own. See docs/mobile-agents.md for why this
+    # is a separate switch.
+    mosh = {
+      enable = true;
+    };
+  };
 }

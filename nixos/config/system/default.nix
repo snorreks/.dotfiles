@@ -20,6 +20,7 @@
       ./security.nix
       ./mouse.nix
       ./server.nix
+      ./mobile-agents.nix # phone→herdr over Tailscale (gated on opts.mobileAgents.enable)
       ./services.nix
       ./ssh.nix
       ./sound.nix
