@@ -121,7 +121,11 @@
           allowUnfree = true;
           nvidia.acceptLicense = true;
         };
-        overlays = [inputs.nur.overlays.default];
+        overlays = [
+          inputs.nur.overlays.default
+          # protonup-ng 0.2.1 can't install the per-arch GE-Proton tarballs.
+          (import ./pkgs/protonup-ng-overlay.nix)
+        ];
       };
 
     mkHost = hostKey: hostCfg: enableOllama: let
