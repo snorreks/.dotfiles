@@ -45,10 +45,22 @@
 in {
   # ── The mobile sshd listener ───────────────────────────────────────────────
   #
-  # Adding to `ports` rather than replacing it is deliberate: 22 must keep
-  # working exactly as it does now, so a mistake in this file cannot remove the
-  # only way back into a machine nobody is sitting at.
-  services.openssh.ports = lib.mkIf cfg.enable [cfg.sshPort];
+  # 🔴 22 IS SPELLED OUT HERE ON PURPOSE. `services.openssh.ports` is a plain
+  # listOf option, NOT a list that merges with its default — assigning to it
+  # REPLACES the default [22] wholesale. An earlier version of this file wrote
+  # just `[cfg.sshPort]`, and the result was that the activated system listened on
+  # 2222 and NOTHING ELSE: the desktop sshd lost port 22 entirely and the only
+  # remaining way in was Tailscale SSH, which was simultaneously logged out.
+  # Every `ssh -p 22` failed with "Connection refused".
+  #
+  # So both ports are always listed together. If you ever change one, change
+  # both, and verify with:
+  #   sshd -T | grep -i ^port          # must show BOTH 22 and 2222
+  #   ss -tln | grep -E ':22 |:2222 '  # must show BOTH listening
+  #
+  # Belt and braces: `networking.firewall.allowedTCPPorts = [ 22 ]` below also
+  # keeps 22 open, but a firewall rule does not help if sshd is not listening.
+  services.openssh.ports = lib.mkIf cfg.enable [22 cfg.sshPort];
 
   # The OS sshd binds this port on all interfaces, so the listener itself is not
   # the access control — the firewall below is. `openFirewall = false` is the
