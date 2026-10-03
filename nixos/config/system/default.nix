@@ -25,6 +25,16 @@
       # commands route through it.
       ./maintenance.nix
       ./mobile-agents.nix # phone→herdr over Tailscale (gated on opts.mobileAgents.enable)
+      # Agent operations (agent-operations PR): the reviewed state manifest, the
+      # running-daemon GC roots, and the opt-in backup / health / resource
+      # modules. Each declares its own `options.agentOps.*` and defaults to
+      # disabled — enabling one is a decision, never a side effect of an import.
+      ./agent-ops/state-manifest.nix
+      ./agent-ops/credentials.nix
+      ./agent-ops/daemon-roots.nix
+      ./agent-ops/backup.nix
+      ./agent-ops/health.nix
+      ./agent-ops/resources.nix
       ./services.nix
       ./ssh.nix
       ./sound.nix

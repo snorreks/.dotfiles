@@ -218,13 +218,14 @@
           }
         ];
       };
-  in {
-    formatter.${system} = inputs.alejandra.defaultPackage.${system};
-
     # Builds two flake outputs per host:
     #   <hostname>       — follows the host's enableOllama (hosts/<host>/options.nix)
     #   <hostname>-fast  — skips ollama-cuda for quick rebuilds (nswitch-fast)
-    nixosConfigurations = nixpkgs.lib.foldl' (
+    #
+    # Bound in `let`, not inside the returned attrset, so `checks` below can
+    # READ the evaluated host configuration. Inside one attrset,
+    # `nixosConfigurations` is a sibling attribute name, not a binding in scope.
+    allHosts = nixpkgs.lib.foldl' (
       acc: hostKey: let
         hostCfg = hosts.${hostKey};
         mergedOpts = baseOpts // hostCfg.optsOverrides // localOverrides;
@@ -236,6 +237,49 @@
           "${hostname}-fast" = mkHost hostKey hostCfg false;
         }
     ) {} (builtins.attrNames hosts);
+    # The unit facts the lane's tests assert against are computed HERE, by
+    # the flake, on the machine that runs `nix build` — not by a nested
+    # `nix eval` inside the check. A nested `nix eval` of this flake cannot
+    # work from inside a build: it needs the network to resolve the flake's
+    # inputs, and it needs the store the host's Nix is already using. Baking
+    # the facts in means the check compares the GENERATED UNIT against the
+    # RULE without re-implementing either of them.
+    agentOperationsUnitFacts = let
+      hm = allHosts.legion.config.home-manager.users.sonny;
+      svc = hm.systemd.user.services;
+      # Home Manager's systemd unit options are typed `unspecified`, so a
+      # single Wants/After can still be a bare STRING here rather than a
+      # one-element list. Normalised, or this fails on a correct unit.
+      asList = xs:
+        if builtins.isList xs
+        then xs
+        else [xs];
+      # builtins.toJSON rather than hand-quoted concatenation: the manual
+      # version was three separate quoting bugs waiting to happen.
+      jsonList = xs: builtins.toJSON (asList xs);
+    in {
+      herdrWantedBy = jsonList svc.herdr.Install.WantedBy;
+      herdrAfter = jsonList svc.herdr.Unit.After;
+      herdrWants = jsonList svc.herdr.Unit.Wants;
+      herdrLoadCredential = toString (builtins.length svc.herdr.Service.LoadCredential);
+      resumeSuccess = svc.herdr-resume.Service.SuccessExitStatus;
+      resumeWantedBy = jsonList svc.herdr-resume.Install.WantedBy;
+      hasImportEnvironment =
+        if svc ? sops-import-environment
+        then "true"
+        else "false";
+      sessionSecretVars = jsonList (
+        builtins.filter (n: builtins.match ".*(API_KEY|ACCESS_TOKEN|PASSWORD).*" n != null)
+        (builtins.attrNames hm.home.sessionVariables)
+      );
+    };
+  in {
+    formatter.${system} = inputs.alejandra.defaultPackage.${system};
+
+    # Builds two flake outputs per host:
+    #   <hostname>       — follows the host's enableOllama (hosts/<host>/options.nix)
+    #   <hostname>-fast  — skips ollama-cuda for quick rebuilds (nswitch-fast)
+    nixosConfigurations = allHosts;
 
     # ── checks ──────────────────────────────────────────────────────────────
     #
@@ -261,6 +305,26 @@
             nixpkgs.legacyPackages.${system}.which
           ];
           src = ./.;
+
+          # NOT SANDBOXED, deliberately, and the reason is worth stating
+          # because "unsandboxed check" normally reads as a red flag.
+          #
+          # agent-lifetime.sh evaluates Nix inside the check: the (headless ×
+          # mobileAgents) matrix, and the generated herdr unit for the real
+          # Legion. A nested `nix eval` inside a chrooted builder cannot see
+          # /nix/store at all — it builds a private chroot store under $HOME and
+          # then fails to read the flake, which is indistinguishable from "the
+          # lifetime rule is broken". The alternatives were worse:
+          #
+          #   * drop the evaluation and assert on the module's source text,
+          #     which tests the comment rather than the rule;
+          #   * keep the evaluation out of `checks`, where it would then never
+          #     run in CI at all.
+          #
+          # What this check runs is the repository's own bash, on disposable
+          # fixtures under a temporary directory. It builds nothing, installs
+          # nothing and writes nothing outside $TMPDIR.
+          __noChroot = true;
         }
         ''
           runHook preInstall
@@ -276,6 +340,81 @@
           mkdir -p "$HOME"
 
           bash "$src/tests/run.sh"
+
+          touch "$out"
+          runHook postInstall
+        '';
+
+      # The agent-operations lane (agent-operations PR): credential loading,
+      # agent lifetime, daemon-closure pinning, health redaction and a real
+      # restic backup/restore. A SEPARATE output from maintenance-contracts,
+      # not an addition to it, because the lanes are developed in parallel and
+      # each has to be runnable on its own before any of them merge.
+      #
+      # restic and sqlite are in nativeBuildInputs rather than skipped: the
+      # backup suite creates a REAL disposable repository and restores from it.
+      # A shell suite that silently SKIPs the only test that proves a backup can
+      # be restored is worse than having no such test.
+      agent-operations =
+        nixpkgs.legacyPackages.${system}.runCommand
+        "agent-operations"
+        {
+          nativeBuildInputs = [
+            nixpkgs.legacyPackages.${system}.bash
+            nixpkgs.legacyPackages.${system}.coreutils
+            nixpkgs.legacyPackages.${system}.findutils
+            nixpkgs.legacyPackages.${system}.git
+            nixpkgs.legacyPackages.${system}.gnugrep
+            nixpkgs.legacyPackages.${system}.nix
+            # python3 parses `nix eval --json` in agent-lifetime.sh. Without it
+            # the JSON assertions silently compared against an empty string.
+            nixpkgs.legacyPackages.${system}.python3
+            nixpkgs.legacyPackages.${system}.shellcheck
+            nixpkgs.legacyPackages.${system}.sqlite
+            nixpkgs.legacyPackages.${system}.restic
+            nixpkgs.legacyPackages.${system}.util-linux
+            nixpkgs.legacyPackages.${system}.which
+          ];
+          src = ./.;
+
+          # NOT SANDBOXED, deliberately, and the reason is worth stating
+          # because "unsandboxed check" normally reads as a red flag.
+          #
+          # agent-lifetime.sh evaluates Nix inside the check: the (headless ×
+          # mobileAgents) matrix. A nested `nix eval` inside a chrooted builder
+          # cannot see /nix/store at all — it builds a private chroot store under
+          # $HOME and then fails, which is indistinguishable from "the lifetime
+          # rule is broken". The alternatives were worse: dropping the evaluation
+          # and asserting on the module's source text (which tests the comment
+          # rather than the rule), or keeping the evaluation out of `checks`,
+          # where it would never run in CI at all.
+          #
+          # What this check runs is the repository's own bash against disposable
+          # fixtures under a temporary directory. It builds nothing, installs
+          # nothing, and writes nothing outside $TMPDIR.
+          __noChroot = true;
+        }
+        ''
+          runHook preInstall
+
+          # runCommand's builder runs in an empty directory with $src pointing at
+          # the copied flake source; every path below is relative to $src.
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+
+          # Into $TMPDIR, not into $src: $src is a read-only store copy, and
+          # writing into it fails with "Permission denied" on a line that looks
+          # like the test cannot find its own data.
+          cat > "$TMPDIR/host-facts.env" <<'FACTERMS'
+          # Generated by nixos/flake.nix. Values evaluated from the REAL Legion
+          # configuration on the machine that built this check.
+          ${nixpkgs.lib.concatStringsSep "\n" (
+            nixpkgs.lib.mapAttrsToList (name: value: "HOST_FACT_${name}=${value}") agentOperationsUnitFacts
+          )}
+          FACTERMS
+
+          AGENT_OPS_HOST_FACTS="$TMPDIR/host-facts.env" \
+            bash "$src/tests/agent-operations/run.sh"
 
           touch "$out"
           runHook postInstall

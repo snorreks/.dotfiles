@@ -9,16 +9,37 @@ reboots anything.
 
 ```console
 nix build ./nixos#checks.x86_64-linux.maintenance-contracts   # fast, seconds
+nix build ./nixos#checks.x86_64-linux.agent-operations        # credentials, lifetime, daemon roots, health, backup
 nix build ./nixos#maintenanceVm                             # VM, needs KVM
-nix flake check ./nixos                                      # runs the fast one
+nix flake check ./nixos                                      # runs the fast ones
 ```
 
 Or, while editing, without nix:
 
 ```console
-bash nixos/tests/run.sh                       # lint + every shell suite
-bash nixos/tests/ns-maint-transaction.sh      # one suite, standalone
+bash nixos/tests/run.sh                            # lint + every shell suite
+bash nixos/tests/ns-maint-transaction.sh           # one suite, standalone
+bash nixos/tests/agent-operations/run.sh           # the agent-operations lane
+bash nixos/tests/agent-operations/daemon-roots.sh  # one lane suite, standalone
 ```
+
+## Per-lane directories
+
+Each in-flight lane owns a directory with its own harness and its own runner, so
+every lane is runnable on its own before any of them are merged:
+
+| Directory | Lane | Runner |
+|---|---|---|
+| `agent-operations/` | agent continuity, credentials, backups, health | `bash nixos/tests/agent-operations/run.sh` |
+
+The `backup-restore.sh` suite creates a REAL disposable restic repository and
+restores from it. It needs `restic` and `sqlite3`, which are in the flake
+check's closure; a bare developer shell without them gets a clear SKIP rather
+than a silent pass.
+
+`agent-lifetime.sh` evaluates Nix. `nix build .#checks.x86_64-linux.agent-operations`
+supplies the Legion unit facts as a file; a standalone run evaluates them
+itself, and fails loudly if it cannot.
 
 ## What each suite is for
 
@@ -29,6 +50,7 @@ bash nixos/tests/ns-maint-transaction.sh      # one suite, standalone
 | `kill-switch-targets.sh` | What a kill sweep is allowed to target, and what it must never target. |
 | `disk-cleanup-safety.sh` | What the cleanup script refuses to delete. |
 | `run.sh` | The single entry point the flake check runs. |
+| `agent-operations/` | The agent-operations lane: its own harness (`lib/fixture.sh`), five suites and its own runner. See above. |
 | `maintenance-vm.nix` | That the above holds on a real, booted, systemd-managed NixOS system. |
 
 ## The failure-injection scenarios
