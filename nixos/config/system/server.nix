@@ -9,6 +9,13 @@
 # the only recovery path that does not involve talking a parent through a boot
 # menu is "it came back up on its own". So every choice here favours coming
 # back over being clever.
+#
+# The update/rollback workflow used to live here too, as `nswitch-safe`. It is
+# gone: it armed its dead-man timer before building and rolled back by
+# rebooting, which on a remote host means a slow build kills the server and a
+# half-applied activation gets declared safe. Its replacement is the explicit,
+# reboot-free transaction in config/system/maintenance.nix (ns-maint), and
+# docs/headless-server.md describes the operator side of it.
 {
   pkgs,
   lib,
@@ -16,98 +23,6 @@
   ...
 }: let
   headless = opts.headless;
-
-  # Revert to a known generation and reboot into it. Split out of the deadman
-  # switch below so it can also be fired by hand from a rescue session.
-  rollbackTo = pkgs.writeShellApplication {
-    name = "nixos-rollback-to";
-    runtimeInputs = [pkgs.nix pkgs.systemd];
-    text = ''
-      gen="''${1:?usage: nixos-rollback-to <generation-number>}"
-      echo "nixos-rollback-to: reverting to generation $gen, then rebooting"
-      nix-env -p /nix/var/nix/profiles/system --switch-generation "$gen"
-      # `boot`, not `switch`: the whole reason we are here is that the running
-      # generation may have broken networking, and switch-to-configuration
-      # switch would try to reconfigure it live. Write the bootloader entry and
-      # let a clean boot sort it out.
-      /nix/var/nix/profiles/system/bin/switch-to-configuration boot
-      systemctl reboot
-    '';
-  };
-
-  # Dead-man's switch around a rebuild.
-  #
-  # An autonomous "is the internet up?" watchdog was the obvious alternative
-  # and is worse: it cannot tell a config mistake from the parents' ISP having
-  # a bad afternoon, so it reboots the box for things a rollback will not fix.
-  # This arms only across the window where *we* changed something, which is
-  # when the risk actually exists.
-  safeSwitch = pkgs.writeShellApplication {
-    name = "nswitch-safe";
-    runtimeInputs = [pkgs.coreutils pkgs.gnugrep pkgs.systemd pkgs.nh];
-    text = ''
-      timeout="''${ROLLBACK_TIMEOUT:-20min}"
-
-      # A rebuild killed halfway by a dropped SSH session is its own failure
-      # mode, and the one most likely to happen on hotel wifi.
-      if [ -z "''${TMUX:-}''${ZELLIJ:-}''${STY:-}" ]; then
-        echo "nswitch-safe: not inside tmux/zellij — a dropped connection would" >&2
-        echo "              kill the rebuild mid-flight. Start a multiplexer first," >&2
-        echo "              or set ALLOW_NO_MUX=1 if you really are at the machine." >&2
-        [ -n "''${ALLOW_NO_MUX:-}" ] || exit 1
-      fi
-
-      link=$(readlink /nix/var/nix/profiles/system)
-      gen=''${link#system-}
-      gen=''${gen%-link}
-      if ! printf '%s' "$gen" | grep -qE '^[0-9]+$'; then
-        echo "nswitch-safe: cannot parse a generation number out of '$link'" >&2
-        exit 1
-      fi
-
-      echo "nswitch-safe: current generation is $gen"
-      echo "nswitch-safe: arming rollback — unless 'nswitch-confirm' runs within"
-      echo "              $timeout, this machine reverts to generation $gen and reboots."
-
-      # A transient *system* unit, so it outlives the SSH session that armed it
-      # — which is the entire point.
-      sudo systemd-run --collect --quiet \
-        --unit=nixos-deadman \
-        --on-active="$timeout" \
-        --description="Unconfirmed rebuild rollback to generation $gen" \
-        ${lib.getExe rollbackTo} "$gen"
-
-      rc=0
-      nh os switch "${opts.flakeDir}" "$@" || rc=$?
-
-      if [ "$rc" -ne 0 ]; then
-        echo
-        echo "nswitch-safe: rebuild FAILED (exit $rc). No new generation was created," >&2
-        echo "              so nothing needs reverting — disarming." >&2
-        ${lib.getExe confirmSwitch}
-        exit "$rc"
-      fi
-
-      echo
-      echo "nswitch-safe: rebuild applied. Verify you can still reach this host"
-      echo "              (open a SECOND ssh session — do not trust this one),"
-      echo "              then run: nswitch-confirm"
-    '';
-  };
-
-  confirmSwitch = pkgs.writeShellApplication {
-    name = "nswitch-confirm";
-    runtimeInputs = [pkgs.systemd];
-    text = ''
-      if systemctl is-active --quiet nixos-deadman.timer; then
-        sudo systemctl stop nixos-deadman.timer
-        sudo systemctl reset-failed nixos-deadman.timer nixos-deadman.service 2>/dev/null || true
-        echo "nswitch-confirm: rollback disarmed — this generation is now permanent."
-      else
-        echo "nswitch-confirm: no armed rollback; nothing to confirm."
-      fi
-    '';
-  };
 in {
   # ── Tailnet ────────────────────────────────────────────────────────────────
   # On every host, not just the server: this is how the travel laptop reaches
@@ -232,12 +147,15 @@ in {
   ];
 
   environment.systemPackages = [
-    safeSwitch
-    confirmSwitch
-    rollbackTo
-    # Reaching a remote rebuild that survives a dropped connection is the whole
-    # workflow; make sure the multiplexer nswitch-safe insists on is present
-    # even on a host whose home-manager session never starts.
+    # A long remote build still wants a multiplexer to live in — not because
+    # anything requires one any more, but because watching a build scroll for an
+    # hour in a bare SSH session is how people lose the output they needed.
+    #
+    # The maintenance transaction itself deliberately does NOT depend on this:
+    # activation runs in a system service, so a dropped connection can no longer
+    # kill a rebuild half-way, which is the failure mode the old wrapper's
+    # multiplexer check existed to prevent. The workflow moved to
+    # config/system/maintenance.nix (ns-maint); see docs/headless-server.md.
     pkgs.tmux
   ];
 }
