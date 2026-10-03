@@ -50,7 +50,10 @@ in {
     (pkgs.writeShellApplication {
       name = "battery-charge-limit";
       runtimeInputs = [pkgs.coreutils];
-      text = "exec ${chargeLimit} \"$@\"";
+      text = ''
+        export NM_BATTERY_CHARGE_LIMIT=${toString limit}
+        exec ${chargeLimit} "$@"
+      '';
     })
   ];
 }

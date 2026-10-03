@@ -122,7 +122,7 @@ case "${1:-}" in
         fi
         port="${3#--https=}"
         target="${4:-}"
-        printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"%s":{"Handlers":{"/":{"Proxy":"%s"}}}}}\n' \
+        printf '{"TCP":{"%s":{"HTTPS":true}},"Web":{"legion.tailf24d02.ts.net:%s":{"Handlers":{"/":{"Proxy":"%s"}}}}}\n' \
           "$port" "$port" "$target" >"$TMP/state/serve"
         ;;
     esac
@@ -263,6 +263,34 @@ assert_not_contains "no Serve write was attempted" "$(calls)" "serve --bg"
 assert_contains "the mapping is unchanged" "$(serve_config)" "8787"
 teardown
 t_done
+
+# ─────────────────────────────────────────────────────────────────────────────
+# A correct target elsewhere must not hide a broken root handler on HTTPS/443.
+while IFS='|' read -r scenario status; do
+  t_start "Serve repairs $scenario"
+  setup
+  printf 'Running\n' >"$TMP/state/backend"
+  printf '%s\n' "$status" >"$TMP/state/serve"
+  out="$(run_reconcile)" && rc=0 || rc=$?
+  assert_eq "exit status" 0 "$rc"
+  assert_contains "the configured mapping was repaired" "$(calls)" \
+    "serve --bg --https=443 http://127.0.0.1:8787"
+  assert_not_contains "no Serve reset" "$(calls)" "serve reset"
+  : >"$TMP/calls"
+  out="$(run_reconcile)" && rc=0 || rc=$?
+  assert_eq "the repaired mapping converges" 0 "$rc"
+  assert_not_contains "no repeated Serve write" "$(calls)" "serve --bg"
+  teardown
+  t_done
+done <<'CASES'
+a target only on another listener|{"TCP":{"443":{"HTTPS":true},"8443":{"HTTPS":true}},"Web":{"legion.tailf24d02.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8787"}}}}}
+a target only on another path|{"TCP":{"443":{"HTTPS":true}},"Web":{"legion.tailf24d02.ts.net:443":{"Handlers":{"/other":{"Proxy":"http://127.0.0.1:8787"}}}}}
+a target port prefix|{"TCP":{"443":{"HTTPS":true}},"Web":{"legion.tailf24d02.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:87870"}}}}}
+a non-loopback target|{"TCP":{"443":{"HTTPS":true}},"Web":{"legion.tailf24d02.ts.net:443":{"Handlers":{"/":{"Proxy":"http://192.0.2.1:8787"}}}}}
+a listener without HTTPS|{"TCP":{"443":{"HTTPS":false}},"Web":{"legion.tailf24d02.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8787"}}}}}
+missing Web handlers|{"TCP":{"443":{"HTTPS":true}},"Web":null}
+malformed status|not JSON:8787
+CASES
 
 # ─────────────────────────────────────────────────────────────────────────────
 t_start "a Serve mapping pointing at the wrong port is repaired, not reset"

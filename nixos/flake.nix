@@ -368,6 +368,7 @@
             nixpkgs.legacyPackages.${system}.findutils
             nixpkgs.legacyPackages.${system}.git
             nixpkgs.legacyPackages.${system}.gnugrep
+            nixpkgs.legacyPackages.${system}.jq
             # `nix` for tests/server-foundation/role-policy.sh, which evaluates
             # nixos/lib/host-policy.nix directly with `nix eval --file`. That is
             # a plain local evaluation — no flake, no store, no network — which

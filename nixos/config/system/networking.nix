@@ -277,8 +277,8 @@ in {
   # where nixpkgs' own modules put them for the same reason.
   #
   # The delay is bounded rather than instant so a resolver that is waiting on a
-  # link which has not come up yet does not spin: the sequence is 5s, 10s, 20s,
-  # 40s … capped at two minutes, forever.
+  # link which has not come up yet does not spin: systemd increases the delay
+  # geometrically from 5s to two minutes over five steps, then repeats at the cap.
   systemd.services.dnscrypt-proxy = {
     # [Unit], as it must be. See above: this used to be a StartLimitBurst under
     # serviceConfig, which systemd does not read there, so it was never in
@@ -289,7 +289,6 @@ in {
       Restart = lib.mkForce "always";
       RestartSec = "5s";
       RestartSteps = 5;
-      RestartStepSec = "5s";
       RestartMaxDelaySec = "120s";
     };
   };

@@ -292,6 +292,36 @@ fi
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
+t_start "phone-clients warning requires a server with both clients disabled"
+out="$(policy_eval <<'NIX'
+let
+  check = role: headless: enabled: collieEnabled:
+    let
+      result = policy.policyDiagnostics {
+        inherit role headless;
+        batteryChargeLimit = 60;
+        mobileAgents = {
+          enable = enabled;
+          sshPort = 2222;
+          collie.enable = collieEnabled;
+        };
+      };
+      expected = if (role == "server" || (role == null && headless))
+        && !enabled && !collieEnabled then 1 else 0;
+    in builtins.length result.warnings == expected;
+in builtins.all (role:
+  builtins.all (headless:
+    builtins.all (enabled:
+      builtins.all (collieEnabled: check role headless enabled collieEnabled)
+        [false true]) [false true]) [false true]) ["server" "desktop" null]
+NIX
+)"
+if [[ "$out" != "true" ]]; then
+  fail "unexpected warning across role/client combinations — got $out"
+fi
+t_done
+
+# ─────────────────────────────────────────────────────────────────────────────
 t_start "a private override file is scoped to ONE host"
 out="$(policy_eval <<'NIX'
 let

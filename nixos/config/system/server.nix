@@ -99,9 +99,9 @@ in {
   # has finished authenticating it fails and never tries again — leaving SSH
   # and the exit node silently off.
   #
-  # It does retry now, with a bound: 10s, 20s, 40s … capped at five minutes,
-  # forever. The cap is what makes it survivable — the old fixed 10s interval
-  # meant a node whose uplink came up after an hour had woken the unit thirty
+  # It does retry now: systemd increases the delay geometrically from 10s to
+  # five minutes over six steps, then repeats at the cap. The old fixed 10s
+  # interval meant a node whose uplink came up after an hour had woken the unit 360
   # times first, and each wake is a journal full of "failed to reach
   # controlplane.tailscale.com" noise that hides the real error.
   #
@@ -115,7 +115,6 @@ in {
       Restart = "on-failure";
       RestartSec = "10s";
       RestartSteps = 6;
-      RestartStepSec = "10s";
       RestartMaxDelaySec = "300s";
     };
   };
@@ -150,6 +149,7 @@ in {
   # and never when it is already correct.
   systemd.services.tailscale-reconcile = {
     description = "Converge tailscaled preferences and the private Serve mapping";
+    path = [pkgs.jq];
     after = ["tailscaled.service" "tailscaled-set.service"];
     wants = ["tailscaled.service"];
     wantedBy = ["multi-user.target"];

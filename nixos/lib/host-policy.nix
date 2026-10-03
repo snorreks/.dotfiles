@@ -190,7 +190,7 @@ rec {
           ]
           else [])
         ++ (
-          if resolvedRole == "server" && !mobileAgents.enable && mobileAgents.collie.enable then
+          if resolvedRole == "server" && !mobileAgents.enable && !mobileAgents.collie.enable then
             [
               ''
                 role = "server" with the phone clients off. That is a valid

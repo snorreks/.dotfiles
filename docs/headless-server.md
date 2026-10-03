@@ -101,8 +101,10 @@ is how a policy stops being readable, and a machine that is not a server already
 behaves like a laptop.
 
 What is travel-specific is per host, and therefore already scoped that way:
-`hosts/gs65` sets `batteryChargeLimit` (see below), and the sleep behaviour comes
-from the firmware and the desktop session rather than from a role.
+`hosts/gs65` leaves `batteryChargeLimit` unset at the base default; a limit may
+be configured there once its writable threshold is confirmed (see below). The
+sleep behaviour comes from the firmware and the desktop session rather than
+from a role.
 
 ## Everything on the tailnet, nothing on the internet
 

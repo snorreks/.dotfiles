@@ -152,15 +152,14 @@ if [[ "$NM_TS_SERVE_HTTPS_PORT" -gt 0 && "$NM_TS_SERVE_TARGET_PORT" -gt 0 ]]; th
 
   # `serve status --json` is shaped as
   #   {"TCP":{"443":{"HTTPS":true}}, "Web":{ "<host>:443": {"Handlers":{"/":{"Proxy":"http://127.0.0.1:8787"}}}}}
-  # Older builds print the human form instead. Both are accepted, and the
-  # decision is the same: is HTTPS already served on that port, and does it
-  # point at our loopback port?
-  already_ok=0
-  if [[ "$status" == *"\"$NM_TS_SERVE_TARGET_PORT\""* || "$status" == *":$NM_TS_SERVE_TARGET_PORT"* ]]; then
-    already_ok=1
-  fi
-
-  if ((already_ok)); then
+  # Only the HTTPS listener and its root Web handler count; other listeners,
+  # paths, and longer port numbers must not mask a missing or incorrect mapping.
+  if jq -e --arg https "$NM_TS_SERVE_HTTPS_PORT" \
+    --arg proxy "http://127.0.0.1:$NM_TS_SERVE_TARGET_PORT" '
+      .TCP[$https].HTTPS == true and
+      any(.Web // {} | to_entries[];
+        (.key | endswith(":" + $https)) and .value.Handlers["/"].Proxy == $proxy)
+    ' <<<"$status" >/dev/null 2>&1; then
     log "Serve already maps HTTPS/$NM_TS_SERVE_HTTPS_PORT -> 127.0.0.1:$NM_TS_SERVE_TARGET_PORT; leaving it untouched"
   else
     log "Serve mapping for HTTPS/$NM_TS_SERVE_HTTPS_PORT is missing or points elsewhere; restoring it"
