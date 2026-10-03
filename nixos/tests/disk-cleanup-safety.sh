@@ -295,4 +295,67 @@ t_done
 fixture_free
 rm -rf "$HOME_DIR"
 
+# Exercise the deletion entry points against one disposable cache/tmp tree.
+# Load the production helpers without executing the machine-wide sweep.
+# Functions below are called by the sourced production helpers.
+# shellcheck disable=SC2317,SC2034
+check_busy_tree() (
+  set --
+  # shellcheck disable=SC1090
+  . <(sed '/^# confirmation$/,$d' "$DISK_CLEANUP")
+  have() {
+    case "$1" in
+    lsof) [[ "$CHECKER" == lsof ]] ;;
+    fuser) [[ "$CHECKER" == lsof || "$CHECKER" == fuser ]] ;;
+    *) command -v "$1" >/dev/null 2>&1 ;;
+    esac
+  }
+  lsof() {
+    printf 'lsof %s\n' "$*" >>"$CALLS"
+    [[ "$*" == "+D $BUSY_ROOT" && "$BUSY" == 1 ]]
+  }
+  fuser() {
+    printf 'fuser %s\n' "$*" >>"$CALLS"
+    # Only the nested file is open: checking the root inode must not suffice.
+    [[ "${*: -1}" == "$BUSY_FILE" && "$BUSY" == 1 ]]
+  }
+  find() {
+    # Restrict prune_tmp's top-level discovery to our disposable directory.
+    if [[ "$1" == /tmp ]]; then
+      shift
+      command find "$HOME_DIR/tmp" "$@"
+    else
+      command find "$@"
+    fi
+  }
+  clear_dir "$BUSY_ROOT"
+  touch -d '30 days ago' "$BUSY_ROOT"
+  DO_TMP=1
+  prune_tmp
+)
+
+for CHECKER in lsof fuser neither; do
+  for BUSY in 1 0; do
+    t_start "nested cache and tmp use: checker=$CHECKER busy=$BUSY"
+    cleanup_home
+    mkdir -p "$HOME_DIR/tmp/stale/nested"
+    BUSY_ROOT="$HOME_DIR/tmp/stale"
+    BUSY_FILE="$BUSY_ROOT/nested/file with spaces"$'\n''and a newline'
+    echo keep >"$BUSY_FILE"
+    touch -d '30 days ago' "$BUSY_ROOT"
+    out="$(check_busy_tree 2>&1)"
+    if [[ "$BUSY" == 1 || "$CHECKER" == neither ]]; then
+      assert_file "$BUSY_FILE" "both clear_dir and prune_tmp preserve the nested file"
+      assert_contains "$out" "SKIPPED" "deletion is refused visibly"
+    else
+      assert_no_file "$BUSY_ROOT" "an idle candidate is removed when a checker is available"
+    fi
+    if [[ "$CHECKER" == lsof ]]; then
+      assert_eq 0 "$(calls_of fuser)" "lsof takes precedence over fuser"
+    fi
+    t_done
+    rm -rf "$HOME_DIR"
+  done
+done
+
 suite_summary "disk-cleanup safety"

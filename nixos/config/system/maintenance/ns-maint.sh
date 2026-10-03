@@ -445,9 +445,8 @@ new_txid() {
 # library will not match the still-loaded kernel module. That failure is exactly
 # the "Driver/library version mismatch" the kernel-bump skill is about.
 #
-# Comparing the kernel module directories of the two closures catches kernel and
-# out-of-tree driver changes together, because every out-of-tree module ships in
-# the kernel package's module tree. Unknown (a closure we cannot inspect) is
+# Comparing the resolved aggregate module store paths catches both kernel and
+# out-of-tree driver changes, even when their kernel version names are identical. Unknown (a closure we cannot inspect) is
 # treated as dirty rather than clean: refusing costs a flag, guessing costs an
 # unreachable server.
 kernel_signature() {
@@ -456,22 +455,13 @@ kernel_signature() {
     printf 'unknown'
     return 0
   fi
-  local dir="$closure/kernel-modules/lib/modules"
-  if [[ ! -d "$dir" ]]; then
+  local modules
+  modules="$(readlink -e "$closure/kernel-modules" 2>/dev/null || true)"
+  if ! valid_store_path "$modules" || [[ ! -d "$modules/lib/modules" ]]; then
     printf 'unknown'
     return 0
   fi
-  # One line, sorted, so the comparison is order-independent. `ls` rather than
-  # `find` is deliberate: the entries here are kernel version directories, and we
-  # want exactly the names, in one glob, with nothing else in the output.
-  local listing
-  # shellcheck disable=SC2012
-  listing="$(ls -1 "$dir" 2>/dev/null | sort | tr '\n' ',')"
-  [[ -n "$listing" ]] || {
-    printf 'unknown'
-    return 0
-  }
-  printf '%s' "$listing"
+  printf '%s' "$modules"
 }
 
 kernel_is_dirty() {
@@ -584,8 +574,8 @@ cmd_prepare() {
       flake="$2"
       shift 2
       ;;
-    --offline) offline=1 ;;
-    --online) offline=0 ;;
+    --offline) offline=1; shift ;;
+    --online) offline=0; shift ;;
     --build-timeout)
       build_timeout="$2"
       shift 2
@@ -703,6 +693,7 @@ cmd_activate() {
       ;;
     --allow-unknown-kernel)
       allow_unknown_kernel=1
+      shift
       ;;
     -h | --help)
       usage
@@ -742,7 +733,14 @@ cmd_activate() {
     die "activate: $NM_BOOTED_SYSTEM points at '$booted', which is not a store path. Refusing to arm."
   fi
 
-  if kernel_is_dirty "$candidate" "$running" && [[ "$allow_unknown_kernel" -ne 1 ]]; then
+  local candidate_kernel running_kernel unknown_kernel=0
+  candidate_kernel="$(kernel_signature "$candidate")"
+  running_kernel="$(kernel_signature "$running")"
+  if [[ "$candidate_kernel" == unknown || "$running_kernel" == unknown ]]; then
+    unknown_kernel=1
+  fi
+  if kernel_is_dirty "$candidate" "$running" &&
+    [[ "$unknown_kernel" -eq 0 || "$allow_unknown_kernel" -ne 1 ]]; then
     die "activate: refused. The candidate carries a different kernel than the running closure
              candidate kernel : $(kernel_signature "$candidate")
              running kernel   : $(kernel_signature "$running")
@@ -753,7 +751,7 @@ cmd_activate() {
              ns-maint reboot --yes
            (or re-run with --allow-unknown-kernel if the check could not inspect both closures)"
   fi
-  if kernel_is_dirty "$candidate" "$running"; then
+  if [[ "$unknown_kernel" -eq 1 ]]; then
     sayf "activate: WARNING -- kernel check could not compare both closures; continuing because --allow-unknown-kernel was given."
   fi
 
@@ -796,7 +794,7 @@ cmd_activate() {
   lock_release
 
   local unit="ns-maint-activate-${txid}"
-  "$NM_SYSTEMD_RUN" --unit="$unit" --collect --no-block --wait=false \
+  "$NM_SYSTEMD_RUN" --unit="$unit" --collect --no-block \
     --description="ns-maint activation $txid" \
     --property=Type=oneshot \
     "$(self_path)" __run-activation "$txid" "$candidate"
@@ -869,18 +867,34 @@ cmd_run_activation() {
   record_save
   log_event "activating txid=$txid candidate=$candidate"
 
-  local rc=0
-  switch_to_configuration "$candidate" switch || rc=$?
+  local rc=0 remaining
+  remaining=$(( RECORD[deadline] - $(now_epoch) ))
+  if [[ "$remaining" -le 0 ]]; then
+    do_restore "$txid" "deadline-expired"
+    return $?
+  fi
 
-  lock_acquire
-  record_load
+  "$NM_ENV" --profile "$NM_PROFILE" --set "$candidate" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    RECORD["note"]="profile update failed (exit $rc); restoring"
+    record_save
+    log_event "activation $txid profile update failed rc=$rc; restoring"
+    lock_release
+    do_restore "$txid" "profile-update-failed-rc-$rc"
+    return $?
+  fi
 
-  if [[ "${RECORD[txid]}" != "$txid" ]]; then
-    # A deadline fired and restored the old closure while we were activating.
-    # The candidate may or may not have landed; the record already says so, and
-    # re-applying it now would undo the operator's recovery.
-    log_event "activation $txid finished (rc=$rc) but the record moved on; not updating phase"
-    return 0
+  # Keep the lock through activation. The watchdog cannot acquire it here, so
+  # bound the entire activation process group by the remaining deadline.
+  remaining=$(( RECORD[deadline] - $(now_epoch) ))
+  if [[ "$remaining" -le 0 ]]; then
+    do_restore "$txid" "deadline-expired"
+    return $?
+  fi
+  switch_to_configuration "$candidate" switch "$remaining" || rc=$?
+  if [[ "$(now_epoch)" -ge "${RECORD[deadline]}" ]]; then
+    do_restore "$txid" "deadline-expired"
+    return $?
   fi
 
   if [[ "$rc" -eq 0 ]]; then
@@ -892,13 +906,11 @@ cmd_run_activation() {
     return 0
   fi
 
-  # Nonzero is NOT "nothing happened". switch-to-configuration reconfigures
-  # live units before it sets the profile, so a failure here can leave changed
-  # services behind an unchanged profile. Restore regardless of what the profile
-  # says.
+  # Nonzero is NOT "nothing happened". Activation can leave changed services
+  # behind after failing. Restore regardless of what the profile says.
   sayf "activation $txid FAILED (exit $rc)."
   sayf "This may be a PARTIAL application: units can already have been reconfigured even"
-  sayf "though the profile was not moved. Restoring the previous closure."
+  sayf "before activation failed. Restoring the previous closure."
   log_event "activation $txid failed rc=$rc; restoring"
   RECORD["note"]="activation exited $rc; restoring (partial application is possible)"
   record_save
@@ -913,18 +925,23 @@ cmd_run_activation() {
 # fake without pretending to run a real activation.
 switch_to_configuration() {
   local closure="$1" mode="$2" bin
+  local -a limit=()
+  if [[ -n "${3:-}" ]]; then
+    # KILL bounds even an activation that ignores TERM, including its children.
+    limit=(timeout --signal=KILL "$3")
+  fi
   valid_store_path "$closure" || die "switch_to_configuration: '$closure' is not a store path"
   case "$mode" in
   switch | boot | test) ;;
   *) die "switch_to_configuration: '$mode' is not a mode" ;;
   esac
   if [[ -n "$NM_SWITCH_TO_CONFIGURATION" ]]; then
-    "$NM_SWITCH_TO_CONFIGURATION" "$closure" "$mode"
+    "${limit[@]}" "$NM_SWITCH_TO_CONFIGURATION" "$closure" "$mode"
     return $?
   fi
   bin="$closure/bin/switch-to-configuration"
   [[ -x "$bin" ]] || die "activate: $bin is missing or not executable."
-  "$bin" "$mode"
+  "${limit[@]}" "$bin" "$mode"
 }
 
 # do_restore — the recovery path. NEVER reboots.
@@ -1028,7 +1045,8 @@ do_restore() {
 restore_profile_intent() {
   local target="${RECORD[old_profile]-}" gen="${RECORD[old_gen]-}" closure="${RECORD[old_running]-}"
   if [[ -z "$target" ]]; then
-    return 0
+    rm -f -- "$NM_PROFILE"
+    return $?
   fi
   if [[ -n "$gen" ]]; then
     # Verify before switching: the recorded generation must still exist AND it
@@ -1036,8 +1054,7 @@ restore_profile_intent() {
     # generation number is not the thing we recorded, and switching to it would
     # move the profile somewhere we never intended.
     local gen_path
-    gen_path="$("$NM_ENV" --profile "$NM_PROFILE" --list-generations 2>/dev/null |
-      awk -v g="$gen" '$1 == g { print $2; exit }' || true)"
+    gen_path="$(readlink -e "${NM_PROFILE}-${gen}-link" 2>/dev/null || true)"
     if [[ -n "$gen_path" ]] && valid_store_path "$gen_path" && [[ "$gen_path" == "$closure" ]]; then
       if "$NM_ENV" --profile "$NM_PROFILE" --switch-generation "$gen"; then
         log_event "profile restored to generation $gen"
@@ -1088,7 +1105,7 @@ cmd_confirm() {
   lock_acquire
   record_load
 
-  [[ "${RECORD[phase]}" == "awaiting-confirm" ]] || die "confirm: nothing is awaiting confirmation — the transaction is '${RECORD[phase]}'${RECORD[txid]:+ (txid ${RECORD[txid]})}."
+  [[ "${RECORD[phase]}" == "awaiting-confirm" || "${RECORD[phase]}" == "reconciled-booted" ]] || die "confirm: nothing is awaiting confirmation — the transaction is '${RECORD[phase]}'${RECORD[txid]:+ (txid ${RECORD[txid]})}."
   [[ "${RECORD[txid]}" == "$txid_arg" ]] || die "confirm: txid mismatch. The pending transaction is '${RECORD[txid]}', you passed '$txid_arg'.
              Refusing: a stale confirmation must never bless a newer transaction."
 
@@ -1319,7 +1336,7 @@ cmd_stage() {
   local candidate_arg=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --candidate) candidate_arg="$2" ;;
+    --candidate) candidate_arg="$2"; shift ;;
     -h | --help)
       say "usage: ns-maint stage [--candidate <store-path>]"
       return 0
@@ -1331,6 +1348,9 @@ cmd_stage() {
 
   lock_acquire
   record_load
+  if is_pending_phase "${RECORD[phase]}"; then
+    die "stage: transaction ${RECORD[txid]} is ${RECORD[phase]}. Confirm or abort it first."
+  fi
   local candidate="${candidate_arg:-${RECORD[candidate]}}"
   [[ -n "$candidate" ]] || die "stage: no candidate prepared. Run 'ns-maint prepare' first."
   valid_store_path "$candidate" || die "stage: '$candidate' is not a store path"

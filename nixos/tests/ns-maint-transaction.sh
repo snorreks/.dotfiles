@@ -59,7 +59,7 @@ t_done
 fixture_free
 
 # ─────────────────────────────────────────────────────────────────────────────
-t_start "partial activation with an UNCHANGED profile still restores"
+t_start "partial activation restores the original profile generation"
 fixture_new
 # The dangerous shape: activation reconfigures live units and then fails before
 # the profile is touched. The old nswitch-safe read that as "no new generation
@@ -70,8 +70,9 @@ prepare_and_activate 300
 assert_eq "restored" "$(phase)" "the transaction ends restored, not idle"
 assert_eq "restored-live" "$(rec_field restore_result)" "restoration is reported as having happened"
 assert_contains "$(switch_calls)" "switch $FAKE_RUNNING" "the OLD closure was re-activated, without a reboot"
-# The profile never moved: prove that, then prove it did not matter.
-assert_eq "system-7-link" "$(readlink "$NM_PROFILE")" "the profile was never moved by the failed activation"
+assert_contains "$(fake_calls)" "profile-at-activation $FAKE_CANDIDATE" "the candidate profile is selected before activation"
+assert_eq "system-7-link" "$(readlink "$NM_PROFILE")" "the original profile generation is restored through Nix"
+assert_contains "$(fake_calls)" "switch-generation 7" "generation restoration uses nix-env"
 assert_contains "$(cat "$TMP/log/activate.out" 2>/dev/null; cat "$TMP/log/unit.out")" "PARTIAL application" \
   "the operator is told partial application is possible"
 assert_no_reboot
@@ -290,6 +291,10 @@ assert_contains "$(cat "$TMP/log/reconcile.out")" "NO rollback will fire" "and t
 ns_maint reconcile >"$TMP/log/reconcile2.out" 2>&1
 assert_eq "reconciled-booted" "$(phase)" "reconciling again changes nothing"
 assert_eq "" "$(rec_field deadline)" "and still arms nothing"
+SSH_CONNECTION="" ns_maint confirm "$id" --assume-new-connection >"$TMP/log/confirm.out" 2>&1
+assert_eq "confirmed" "$(phase)" "the reconciled candidate can be confirmed"
+assert_no_gc_root candidate "confirmation releases the candidate root"
+assert_no_gc_root running "confirmation releases the recovery root"
 assert_no_reboot
 t_done
 fixture_free
@@ -553,5 +558,115 @@ assert_eq 1 "$(grep -c 'switch switch' "$TMP/log/switch" || true)" "exactly one 
 assert_no_reboot
 t_done
 fixture_free
+
+t_start "prepare consumes offline and online flags"
+fixture_new
+timeout 5 bash "$NS_MAINT_SCRIPT" prepare --offline --tag flags >"$TMP/log/prepare.out" 2>&1
+assert_eq 0 "$?" "offline prepare terminates"
+assert_contains "$(fake_calls)" "--offline" "offline reaches nix build"
+: >"$TMP/log/calls"
+timeout 5 bash "$NS_MAINT_SCRIPT" prepare --offline --online --tag flags >"$TMP/log/prepare.out" 2>&1
+assert_eq 0 "$?" "online prepare terminates"
+assert_not_contains "$(fake_calls)" "--offline" "online overrides offline"
+t_done
+fixture_free
+
+for kernel_case in changed-modules unknown-candidate unknown-running; do
+  t_start "kernel override: $kernel_case"
+  fixture_new
+  if [[ "$kernel_case" == changed-modules ]]; then
+    modules="$NM_STORE_PREFIX/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-modules-rebuilt"
+    mkdir -p "$modules/lib/modules/6.1.0-test"
+    ln -sfn "$modules" "$FAKE_CANDIDATE/kernel-modules"
+  elif [[ "$kernel_case" == unknown-candidate ]]; then
+    rm "$FAKE_CANDIDATE/kernel-modules"
+  else
+    rm "$FAKE_RUNNING/kernel-modules"
+  fi
+  ns_maint prepare >/dev/null 2>&1
+  ns_maint activate --timeout 300 >"$TMP/log/refusal.out" 2>&1 && rc=0 || rc=$?
+  assert_ne 0 "$rc" "dirty or unknown signatures require refusal"
+  timeout 5 bash "$NS_MAINT_SCRIPT" activate --allow-unknown-kernel --timeout 300 >"$TMP/log/override.out" 2>&1 && rc=0 || rc=$?
+  out="$(cat "$TMP/log/override.out")"
+  if [[ "$kernel_case" == changed-modules ]]; then
+    assert_ne 0 "$rc" "override cannot bypass known module changes with the same version"
+    assert_eq prepared "$(phase)" "no transaction is armed"
+    assert_not_contains "$out" "WARNING" "known differences produce no unknown warning"
+    assert_eq "" "$(switch_calls)" "no activation occurs"
+  else
+    assert_eq 0 "$rc" "unknown signature override terminates successfully"
+    assert_eq awaiting-confirm "$(phase)" "unknown signature override activates"
+    assert_contains "$out" "WARNING" "unknown signature produces a warning"
+  fi
+  t_done
+  fixture_free
+done
+
+t_start "a hung activation is killed at the deadline and restored under the lock"
+fixture_new
+FAKE_SWITCH_SLEEP=30
+FAKE_SWITCH_IGNORE_TERM=1
+export FAKE_SWITCH_SLEEP FAKE_SWITCH_IGNORE_TERM
+ns_maint prepare >/dev/null 2>&1
+start=$(date +%s)
+ns_maint activate --timeout 3 >"$TMP/log/activate.out" 2>&1 &
+activation_pid=$!
+for ((attempt=0; attempt<30; attempt++)); do
+  [[ "$(switch_calls)" == *"$FAKE_CANDIDATE"* ]] && break
+  sleep 0.05
+done
+ns_maint tick >"$TMP/log/tick.out" 2>&1 && rc=0 || rc=$?
+assert_eq 75 "$rc" "the watchdog cannot interleave with activation"
+wait "$activation_pid"
+assert_eq restored "$(phase)" "a hung activation restores without waiting for the watchdog"
+assert_contains "$(rec_field note)" "deadline-expired" "the deadline is recorded as the restore reason"
+assert_contains "$(switch_calls)" "switch $FAKE_RUNNING" "the recovery closure is activated"
+assert_eq system-7-link "$(readlink "$NM_PROFILE")" "the old generation is restored"
+[[ $(( $(date +%s) - start )) -lt 15 ]] && _ok "activation is bounded" || _fail "activation exceeded its bound"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "profile selection failure restores without activating the candidate"
+fixture_new
+FAKE_PROFILE_SET_EXIT=9
+export FAKE_PROFILE_SET_EXIT
+prepare_and_activate 300
+assert_eq restored "$(phase)" "profile selection failure restores"
+assert_contains "$(rec_field note)" "profile-update-failed-rc-9" "the failure is recorded"
+assert_not_contains "$(switch_calls)" "$FAKE_CANDIDATE" "candidate activation was never invoked"
+assert_contains "$(switch_calls)" "$FAKE_RUNNING" "old runtime was restored"
+t_done
+fixture_free
+
+t_start "restoration removes a profile that was originally absent"
+fixture_new
+rm "$NM_PROFILE"
+FAKE_SWITCH_CANDIDATE_EXIT=7
+export FAKE_SWITCH_CANDIDATE_EXIT
+prepare_and_activate 300
+assert_eq restored "$(phase)" "failed activation restores"
+assert_no_file "$NM_PROFILE" "the candidate profile is removed"
+[[ ! -L "$NM_PROFILE" ]] && _ok "no dangling profile remains" || _fail "a profile link remains"
+t_done
+fixture_free
+
+for pending in armed activating awaiting-confirm restoring; do
+  t_start "stage refuses a $pending transaction without mutation"
+  fixture_new
+  prepare_and_activate 300
+  sed -i "s/^phase=.*/phase=$pending/" "$NM_DIR/record.env"
+  before="$(cat "$NM_DIR/record.env")"
+  calls_before="$(switch_calls)"
+  root_before="$(readlink "$NM_GCROOTS/ns-maint-candidate")"
+  ns_maint stage --candidate "$FAKE_OTHER_CANDIDATE" >"$TMP/log/stage.out" 2>&1 && rc=0 || rc=$?
+  assert_ne 0 "$rc" "stage is refused"
+  assert_contains "$(cat "$TMP/log/stage.out")" "$pending" "the pending phase is named"
+  assert_eq "$before" "$(cat "$NM_DIR/record.env")" "the entire record is preserved"
+  assert_eq "$calls_before" "$(switch_calls)" "no boot or live activation occurs"
+  assert_eq "$root_before" "$(readlink "$NM_GCROOTS/ns-maint-candidate")" "the candidate root is preserved"
+  t_done
+  fixture_free
+done
 
 suite_summary "ns-maint transaction"

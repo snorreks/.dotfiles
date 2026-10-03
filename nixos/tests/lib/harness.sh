@@ -187,8 +187,7 @@ fixture_new() {
   # symlink to a generation link ("system-7-link"), and that link is a symlink to
   # the closure. So `readlink` on the profile yields a RELATIVE name, which is
   # exactly the case generation_of() has to parse, and which is also why
-  # restore_profile_intent cannot compare that name against the store path
-  # `nix-env --list-generations` prints.
+  # restore_profile_intent must resolve the generation link to a store path.
   ln -sfn "$FAKE_RUNNING" "$TMP/profile/system-7-link"
   ln -sfn "system-7-link" "$TMP/profile/system"
 
@@ -226,6 +225,8 @@ fixture_new() {
   export FAKE_BUILD_EXIT=0
   export FAKE_SWITCH_LOG="$TMP/log/switch"
   export FAKE_SWITCH_SLEEP=0
+  export FAKE_PROFILE_SET_EXIT=0
+  export FAKE_SWITCH_IGNORE_TERM=0
   export FAKE_SWITCH_CANDIDATE_EXIT=0
   export FAKE_SWITCH_OLD_EXIT=0
   export FAKE_SWITCH_OLD_BOOT_EXIT=0
@@ -239,7 +240,9 @@ fixture_new() {
 
 make_closure() {
   local path="$1" kernel="$2"
-  mkdir -p "$path/kernel-modules/lib/modules/$kernel"
+  local modules="$NM_STORE_PREFIX/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-modules-$kernel"
+  mkdir -p "$path" "$modules/lib/modules/$kernel"
+  ln -sfn "$modules" "$path/kernel-modules"
   # A switch-to-configuration is expected to exist; the FAKE one replaces it at
   # call time via NM_SWITCH_TO_CONFIGURATION, but its presence is what makes the
   # closure pass ns-maint's own sanity checks.
@@ -384,18 +387,23 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
   --profile | -p) prof="$2"; shift 2 ;;
   --list-generations)
-    # Report the generations that actually exist beside this profile, resolved
-    # to store paths, exactly as the real nix-env does.
+    # Real nix-env reports generation, date and time, not store paths.
     for l in "$(dirname "$prof")"/system-*-link; do
       [[ -L "$l" ]] || continue
       b="${l##*/}"
       g="${b#system-}"
       g="${g%-link}"
-      printf '%s %s %s\n' "$g" "$(readlink -f "$l")" "2026-10-01"
+      printf '%s 2026-10-01 12:00:00\n' "$g"
     done
     exit 0
     ;;
-  --switch-generation | --set) gen="$2"; shift 2 ;;
+  --set)
+    [[ "${FAKE_PROFILE_SET_EXIT:-0}" -eq 0 ]] || exit "$FAKE_PROFILE_SET_EXIT"
+    ln -sfn "$2" "${prof}-8-link"
+    ln -sfn "${prof##*/}-8-link" "$prof"
+    exit 0
+    ;;
+  --switch-generation) gen="$2"; shift 2 ;;
   *) shift ;;
   esac
 done
@@ -436,6 +444,7 @@ unit=""
 cmd=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
+  --wait=*) exit 2 ;;
   --unit=*) unit="${1#--unit=}" ;;
   --* | -*) ;;
   *) cmd+=("$1") ;;
@@ -479,7 +488,7 @@ FAKE
 #   FAKE_SWITCH_CANDIDATE_EXIT   exit code when switching TO the candidate
 #   FAKE_SWITCH_OLD_EXIT         exit code when switching back to the old closure
 #   FAKE_SWITCH_OLD_BOOT_EXIT    exit code for the old closure's `boot` fallback
-#   FAKE_SWITCH_SLEEP            seconds to take before returning
+#   FAKE_SWITCH_SLEEP            seconds the candidate takes before returning
 #
 # Note what it does NOT do on a failed activation: it does not move the
 # profile. That is the whole point — "profile unchanged" must not be the thing
@@ -488,16 +497,15 @@ closure="$1"
 mode="$2"
 echo "switch $mode $closure" >>"${FAKE_SWITCH_LOG}"
 echo "switch $mode $closure" >>"${TMP}/log/calls"
-[[ "${FAKE_SWITCH_SLEEP:-0}" -gt 0 ]] && sleep "${FAKE_SWITCH_SLEEP}"
 case "$closure" in
 *"candidate")
+  echo "profile-at-activation $(readlink -f "$NM_PROFILE")" >>"${TMP}/log/calls"
+  [[ "${FAKE_SWITCH_IGNORE_TERM:-0}" -eq 1 ]] && trap '' TERM
+  [[ "${FAKE_SWITCH_SLEEP:-0}" -gt 0 ]] && sleep "${FAKE_SWITCH_SLEEP}"
   rc="${FAKE_SWITCH_CANDIDATE_EXIT:-0}"
-  # A SUCCESSFUL live activation moves the profile and the running system. It
-  # has to, or ns-maint's own health evidence would (correctly) refuse every
-  # confirmation — the fake would be lying about what activation does.
+  # ns-maint selects the profile before invoking activation. A successful
+  # activation updates the running system for the confirmation health check.
   if [[ "$rc" -eq 0 && "$mode" != "boot" && "${FAKE_SWITCH_MOVES_PROFILE:-1}" -eq 1 ]]; then
-    ln -sfn "$closure" "${TMP}/profile/system-8-link"
-    ln -sfn "system-8-link" "${TMP}/profile/system"
     ln -sfn "$closure" "${TMP}/run/current-system"
     echo "profile-moved-to $closure" >>"${TMP}/log/calls"
   fi

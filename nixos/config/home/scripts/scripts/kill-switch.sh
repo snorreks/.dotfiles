@@ -196,6 +196,13 @@ MANAGEMENT_PATTERNS=(
   "systemd --user" "systemd --machine"
 )
 
+# Only workload-owning supervisors confer protection on descendants. Session
+# roots still match MANAGEMENT_PATTERNS directly, but do not exempt their jobs.
+SUPERVISOR_PATTERNS=(
+  "herdr" "collie" "moshi" "sys-daemon" "moshi-hook"
+  "aged" "ns-maint" "kill-switch"
+)
+
 # ── Shared runtimes: interpreters, not workloads ─────────────────────────────
 #
 # `node`, `bun` and `python` are how Collie, moshi-hook and half the dashboard
@@ -233,12 +240,14 @@ is_shared_runtime() {
 # `ps` per generation and is the only thing here that understands "this process
 # belongs to someone else's supervision".
 has_management_ancestor() {
-  local pid="$1" hops=0 p cur
+  local pid="$1" hops=0 p cur pat
   p="$pid"
   while ((hops < 24)); do
     cur="$(ps -o args= -p "$p" 2>/dev/null || true)"
     [[ -n "$cur" ]] || return 1
-    is_management "$cur" && return 0
+    for pat in "${SUPERVISOR_PATTERNS[@]}"; do
+      [[ "$cur" == *"$pat"* ]] && return 0
+    done
     p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]')"
     [[ "$p" =~ ^[0-9]+$ ]] || return 1
     ((p <= 1)) && return 1

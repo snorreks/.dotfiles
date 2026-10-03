@@ -16,7 +16,7 @@
 #
 #   1. management processes (herdr, Collie, moshi-hook, sys-daemon, sshd,
 #      tailscaled, ns-maint) are never targets;
-#   2. neither are their DESCENDANTS, found by walking the parent chain;
+#   2. workload supervisors also protect descendants via the parent chain;
 #   3. on a server, bare shared runtimes (node, bun, python, …) are not targets
 #      unless a specific workload pattern identifies them, or --include-runtimes
 #      is given.
@@ -332,5 +332,24 @@ assert_contains "$out" "SERVER MODE" "the mode is announced, so a blind sweep sa
 assert_contains "$out" "would terminate 1 process(es)" "and only the identified workload is a target"
 t_done
 fixture_free
+
+for mode in --light --full; do
+  t_start "session roots protect themselves but not workloads ($mode)"
+  setup
+  ps_add 100 1 "sshd: user@pts/0"
+  ps_add 101 1 "systemd --user"
+  ps_add 102 1 "tailscaled"
+  ps_add 200 100 "cargo build --release"
+  ps_add 201 101 "python -m pytest"
+  ps_add 202 102 "node node_modules/.bin/vite"
+  run_ks --server "$mode" --dry-run >"$TMP/log/ks.out" 2>&1
+  out="$(cat "$TMP/log/ks.out")"
+  assert_contains "$out" "cargo build" "an sshd child workload is targeted"
+  assert_contains "$out" "pytest" "a user systemd workload is targeted"
+  assert_contains "$out" "vite" "a tailscaled child workload is targeted"
+  assert_contains "$out" "would terminate 3 process(es)" "only the workloads are targeted"
+  t_done
+  fixture_free
+done
 
 suite_summary "kill-switch targeting"

@@ -199,13 +199,14 @@ in
           # REAL switch-to-configuration during a restore, which re-activates a
           # running machine for a test that is about the transaction's logic.
           maintenance.activationCommand = "${activationCommand}";
-          # Default outcome for the fake activation, before any test flips it.
-          environment.etc."vm-activation-outcome".text = "success\n";
           maintenance.deadlineTimeout = "20min";
 
           # A directory the fake activation appends to, so the test can see what
-          # activation and restore actually ran.
-          systemd.tmpfiles.rules = ["d /tmp 0755 root root -"];
+          # activation and restore actually ran, plus the default injected outcome.
+          systemd.tmpfiles.rules = [
+            "d /tmp 0755 root root -"
+            "f /run/vm-activation-outcome 0644 root root - success"
+          ];
 
           # A faster watchdog than the real 30s one, so the VM test does not
           # spend minutes waiting for a timer that is otherwise correct.
@@ -251,6 +252,7 @@ in
           "NM_GCROOTS=/nix/var/nix/gcroots "
           "NM_PROFILE=/nix/var/nix/profiles/system "
           "NM_HOST=${hostname} "
+          "NM_SWITCH_TO_CONFIGURATION=${activationCommand} "
       )
 
       def ns(*args, check=True):
@@ -299,7 +301,7 @@ in
       # The system profile is created by switch-to-configuration / nixos-rebuild,
       # not by the boot, so it legitimately does not exist on a freshly booted
       # test VM. ns-maint tolerates that: an absent profile is recorded as an
-      # absent profile, and restoring it is a no-op. The two /run symlinks below
+      # absent profile, and restoration removes any newly selected profile. The two /run symlinks below
       # ARE created at boot and ARE arm-time preconditions, so those are the
       # ones asserted here.
       profile = machine.execute(
@@ -362,14 +364,31 @@ in
       assert '"note":"restoring (deadline-expired)"' in status, status
       assert '"restore_result":"restored-live"' in status, status
 
-      # -- a REFUSED activation restores, even though the profile never moved --
+      # -- a REFUSED activation restores after partial application ------------
       # This is the case the old nswitch-safe declared safe: activation exits
       # nonzero, the profile is untouched, and the code concluded "no new
       # generation exists, nothing to revert".
       machine.succeed("echo partial > /run/vm-activation-outcome")
-      machine.succeed("${writeRecord} awaiting-confirm 600 refused-activation 999999")
-      ns("abort")
+      old_running = machine.succeed("readlink -f /run/current-system").strip()
+      machine.succeed(f"ln -sfn {old_running} /nix/var/nix/profiles/system")
+      machine.succeed("${writeRecord} prepared 600 refused-activation 999999")
+      # Transient system services inherit the manager environment, not the
+      # calling shell's environment. Supply the VM's activation substitute.
+      machine.succeed(
+          "systemctl set-environment NM_HOST=${hostname} "
+          "NM_SWITCH_TO_CONFIGURATION=${activationCommand}"
+      )
+      machine.succeed(": > /tmp/vm-activation-log")
+      ns("activate", "--timeout", "60", "--allow-unknown-kernel")
+      machine.wait_until_succeeds(
+          "grep -q '^phase=restored$' /var/lib/nixos/maintenance/record.env"
+      )
       status = ns("status", "--json")
+      log = machine.succeed("cat /tmp/vm-activation-log").splitlines()
+      assert log == ["switch ${candidateSystem}", f"switch {old_running}"], log
+      assert machine.succeed("readlink -f /run/current-system").strip() == old_running
+      assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == old_running
+      assert "activation-failed-rc-7" in status, status
       assert '"phase":"restored"' in status, status
       assert '"restore_result":"restored-live"' in status, status
       machine.succeed("echo success > /run/vm-activation-outcome")

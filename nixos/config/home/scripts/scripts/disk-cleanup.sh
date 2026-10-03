@@ -140,22 +140,27 @@ free_h() { df -Ph / 2>/dev/null | awk 'NR==2 {print $4}'; }
 #
 # This is the "service-aware" part. A cache directory that an agent, a build or
 # a service has mapped is not reclaimable no matter how old its contents are.
-# fuser is preferred (it is in psmisc and is what systemd-adjacent tooling
-# uses); lsof is the fallback. When neither is available we return 1 — the
-# conservative direction, which means we skip.
+# Prefer lsof's recursive directory check. With only fuser, inspect the
+# directory and every entry beneath it. No checker means in use: skip deletion.
 in_use() {
   local d=$1
-  [[ -d "$d" ]] || return 1
-  if have fuser; then
-    fuser -s "$d" >/dev/null 2>&1 && return 0
+  if have lsof; then
+    if [[ -d "$d" ]]; then
+      lsof +D "$d" >/dev/null 2>&1 && return 0
+    else
+      lsof -- "$d" >/dev/null 2>&1 && return 0
+    fi
     return 1
   fi
-  if have lsof; then
-    lsof +D "$d" >/dev/null 2>&1 && return 0
+  if have fuser; then
+    local entry
+    while IFS= read -r -d '' entry; do
+      fuser -s -- "$entry" >/dev/null 2>&1 && return 0
+    done < <(find "$d" -print0 2>/dev/null)
     return 1
   fi
   note "cannot check whether $d is in use (no fuser/lsof) — skipping it"
-  return 1
+  return 0
 }
 
 # clear_dir DIR — remove the *contents* of DIR, keeping DIR itself.
@@ -214,7 +219,7 @@ prune_tmp() {
       note "SKIPPED (contains a socket or fifo): $candidate"
       continue
     fi
-    if have fuser && fuser -s "$candidate" >/dev/null 2>&1; then
+    if in_use "$candidate"; then
       note "SKIPPED (open by a running process): $candidate"
       continue
     fi
