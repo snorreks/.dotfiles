@@ -56,7 +56,11 @@
   };
 
   # --- Shared NTFS Drive (Windows dual-boot) ---
-  fileSystems."/mnt/shared" = {
+  #
+  # OFF unless opts.mountShared is true (nixos/options.nix) — see the long note
+  # on the same mount in hosts/legion/hardware.nix, which applies here too.
+  # The partition is not repartitioned and ntfs3 stays available by hand.
+  fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/EA6CD3956CD35AC1";
     fsType = "ntfs3";
     options = [

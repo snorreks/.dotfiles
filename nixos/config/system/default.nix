@@ -17,6 +17,7 @@
       ./kernel.nix
       ./networking.nix
       ./power-management.nix
+      ./role.nix # reports the resolved server/travel policy (read-only options)
       ./security.nix
       ./mouse.nix
       ./server.nix

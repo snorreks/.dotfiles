@@ -202,8 +202,20 @@ fixture_free
 
 t_start "race: the deadline wins, and a confirmation cannot undo it"
 fixture_new
-prepare_and_activate 1
-sleep 2
+# A four-second window, not one.
+#
+# `activate` hands activation to a transient system unit and RETURNS, so for a
+# moment the record is `activating`. Both this test and the next one need the
+# record to be `awaiting-confirm` when they start racing, and with a one-second
+# window a loaded machine closes the window DURING activation: the tool then
+# legitimately restores from the activation path instead, the tick has nothing
+# left to do, and the assertion below fails for a reason that is about timing
+# rather than about the code. Four seconds makes the setup deterministic; the
+# test still takes as long as it takes.
+prepare_and_activate 4
+wait_for_pending
+assert_eq "awaiting-confirm" "$(phase)" "activation finished inside its own window"
+sleep 5
 as_ssh_session
 now="$(date +%s)"
 sshd_accepts "$now" 51234
@@ -222,8 +234,13 @@ fixture_free
 
 t_start "race: the deadline has passed but the watchdog has not fired yet"
 fixture_new
-prepare_and_activate 1
-sleep 2
+# Same setup as the test above, and for the same reason: the window has to
+# outlive the activation so that "the deadline passed" and "the watchdog has not
+# run yet" are two separate, observable states.
+prepare_and_activate 4
+wait_for_pending
+assert_eq "awaiting-confirm" "$(phase)" "activation finished inside its own window"
+sleep 5
 as_ssh_session
 now="$(date +%s)"
 sshd_accepts "$now" 51234
@@ -622,7 +639,14 @@ assert_eq restored "$(phase)" "a hung activation restores without waiting for th
 assert_contains "$(rec_field note)" "deadline-expired" "the deadline is recorded as the restore reason"
 assert_contains "$(switch_calls)" "switch $FAKE_RUNNING" "the recovery closure is activated"
 assert_eq system-7-link "$(readlink "$NM_PROFILE")" "the old generation is restored"
-[[ $(( $(date +%s) - start )) -lt 15 ]] && _ok "activation is bounded" || _fail "activation exceeded its bound"
+# Written as if/then rather than `cond && ok || fail`: the short form runs the
+# FAILURE branch whenever the success branch returns non-zero, which is a trap
+# waiting for an _ok that ever grows an exit status of its own.
+if [[ $(( $(date +%s) - start )) -lt 15 ]]; then
+  _ok "activation is bounded"
+else
+  _fail "activation exceeded its bound"
+fi
 assert_no_reboot
 t_done
 fixture_free
@@ -647,7 +671,11 @@ export FAKE_SWITCH_CANDIDATE_EXIT
 prepare_and_activate 300
 assert_eq restored "$(phase)" "failed activation restores"
 assert_no_file "$NM_PROFILE" "the candidate profile is removed"
-[[ ! -L "$NM_PROFILE" ]] && _ok "no dangling profile remains" || _fail "a profile link remains"
+if [[ ! -L "$NM_PROFILE" ]]; then
+  _ok "no dangling profile remains"
+else
+  _fail "a profile link remains"
+fi
 t_done
 fixture_free
 

@@ -81,6 +81,11 @@
       NM_FLAKE = opts.flakeDir;
       NM_DEFAULT_TIMEOUT = cfg.deadlineTimeout;
       NM_SSH_UNIT = cfg.confirmSSHUnit;
+      # The ESP preflight in `ns-maint stage` (see esp_preflight in ns-maint.sh).
+      # Exported with the rest so the operator's own invocation and the units
+      # agree on which partition is being measured and what floor applies.
+      NM_ESP_PATH = cfg.espPath;
+      NM_ESP_MIN_MIB = toString cfg.espMinMib;
     }
     // lib.optionalAttrs (cfg.activationCommand != null) {
       # The seam through which every activation and every restore actually runs.
@@ -125,6 +130,46 @@ in {
         The systemd unit whose journal is asked whether a NEW session was
         accepted after the switch was armed. Renamed only if a host moves sshd
         out of its socket-activated unit.
+
+        One unit covers BOTH OpenSSH listeners on these hosts, and that is not
+        an assumption: `services.openssh.ports = [ 22 2222 ]` runs both
+        listeners from the same sshd.service, and journald records their
+        sessions under it (`sshd-session[NNN]: Accepted publickey for … from …
+        port …`) — checked on the Legion with both ports listening at once. A
+        confirmation made over the phone's 2222 session is therefore evidence in
+        exactly the same way one made over 22 is.
+
+        What this does NOT cover is Tailscale SSH, which answers on tailnet port
+        22 before the OS sshd ever sees the connection and is recorded by
+        tailscaled instead. Confirm from an OpenSSH session (22 or 2222). The
+        refusal message says so when the peer is a tailnet address, because
+        "no evidence found" from Tailscale SSH otherwise reads like a failed
+        update.
+      '';
+    };
+
+    espPath = lib.mkOption {
+      type = lib.types.str;
+      default = "/boot";
+      description = ''
+        Where the EFI system partition is mounted, used by `ns-maint stage` to
+        check there is room for a kernel, an initrd and a boot entry BEFORE it
+        writes one. Writing there is not atomic: an ESP that fills up part-way
+        leaves an entry behind that is not obviously the good one.
+      '';
+    };
+
+    espMinMib = lib.mkOption {
+      type = lib.types.int;
+      default = 150;
+      description = ''
+        Free space `ns-maint stage` requires on the ESP. Roughly one NixOS entry
+        with its kernel and initrd, plus room for one more replacement after
+        this one.
+
+        This floor exists because the real partition was measured at 36 MiB free
+        of 511 MiB (shared with Windows) while the bootloader was configured to
+        keep eight generations. See config/system/boot.nix.
       '';
     };
   };

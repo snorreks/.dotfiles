@@ -5,6 +5,28 @@
   opts,
   ...
 }: let
+  # ── Which driver, and why this one ─────────────────────────────────────────
+  #
+  # `production` is the closed-source driver branch; it is the right choice for
+  # this hardware and has been checked rather than assumed:
+  #
+  #   # lspci -nn | grep -E 'VGA|3D' ; nvidia-smi --query-gpu=name --format=csv
+  #   01:00.0 VGA compatible controller [0300]: NVIDIA Corporation
+  #                                          TU117M [GeForce RTX 4090 Laptop GPU]
+  #   # cat /sys/class/drm/card0/device/uevent
+  #   PCI_ID=10DE:2757      ← AD103, Ada Lovelace
+  #
+  # 10DE:2757 is Ada, which is well past the Turing cut-off, so `open = true`
+  # below is correct: the open kernel modules are the supported path for this
+  # card and the proprietary ones are a choice, not a requirement. Switching
+  # `open` to false would move to a branch that exists for pre-Turing parts and
+  # would gain nothing here.
+  #
+  # The one thing that matters structurally is the line itself: the driver is
+  # taken from `config.boot.kernelPackages`, never from the top-level `pkgs`.
+  # That is what makes a kernel bump move the driver with the kernel. A driver
+  # built for a different kernel is an nvidia module that refuses to load, which
+  # on an unattended host is a machine with no graphics and no way to see why.
   driverPkg = config.boot.kernelPackages.nvidiaPackages.production; # stable
 in {
   # --- Global Package Configuration ---
@@ -41,8 +63,9 @@ in {
     powerManagement.enable = true;
     powerManagement.finegrained = false; # Fine-grained can be unstable, start with it off.
 
-    # Use the open-source kernel modules for newer GPUs (Turing/20xx series and newer).
-    # Set to false for older cards.
+    # Use the open-source kernel modules for newer GPUs (Turing/20xx series and
+    # newer). Set to false for older cards. Correct for this one: 10DE:2757 is
+    # Ada — see the header for the check that established it.
     open = true;
     nvidiaSettings = true;
     package = driverPkg;

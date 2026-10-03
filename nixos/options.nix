@@ -87,16 +87,108 @@ rec {
   # Use nswitch-fast (or build sonny-laptop-fast) to skip it for quick rebuilds.
   enableOllama = true;
 
-  # ── Headless / server mode ──
-  # Turns a host into an always-on box that is only ever reached remotely: no
-  # desktop autologin, sleep disabled outright, Wi-Fi MAC pinned, LAN service
-  # ports closed (the tailnet reaches them instead) and SSH restricted to the
-  # keys below.
+  # ── Role: what KIND of machine is this? ────────────────────────────────────
+  # "desktop" or "server", set per host in hosts/<host>/options.nix, or null to
+  # inherit `headless` (below). See lib/host-policy.nix for the resolution and
+  # for which combinations are refused outright.
   #
-  # Nothing is *uninstalled* — walk up to the machine, log in at tuigreet and
-  # you get the normal mango desktop. The point is only that nothing starts one
-  # unattended. See docs/headless-server.md.
+  #   desktop  a machine somebody sits at. Suspends when the lid shuts, lid
+  #            and idle behave like a laptop, LAN service ports open, no exit
+  #            node, no user lingering. The travel laptop (gs65) is this.
+  #
+  #   server   a machine that stays behind and is only reached remotely.
+  #            Suspend removed as a possibility rather than left unscheduled,
+  #            lid/power/hibernate keys ignored, system user LINGERING on so the
+  #            user manager exists with nobody logged in, LAN service ports
+  #            closed in favour of the tailnet, exit node advertised, and the
+  #            host-wide Proton VPN kill-switch structurally absent — that
+  #            kill-switch REJECTs all output that is not marked for wg0, which
+  #            includes the tailnet, so on an unattended host it is not a
+  #            setting to be careful with, it is a way to lock yourself out.
+  #
+  # A server is still a usable desktop: walk up to it, log in at tuigreet, and
+  # you get mango. Nothing is uninstalled; the point is only that nothing
+  # starts one unattended.
+  role = null;
+
+  # ── Headless / server mode (compatibility boolean) ─────────────────────────
+  # The EFFECTIVE answer to "is this host reached only remotely?", and the
+  # boolean every module reads. `headless` is kept as an input, not the switch:
+  #
+  #   role = null   -> headless decides, exactly as before
+  #   role = "server" -> headless becomes true, whatever it said
+  #   role = "desktop" + headless = true -> REFUSED at evaluation
+  #
+  # So a host promoted to a server edits one line, and code written against
+  # `opts.headless` (including the agent-operations work in this repository)
+  # keeps working unchanged. What it turns on: no desktop autologin, sleep
+  # disabled outright, Wi-Fi MAC pinned, LAN service ports closed (the tailnet
+  # reaches them instead) and SSH restricted to the keys below. See
+  # docs/headless-server.md.
   headless = false;
+
+  # ── Boot health blessing (opt-in) ───────────────────────────────────────────
+  # Boot counting with a LOCAL pass/fail gate. See config/system/boot.nix for
+  # what "local" excludes (everything that needs the internet) and why this is
+  # off until it has been tried.
+  bootHealth = {
+    # OFF by default, deliberately. It needs a reboot to observe working, and
+    # a reboot on the server is a scheduled, attended event — see
+    # docs/headless-server.md § "Testing the boot blessing".
+    enable = false;
+
+    # Boot attempts a freshly staged entry is given before systemd-boot treats
+    # it as bad and falls back to the previous entry. nixpkgs' own default.
+    tries = 3;
+
+    # Units that must be healthy before this boot is blessed. Deliberately a
+    # short, explicit list rather than `systemctl --failed`: a failed unit
+    # because the hotel wifi is down is exactly what must NOT cost you the
+    # good entry you are currently running on.
+    criticalUnits = [
+      "local-fs.target"
+      "systemd-modules-load.service"
+    ];
+  };
+
+  # ── Per-host ACPI / graphics quirks ─────────────────────────────────────────
+  # These were one shared kernelParameters list for both machines, which is a
+  # list — so a value either applies to every host or to none, and "off on the
+  # travel laptop, on for the server" was not expressible. Per host now.
+  #
+  # Values are NOT changed from what both hosts ran before; only their scope is.
+  # See config/system/kernel.nix for the evidence behind the GuC comment and
+  # for why acpi_call is off by default.
+  acpi = {
+    # Load the acpi_call module (needed by some vendor fan/battery tools).
+    # It was loaded on both hosts unconditionally; nothing in this
+    # configuration calls it, so it is opt-in per host.
+    acpiCall = false;
+
+    # acpi_osi=... kernel parameter, or null to omit it. It tells the firmware
+    # to expose Linux-specific ACPI interfaces.
+    acpiOsi = "Linux";
+
+    # i915.enable_guc=... kernel parameter, or null to omit it.
+    #
+    # DEFAULT null here: on the current kernel this parameter TAINTS the kernel
+    # (see the evidence in config/system/kernel.nix) while achieving nothing.
+    # Set it to 2 to restore the old behaviour on a kernel where it is wanted.
+    i915Guc = null;
+  };
+
+  # ── Shared NTFS volume ─────────────────────────────────────────────────────
+  # /mnt/shared is the Windows dual-boot volume. Mounting it is OFF by default
+  # on both hosts, for the same reason the Proton VPN is excluded on a server:
+  # it is a dependency that can fail in ways nothing else can fix.
+  #
+  # NTFS3 with `rw` on a volume Windows has hibernated (Fast Startup) is a way
+  # to corrupt it, and the fix — disabling hibernation from Windows, or
+  # remounting read-only — is something you need a keyboard and a booted
+  # Windows for. An unattended box that cannot reach it must not be writing
+  # there. Nothing server-critical reads or writes this path: all state and
+  # media roots are native Linux filesystems. See docs/headless-server.md.
+  mountShared = false;
 
   # ── Battery charge threshold ──
   # Percentage to stop charging at, or null to leave the firmware alone.
@@ -137,6 +229,22 @@ rec {
     hostName = "legion";
     # Root's private key: nix runs distributed builds as the daemon user.
     sshKey = "/root/.ssh/id_nixbuilder";
+
+    # 🔴 THE BUILDER CLIENT'S PUBLIC KEY GOES HERE on the BUILDER host (or in
+    # local.nix, scoped to it). Without it, the only authorized key is the
+    # operator's GitHub key below — which means "remote build" and "log in as
+    # sonny" are the same credential, so revoking the phone or the builder
+    # means rotating the key you also use for Git.
+    #
+    # Generate ON THE CLIENT, never here:
+    #   ssh-keygen -t ed25519 -f ~/.ssh/nixbuilder -C nixbuilder
+    #   cat ~/.ssh/nixbuilder.pub
+    #
+    # Null rather than empty: an empty list would be indistinguishable from a
+    # configured key set, and config/system/server.nix turns null into a build
+    # warning naming the key to paste.
+    authorizedKey = null;
+
     maxJobs = 8;
     speedFactor = 4;
   };

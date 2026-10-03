@@ -127,6 +127,14 @@
     system = "x86_64-linux";
     baseOpts = import ./options.nix;
 
+    # The server/travel ROLE policy: which role a host is in, which settings
+    # contradict which role, how a private override file is scoped to one
+    # host, and the DNS owner + its rescue list. Pure and builtins-only so
+    # that lib/host-policy.nix can be asserted directly by
+    # nixos/tests/server-foundation/role-policy.sh without evaluating a host —
+    # see that file's header for why that constraint is the point.
+    hostPolicy = import ./lib/host-policy.nix;
+
     # The maintenance transaction package, built once and reused by both the
     # host configurations and the tests, so the thing the VM test boots is the
     # same derivation the Legion installs.
@@ -138,10 +146,17 @@
     # they're for one-off personal tweaks (e.g. "externals unplugged today")
     # rather than checked-in host differences. Copy local.nix.example to
     # local.nix to use it.
+    #
+    # Scoped BY HOST, not applied to everything: see hostPolicy.selectHostOverrides
+    # for the accepted shapes and docs/headless-server.md § "Private overrides
+    # and the build source" for the part that is easy to get wrong — a
+    # gitignored file is invisible to a `flake:` reference unless the tree is
+    # read by path, so an override that "works" locally can silently not exist
+    # in the copy nix actually evaluates.
     localOverrides =
       if builtins.pathExists ./local.nix
       then import ./local.nix
-      else {};
+      else null;
 
     # Per-host overrides: hostname, GPU bus IDs, monitor defaults, etc.
     # The host's own hardware + any host-only extra modules live in
@@ -150,6 +165,84 @@
       legion.optsOverrides = import ./hosts/legion/options.nix;
       gs65.optsOverrides = import ./hosts/gs65/options.nix;
     };
+
+    # The ONE place a host's options are resolved.
+    #
+    # Order matters and is not negotiable:
+    #
+    #   base             nixos/options.nix — every default, and the only place
+    #                    the headless COMPATIBILITY boolean is defined
+    #   host overrides   hosts/<key>/options.nix — checked in, per host
+    #   private          local.nix, scoped to this host only (gitignored)
+    #   role resolution  the server/travel role, folded back into `headless` so
+    #                    every module still reads ONE boolean
+    #
+    # Everything else — the output's display name, the -fast variant — reads
+    # the answer from here rather than re-merging the inputs a second time.
+    resolveHostOpts =
+      {
+        hostKey,
+        hostCfg,
+        # null = follow whatever the host (or its private override) declared,
+        # which is the default variant. Explicitly false = the `-fast` variant,
+        # which skips the CUDA build.
+        enableOllama ? null
+      }:
+      let
+        selected = hostPolicy.selectHostOverrides {
+          local = localOverrides;
+          inherit hostKey;
+        };
+        # recursiveUpdate, not `//`: a host (or local.nix) overriding a single
+        # key of a nested attrset — say `mouse.thumbWheelInvert` — must not
+        # drop the rest of that attrset. Lists still replace wholesale, so
+        # `monitorrule` keeps its all-or-nothing semantics.
+        merged = nixpkgs.lib.recursiveUpdate (nixpkgs.lib.recursiveUpdate baseOpts hostCfg.optsOverrides) selected.overrides;
+        withOllama = merged // {
+          enableOllama = if enableOllama == null then merged.enableOllama else enableOllama;
+        };
+
+        diagnostics = hostPolicy.policyDiagnostics {
+          role = withOllama.role or null;
+          headless = withOllama.headless;
+          batteryChargeLimit = withOllama.batteryChargeLimit;
+          mobileAgents = withOllama.mobileAgents;
+        };
+
+        # Refuse a contradictory configuration AT EVALUATION. Not an
+        # `assertions` entry: those fire at build time, one at a time, and a
+        # role that contradicts the boolean is a mistake in the inputs rather
+        # than a build failure. Failing here means every command that touches
+        # this host explains it, and nothing half-builds first.
+        #
+        # Every problem is reported at once, because fixing them one rebuild at
+        # a time on a machine you may only reach remotely is a bad use of a day.
+        opts =
+          if diagnostics.problems != [] then
+            throw ''
+              hostPolicy: ${hostKey} declares a contradictory configuration:
+
+              ${builtins.concatStringsSep "\n" diagnostics.problems}
+            ''
+          else
+            # Fold the RESOLVED role back into the effective boolean. This is
+            # the compatibility contract other work depends on: `opts.headless`
+            # is still a boolean and still means "this host is reached only
+            # remotely", it is just now derived from the role when a role is
+            # set — so a host promoted to a server by editing one line gets
+            # every headless behaviour instead of having to remember a second.
+            withOllama // {
+              role = diagnostics.role;
+              headless = diagnostics.effectiveHeadless;
+            };
+      in
+      {
+        inherit opts;
+        shape = selected.shape;
+        warnings =
+          (if selected.warning != null then [selected.warning] else [])
+          ++ diagnostics.warnings;
+      };
 
     mkPkgs = nixpkgsInput:
       import nixpkgsInput {
@@ -166,17 +259,28 @@
       };
 
     mkHost = hostKey: hostCfg: enableOllama: let
-      # recursiveUpdate, not `//`: a host (or local.nix) overriding a single
-      # key of a nested attrset — say `mouse.thumbWheelInvert` — must not drop
-      # the rest of that attrset. Lists still replace wholesale, so
-      # `monitorrule` keeps its all-or-nothing semantics.
-      opts =
-        nixpkgs.lib.recursiveUpdate
-        (nixpkgs.lib.recursiveUpdate
-          (nixpkgs.lib.recursiveUpdate baseOpts hostCfg.optsOverrides)
-          localOverrides)
-        {inherit enableOllama;};
+      resolved = resolveHostOpts {
+        inherit hostKey hostCfg enableOllama;
+      };
+      opts = resolved.opts;
+
+      # One line per observation, printed once per evaluation, and only when
+      # there is something to say. A warning nobody can act on trains people to
+      # ignore warnings; these all name the file to edit and the value to put
+      # in it.
+      #
+      # `builtins.trace`, not the `warnings` option: that option is a listOf and
+      # config/system/mobile-agents.nix already assigns it, so a second
+      # assignment here would be an eval conflict rather than an append. The
+      # two belong to different halves of the policy — module-level warnings
+      # come from the mobile layer, these from role resolution.
+      policyWarnings =
+        if resolved.warnings == [] then
+          []
+        else
+          ["private override shape is ${resolved.shape}."] ++ resolved.warnings;
     in
+      builtins.trace (builtins.concatStringsSep "" (map (w: "hostPolicy (${hostKey}): ${w}\n") policyWarnings))
       nixpkgs.lib.nixosSystem {
         inherit system;
         specialArgs = {inherit inputs system opts;};
@@ -227,7 +331,15 @@
     nixosConfigurations = nixpkgs.lib.foldl' (
       acc: hostKey: let
         hostCfg = hosts.${hostKey};
-        mergedOpts = baseOpts // hostCfg.optsOverrides // localOverrides;
+        # The SAME resolution mkHost uses. It used to be a second, different
+        # merge (`//`, and it merged the flat local.nix on top of everything),
+        # so the name of the output and the options the output was built from
+        # could disagree — and a role, a host-scoped private override or a
+        # warning is exactly the sort of thing a second merge drops.
+        mergedOpts = (resolveHostOpts {
+          inherit hostKey hostCfg;
+          enableOllama = hostCfg.optsOverrides.enableOllama or baseOpts.enableOllama;
+        }).opts;
         hostname = mergedOpts.hostname;
       in
         acc
@@ -256,6 +368,13 @@
             nixpkgs.legacyPackages.${system}.findutils
             nixpkgs.legacyPackages.${system}.git
             nixpkgs.legacyPackages.${system}.gnugrep
+            nixpkgs.legacyPackages.${system}.jq
+            # `nix` for tests/server-foundation/role-policy.sh, which evaluates
+            # nixos/lib/host-policy.nix directly with `nix eval --file`. That is
+            # a plain local evaluation — no flake, no store, no network — which
+            # is exactly why the policy was written as a builtins-only module,
+            # and why this suite can run in here at all.
+            nixpkgs.legacyPackages.${system}.nix
             nixpkgs.legacyPackages.${system}.shellcheck
             nixpkgs.legacyPackages.${system}.util-linux
             nixpkgs.legacyPackages.${system}.which
@@ -275,6 +394,21 @@
           export HOME="$TMPDIR/home"
           mkdir -p "$HOME"
 
+          # NM_REQUIRE_ALL=0 says a skip is acceptable here, and
+          # NM_SKIP_HOST_EVAL=1 says WHICH one and why, rather than silently
+          # omitting it: host-eval.sh evaluates four real flake configurations,
+          # and an evaluation inside a build sandbox cannot reach the flake's
+          # inputs. Nesting that is not something to depend on.
+          #
+          # It is not forgotten. `bash nixos/tests/run.sh` outside a sandbox runs
+          # it and FAILS if it does not pass, because there NM_REQUIRE_ALL
+          # defaults to 1. So the host evaluation is run directly:
+          #
+          #   bash nixos/tests/server-foundation/host-eval.sh
+          #
+          # and nixos/tests/README.md says the same.
+          export NM_REQUIRE_ALL=0
+          export NM_SKIP_HOST_EVAL=1
           bash "$src/tests/run.sh"
 
           touch "$out"

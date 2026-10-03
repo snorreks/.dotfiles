@@ -8,6 +8,32 @@
   # Set root password via sops-nix
   users.users.root.hashedPasswordFile = config.sops.secrets.password.path;
 
+  # ── sudo: what the privileged wrapper is allowed to see ────────────────────
+  #
+  # `ns-maint confirm` must run as root, so from an SSH session the operator
+  # runs `sudo ns-maint confirm <txid>` — and sudo's env_reset (on by default)
+  # strips SSH_CONNECTION on the way.
+  #
+  # That variable is how ns-maint identifies WHO is confirming: it reads the
+  # peer's address and port from it and then asks sshd's own journal whether a
+  # session from exactly that peer was accepted AFTER the switch was armed. No
+  # SSH_CONNECTION means no peer, and the tool refuses rather than guessing.
+  #
+  # The failure mode is nasty precisely because it is safe: you finish a
+  # maintenance transaction, you confirm it, and you get "SSH_CONNECTION is
+  # unset, so this is not an SSH session" — from a session that obviously is
+  # one. The only ways out are `--assume-new-connection`, which is the flag for
+  # "I checked some other way" and therefore the wrong answer for someone who
+  # HAS checked, or weakening the check itself. Neither is acceptable.
+  #
+  # So these three are kept across sudo. They are facts about the session the
+  # operator is already in, they are set by sshd before sudo runs, and they
+  # grant no capability by themselves: keeping them means the verification can
+  # actually happen instead of being bypassed.
+  security.sudo.extraConfig = ''
+    Defaults env_keep += "SSH_CONNECTION SSH_CLIENT SSH_TTY"
+  '';
+
   security.sudo.extraRules = [
     {
       users = [opts.username]; # Make sure opts.username is correctly defined/passed

@@ -356,6 +356,22 @@ node's entire HTTPS 443 listener. Do not share that listener with unrelated
 handlers. Restart the mapping with
 `sudo systemctl restart tailscale-serve-collie`.
 
+**The mapping is now also self-healing**, by `tailscale-reconcile.service` — a
+persistent timer that converges the node's preferences and *this one mapping*
+every five minutes. It repairs 443 only when it is missing or points at the wrong
+loopback port; when the mapping is already correct it writes nothing, so a media
+listener added on another port later is never disturbed. And it never runs
+`serve reset` (that erases every mapping on the node), never enables Funnel, and
+never runs `tailscale up` (that is the login flow, and an unattended one can hang
+on an interactive prompt forever). If the DNS name ever stops matching
+`serveHosts`, the reconciler fails with both names instead of leaving you with a
+phone that loads a blank page:
+
+```console
+systemctl status tailscale-reconcile
+journalctl -u tailscale-reconcile -n 50
+```
+
 ### Tailnet access policy
 
 The tailnet is the trust boundary, and the ACL is a separate layer from
@@ -392,6 +408,73 @@ During setup, check the effective policy for the phone's identity and this
 node's TCP 443, then open the Serve URL from the phone. Check TCP 2222 and the
 UDP range too if provisioning the fallback. These rules are managed in the
 tailnet admin console, outside this repository.
+
+### Tagged clients have no user identity — and Collie needs one
+
+`COLLIE_TRUSTED_USER` is compared against the `Tailscale-User-Login` header,
+and that header is only ever sent for a request made by something with a **user**
+identity. A node carrying a tag — `tag:source`, which is what you apply to a
+build server, a CI node or anything else that is not a person — authenticates as
+`tag:source`, not as an address, and its requests arrive with no
+`Tailscale-User-Login` header at all.
+
+That is not a bug to work around. Collie fails **closed** on a request with no
+identity header: it is rejected rather than trusted because of where it came
+from, so a tagged client cannot drive your agents' panes even if it is on the
+tailnet. The same applies to the Tailscale SSH side, where grants are matched
+against identities and a tag has to be granted explicitly.
+
+So: the phone, and the laptop you drive agents from, stay **user-owned**. Do not
+tag them. A `tag:source` node is the right identity for a machine with no human
+attached to it — which is precisely why it must not be able to drive your
+terminals. If you add a builder node, grant it what it needs (nix over SSH, port
+2222, no 443) and grant it nothing else.
+
+### Node key expiry is an external step, and it is a lockout
+
+Node keys expire. By default a node gets 180 days, after which it re-authenticates
+by opening an admin-console URL — which needs a browser and a human. For a machine
+in a basement with no local login, that is an outage you cannot fix from a phone.
+
+Disable it per node, and note the date you did:
+
+```console
+tailscale admin console → Machines → legion → Edit key expiry → Disable
+```
+
+Do the same for the travel laptop, because an expired key on the machine you are
+*leaving from* strands the machine you are leaving it *at*.
+
+### SSH 22 and 2222, and which one carries which identity
+
+Both OpenSSH listeners are ordinary sshd on this host (`sshd -T | grep -i ^port`
+must show **both** 22 and 2222), and both record their sessions in the same
+`sshd.service` journal unit. Only 2222 is hardened — key-only, no password, no
+agent forwarding, forwarding allowed — via a `Match LocalPort` block so the port
+that rescues the box keeps its working settings. Neither port is opened on the
+LAN: `services.openssh.openFirewall = false`, and 22 only is in
+`networking.firewall.allowedTCPPorts`. Reachable means tailnet, not "whatever
+network the machine is sitting on".
+
+Tailscale SSH answers on tailnet port 22 *before* sshd does, authenticating with
+a Tailscale identity instead of a key file. That is a third path in, and it is
+why port 2222 exists at all — see §8. Both paths need tailnet policy grants; the
+host firewall permitting a port is not the same as the ACL allowing it.
+
+### Separate keys, so one revocation is not three outages
+
+| Key                        | Where it lives            | What it authorizes                          |
+| -------------------------- | ------------------------- | ------------------------------------------- |
+| operator (also GitHub)     | `opts.sshAuthorizedKeys`  | Log in as `${username}` on both hosts        |
+| phone                      | `mobileAgents.phoneAuthorizedKey` | Log in on 2222, mosh, Collie pairing  |
+| remote builder (travel laptop) | `remoteBuilder.authorizedKey` | Distributed builds as the nix daemon     |
+
+Each public half is pasted into the server's options and the private half stays
+on the client that generated it; no private key is ever created in this
+repository. `remoteBuilder.authorizedKey` is `null` until you do the exchange,
+and while it is null the remote build authenticates **as the operator** — which
+works, and means "build remotely" and "log in as me" are the same credential.
+The build warns until you give it its own key.
 
 Where a tailnet is shared with other people, `COLLIE_TRUSTED_USER` is the thing
 that makes this safe, and it is not optional.

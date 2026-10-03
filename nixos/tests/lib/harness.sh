@@ -157,7 +157,7 @@ fixture_new() {
   TMP="$(mktemp -d "${TMPDIR:-/tmp}/ns-maint-test.XXXXXX")"
   export TMP
   mkdir -p "$TMP/bin" "$TMP/nixstore" "$TMP/run" "$TMP/profile" "$TMP/state" \
-    "$TMP/gcroots" "$TMP/log" "$TMP/flake"
+    "$TMP/gcroots" "$TMP/log" "$TMP/flake" "$TMP/esp"
   # /nix/store is read-only for an unprivileged user (and inside a nix build
   # sandbox it does not exist at all), so the fake closures live in a disposable
   # prefix. ns-maint's own store-path validation still applies in full — the 32
@@ -212,6 +212,20 @@ fixture_new() {
   export NM_SWITCH_TO_CONFIGURATION="$TMP/bin/switch-to-configuration"
   export NM_REBOOT_CMD="$TMP/bin/reboot-cmd"
   export NM_SSH_UNIT="sshd.service"
+
+  # The EFI-space preflight `ns-maint stage` runs before it writes a bootloader
+  # entry. Pointed at a disposable directory with a FAKE `df`, because:
+  #
+  #   * a test that measured the machine's real /boot would fail or pass
+  #     depending on how full the developer's ESP is — which, on this machine,
+  #     is a real problem (see config/system/boot.nix), not a test fixture;
+  #   * `df` needs no privilege to statvfs, so there is no security reason for
+  #     the real one to be involved at all.
+  #
+  # FAKE_ESP_FREE_MIB is what a test sets to make the ESP look full or empty.
+  export NM_ESP_PATH="$TMP/esp"
+  export NM_DF="$TMP/bin/df"
+  export NM_ESP_MIN_MIB=150
 
   # Defaults the fakes read. A test overrides one of these to inject a failure.
   #
@@ -480,6 +494,22 @@ done <"${FAKE_SSHD_LOG:-}"
 exit 0
 FAKE
 
+  cat >"$b/df" <<'FAKE'
+#!/usr/bin/env bash
+# Fake `df`. Answers only the question ns-maint's ESP preflight asks: how many
+# MiB are free on the ESP. FAKE_ESP_FREE_MIB sets it; the default is a
+# comfortable partition, so a test that is not about space does not have to care.
+echo "df $*" >>"${TMP}/log/calls"
+if [[ "${1:-}" == "-P" ]]; then
+  printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+  # Column order must match `df -P -k` exactly: fs, blocks, used, AVAILABLE,
+  # capacity, mount. ns-maint reads the fourth field, so a stray extra column
+  # here silently turns the preflight into "0 MiB free" and every staging test
+  # fails for a reason that has nothing to do with the code under test.
+  printf '%s %s %s %s 40%%%% %s\n' "${TMP}/esp" "$((1024 * 1024))" "$((1024 * 1024 - ${FAKE_ESP_FREE_MIB:-4096} * 1024))" "$(( ${FAKE_ESP_FREE_MIB:-4096} * 1024 ))" "${TMP}/esp"
+fi
+FAKE
+
   cat >"$b/switch-to-configuration" <<'FAKE'
 #!/usr/bin/env bash
 # Fake activation. This is the injection point for every activation outcome the
@@ -547,6 +577,21 @@ sshd_accepts() {
 # rather than trusting anything the operator typed.
 as_ssh_session() {
   export SSH_CONNECTION="${1:-100.64.1.2 51234 100.64.1.9 22}"
+}
+
+# wait_for_pending — block until the DETACHED activation has finished.
+#
+# `ns_maint activate` returns as soon as it has armed the deadline and handed the
+# work to a transient system unit, so for a moment the record is `activating`.
+# Any test that then races the deadline — as the watchdog and a confirmation do
+# — needs the record to have settled first, or it is testing the timing of the
+# fixture instead of the tool. Bounded, so a broken activation fails the test
+# rather than hanging it.
+wait_for_pending() {
+  local until=$(( $(date +%s) + ${1:-30} ))
+  while [[ "$(phase)" == "armed" || "$(phase)" == "activating" ]] && [[ "$(date +%s)" -lt "$until" ]]; do
+    sleep 0.2
+  done
 }
 
 # prepare_and_activate — the common path up to "awaiting confirmation".
