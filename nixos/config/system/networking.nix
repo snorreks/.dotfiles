@@ -5,7 +5,19 @@
   pkgs,
   lib,
   ...
-}: {
+}: let
+  # The DNS owner and its rescue list are decided in ONE place, together, so
+  # the list and the cap on how much of it is used cannot drift apart:
+  # nixos/lib/host-policy.nix (dnsPolicy). Read its header for why the cap
+  # matters — it is not a style preference, it is the difference between a
+  # rescue path existing and being silently discarded.
+  #
+  # Imported rather than passed through specialArgs: it is a pure function of
+  # two booleans, and a second import path for it would only create a second
+  # thing that could be edited without the test noticing.
+  dnsPolicy = (import ../../lib/host-policy.nix).dnsPolicy;
+  dns = dnsPolicy {headless = opts.headless;};
+in {
   # System packages needed for wg-quick DNS management
   environment.systemPackages = with pkgs; [
     openresolv
@@ -27,14 +39,35 @@
     python3
   ];
 
-  # Passwordless sudo for VPN actions triggered from Waybar (no TTY).
-  # Required so toggle_vpn.sh and vpn-connect.sh can start/stop the
-  # WireGuard service and copy configs without hanging on a password prompt.
-  # Uses /run/current-system/sw/bin/ paths which are stable across rebuilds
-  # (unlike Nix store paths which change). Scripts must use these same paths.
-  # In networking.nix
-  security.sudo.extraRules = [
-    {
+  # ── Passwordless sudo for VPN actions (desktop hosts only) ──────────────────
+  #
+  # Required so toggle_vpn.sh and vpn-connect.sh can start/stop the WireGuard
+  # service and copy configs without hanging on a password prompt. Uses
+  # /run/current-system/sw/bin/ paths, which are stable across rebuilds (unlike
+  # Nix store paths, which change). Scripts must use these same paths.
+  #
+  # 🔴 STRUCTURALLY ABSENT ON A SERVER, and that is the whole point. These four
+  # rules are a remote-code-shaped privilege: any process running as
+  # ${opts.username} can write an arbitrary WireGuard config to
+  # /etc/nixos/proton-wg.conf and then start the interface that reads it. On a
+  # machine whose only ingress is the tailnet, "the process you reached over
+  # SSH" is exactly the thing an attacker would be, and handing it NOPASSWD on
+  # the tunnel that also carries the tailnet is a privilege boundary made of
+  # paper.
+  #
+  # On a server role the mutating toggles are therefore not merely discouraged
+  # — there is nothing to call. config/home/scripts/scripts/kill-switch.sh and
+  # the Waybar VPN control call these commands through sudo; with no rule they
+  # fail with "sudo: a password is required", which is a visible, correct
+  # outcome. The Proton kill-switch below is gone for the same reason and with a
+  # sharper edge: its postUp REJECTs every packet not marked for wg0, the
+  # tailnet included, so on an unattended host starting it is a lockout with a
+  # five-second fuse.
+  #
+  # If a server role ever does need the tunnel, the answer is a per-host opt-in
+  # that has been thought about — not this default becoming true again.
+  security.sudo.extraRules =
+    lib.optional (!opts.headless) {
       users = [opts.username];
       commands = [
         {
@@ -54,8 +87,7 @@
           options = ["NOPASSWD"];
         }
       ];
-    }
-  ];
+    };
 
   # --- VPN START
   # Tailscale now lives in config/system/server.nix (it is infrastructure for
@@ -67,8 +99,14 @@
   # false and it is not wantedBy multi-user.target, so this only happens if
   # someone runs it by hand.
 
-  # This service will manage the connection using your config file
-  networking.wg-quick.interfaces.wg0 = {
+  # This service will manage the connection using your config file.
+  #
+  # 🔴 Desktop hosts only. On a server role the interface does not exist at all
+  # — see the sudo rules above for the reasoning. This is a structural
+  # exclusion, not a documented convention: a config file left behind in
+  # /etc/nixos, a stray `systemctl start`, or a Waybar click all hit the same
+  # wall, which is a missing unit rather than a policy somebody has to remember.
+  networking.wg-quick.interfaces.wg0 = lib.mkIf (!opts.headless) {
     # This tells NixOS to use the config file you just created
     configFile = "/etc/nixos/proton-wg.conf";
 
@@ -128,23 +166,39 @@
 
     # Point the system's resolver to the local dnscrypt-proxy2 service.
     #
-    # On a headless host, append public resolvers behind it. This is a
-    # deliberate privacy-for-availability trade and only applies there: with
-    # dns = "none" and a loopback-only resolver, dnscrypt-proxy failing to come
-    # up after an unattended reboot leaves the machine with NO name resolution
-    # at all — including for controlplane.tailscale.com, which is how we get
-    # back in. glibc tries these in order, so they are only consulted when the
-    # local resolver does not answer; in normal operation nothing changes.
-    nameservers =
-      ["127.0.0.1" "::1"]
-      ++ lib.optionals opts.headless [
-        "9.9.9.9" # Quad9
-        "1.1.1.1" # Cloudflare
-        "2620:fe::fe"
-      ];
+    # ── One DNS owner, and a rescue list that is not silently truncated ────────
+    # `nameservers` and `resolvconf.extraOptions.maxnames` are computed together
+    # in dnsPolicy and come from the same function, because the two have to
+    # agree: resolv.conf(5) caps how many nameservers a resolver will consult
+    # (MAXNS), everything past the cap is DISCARDED rather than ignored, and
+    # openresolv — which NixOS installs here — applies a default of its own.
+    # This file used to list five nameservers and set no cap at all, so the
+    # three public rescue addresses were truncated away by the very mechanism
+    # meant to use them: on the host where losing dnscrypt-proxy means losing
+    # name resolution entirely, including for controlplane.tailscale.com, the
+    # fallback was not there. `maxnames` is now the length of the list, always.
+    #
+    # The rescue addresses are NUMERIC on purpose. A resolver address that is a
+    # hostname depends on DNS working to be reachable, which is exactly the
+    # condition the rescue exists for. They are plain UDP-on-53 resolvers, not
+    # DoH and not anything encrypted, so this is availability, not privacy:
+    # dnscrypt-proxy is the privacy half and is asked first every time.
+    #
+    # They apply to a server role only. A travel laptop on hotel wifi is better
+    # off not sending every lookup to a public resolver the moment its local
+    # cache misses.
+    nameservers = dns.nameservers;
 
     # Allows wg-quick to manage /etc/resolv.conf for DNS during VPN connections.
     resolvconf.enable = true;
+
+    # The cap, stated. `maxnames N` goes into the `options` line of
+    # /etc/resolv.conf, where glibc reads it — which is why this is a
+    # resolv.conf OPTION and not an openresolv.conf setting: the number that
+    # matters is the one the libc actually uses.
+    resolvconf.extraOptions = [
+      "maxnames ${toString dns.maxnames}"
+    ];
 
     # Enable the system firewall.
     firewall = {
@@ -211,13 +265,33 @@
   };
 
   # dnscrypt-proxy is a single point of failure for the whole machine's name
-  # resolution (dns = "none" above means nothing else answers). Upstream's unit
-  # gives up after the default start-limit burst; on a host we cannot reach a
-  # console for, keep retrying forever instead.
-  systemd.services.dnscrypt-proxy.serviceConfig = {
-    Restart = lib.mkForce "always";
-    RestartSec = "10s";
-    StartLimitBurst = 0;
+  # resolution (dns = "none" above means nothing else answers). Keep retrying
+  # forever rather than giving up after a burst.
+  #
+  # 🔴 StartLimitBurst used to be set HERE, under serviceConfig, where it does
+  # nothing. StartLimitIntervalSec and StartLimitBurst are [UNIT] directives:
+  # systemd does not read them from [Service], so that line was silently inert
+  # and the unit kept systemd's default of 5 starts in 10s — which a resolver
+  # that takes longer to fail than that will blow through on a cold boot, and
+  # then the machine has no DNS at all until something restarts it. unitConfig is
+  # where nixpkgs' own modules put them for the same reason.
+  #
+  # The delay is bounded rather than instant so a resolver that is waiting on a
+  # link which has not come up yet does not spin: the sequence is 5s, 10s, 20s,
+  # 40s … capped at two minutes, forever.
+  systemd.services.dnscrypt-proxy = {
+    # [Unit], as it must be. See above: this used to be a StartLimitBurst under
+    # serviceConfig, which systemd does not read there, so it was never in
+    # effect. 0 = rate limiting off, which is what "keep retrying forever"
+    # actually means; the backoff below is what keeps that from spinning.
+    startLimitIntervalSec = 0;
+    serviceConfig = {
+      Restart = lib.mkForce "always";
+      RestartSec = "5s";
+      RestartSteps = 5;
+      RestartStepSec = "5s";
+      RestartMaxDelaySec = "120s";
+    };
   };
 
   # Enables the OpenSSH server for remote access.

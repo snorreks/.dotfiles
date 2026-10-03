@@ -6,9 +6,13 @@
 #   * a second sshd listener for key-authenticated phone clients (Moshi, or a
 #     plain Termux ssh);
 #   * mosh bounded to a small UDP range;
-#   * linger, so the user manager (and with it herdr and Collie) exists when
-#     nobody is logged in;
+#   * the phone's key, kept separate from the operator's;
 #   * the private Tailscale Serve mapping that fronts Collie.
+#
+# Linger used to be one of the bullets here. It moved to config/system/server.nix,
+# which owns `headless OR mobileAgents.enable`: an always-on server whose phone
+# clients are off needs the user manager just as much, and gating that on a
+# phone flag gave it a laptop's session-lifetime policy.
 #
 # Gated on opts.mobileAgents.enable, which hosts/legion/options.nix sets. None
 # of it depends on Moshi being enabled: config/home/moshi-hook.nix is an
@@ -150,12 +154,17 @@ in {
   # same attribute, and config/system/user.nix already defines this user — so
   # these merge into that existing definition via mkMerge rather than being
   # written as two more top-level `users.users.…` attributes.
+  #
+  # Linger is NOT here any more; it moved to config/system/server.nix, which
+  # owns `headless OR mobileAgents.enable`. It used to be gated on
+  # mobileAgents.enable alone, which meant an always-on server with the phone
+  # clients off had a session-lifetime policy inherited from a laptop: the user
+  # manager started at first login and stopped at last logout, taking herdr,
+  # Collie and every user unit with it. There is now one owner for that decision
+  # and it is not this file.
   users.users = lib.mkMerge [
     (lib.mkIf (cfg.enable && cfg.phoneAuthorizedKey != null) {
       ${opts.username}.openssh.authorizedKeys.keys = [cfg.phoneAuthorizedKey];
-    })
-    (lib.mkIf cfg.enable {
-      ${opts.username}.linger = true;
     })
   ];
 
@@ -253,12 +262,13 @@ in {
   # refused before the host firewall is consulted. See docs/mobile-agents.md for
   # the grants to add — trusting tailscale0 here does nothing for that.
   #
-  # ── Linger, and why it is here rather than in user.nix ──────────────────────
+  # ── Linger ─────────────────────────────────────────────────────────────────
   #
-  # Without lingering the user manager starts at first login and stops at last
-  # logout, so herdr — whose entire job is surviving the session that started
-  # it — would be dead whenever nobody is logged in. That is the difference
-  # between "reachable from the phone" and "reachable only while sitting at the
-  # desk". Set in the mkMerge above because it is gated on the mobile flag; nixpkgs'
-  # `null` default leaves lingering unmanaged, and we only ever opt IN.
+  # Not configured here — see the note on the mkMerge above and the
+  # `lingerWanted` union in config/system/server.nix. The short version: without
+  # lingering the user manager starts at first login and stops at last logout, so
+  # herdr — whose entire job is surviving the session that started it — would be
+  # dead whenever nobody is logged in. That is the difference between "reachable
+  # from the phone" and "reachable only while sitting at the desk", and it is
+  # just as true for a server whose phone clients are switched off.
 }

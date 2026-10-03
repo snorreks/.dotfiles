@@ -298,7 +298,10 @@ rm -rf "$HOME_DIR"
 # Exercise the deletion entry points against one disposable cache/tmp tree.
 # Load the production helpers without executing the machine-wide sweep.
 # Functions below are called by the sourced production helpers.
-# shellcheck disable=SC2317,SC2034
+# SC2329 as well as the older codes: these fakes are never invoked by name from
+# this file — they exist to be FOUND on PATH by the sourced production script,
+# which is the entire mechanism. A newer shellcheck flags the definition itself.
+# shellcheck disable=SC2317,SC2034,SC2329
 check_busy_tree() (
   set --
   # shellcheck disable=SC1090

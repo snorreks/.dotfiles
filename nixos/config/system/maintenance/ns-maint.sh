@@ -154,6 +154,75 @@ valid_phase() {
 }
 valid_integer() { [[ "$1" =~ ^-?[0-9]+$ ]]; }
 
+# Is this an address inside the Tailscale CGNAT range, 100.64.0.0/10?
+#
+# Used for one thing: to tell the operator, when the new-connection check finds
+# no evidence, that they are almost certainly on Tailscale SSH rather than on
+# OpenSSH. That distinction is not a detail — see the message it produces.
+#
+# Deliberately IPv4-only and deliberately conservative: a CGNAT address can be
+# something else entirely, so this says "this LOOKS like a tailnet address", and
+# a false positive only adds an explanatory paragraph to an error the operator
+# was already getting. It must never gate a decision.
+tailnet_address() {
+  local ip="$1"
+  [[ "$ip" =~ ^100\.([0-9]{1,3})\. ]] || return 1
+  local second="${BASH_REMATCH[1]}"
+  # 100.64.0.0/10 — the second octet is 64..127. Leading zeros and anything
+  # above 255 are rejected rather than arithmetically normalised.
+  [[ "$second" =~ ^0*(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])$ ]] || return 1
+  return 0
+}
+
+# ── EFI space ────────────────────────────────────────────────────────────────
+#
+# Staging a boot means writing a kernel, an initrd and a boot entry to a FAT
+# partition that is SHARED WITH WINDOWS and is usually small. Writing there is
+# not atomic with respect to running out of room: the entry is written, and then
+# the copy fails part-way, and `switch-to-configuration boot` fails — which on a
+# machine reached only over the tailnet is an hour of guessing.
+#
+# So `stage` checks first. `df` needs no privilege to statvfs, so this is a
+# plain read.
+#
+# NM_ESP_PATH is where the ESP is mounted (/boot here). NM_ESP_MIN_MIB is the
+# floor: one NixOS entry with its kernel and initrd is tens of MiB, so 150 MiB
+# leaves room for the entry being written now plus one more replacement.
+NM_ESP_PATH="${NM_ESP_PATH:-/boot}"
+NM_ESP_MIN_MIB="${NM_ESP_MIN_MIB:-150}"
+NM_DF="${NM_DF:-df}"
+
+esp_free_mib() {
+  "$NM_DF" -P -k "$NM_ESP_PATH" 2>/dev/null | awk 'NR==2 { printf "%d", $4 / 1024 }'
+}
+
+esp_preflight() {
+  local free
+  free="$(esp_free_mib)"
+  if [[ -z "$free" ]]; then
+    # Not a reason to refuse: the path may simply not be a mountpoint in the
+    # fixture or on a host with a different layout. Say it and continue.
+    sayf "stage: could not read free space on $NM_ESP_PATH (is it mounted?). Continuing."
+    return 0
+  fi
+  if ((free < NM_ESP_MIN_MIB)); then
+    sayf "stage: $NM_ESP_PATH has ${free} MiB free, and this stage needs at least"
+    sayf "       ${NM_ESP_MIN_MIB} MiB for the kernel, the initrd and the boot entry."
+    sayf "       Refusing to start: a half-written ESP entry is worse than none,"
+    sayf "       because it is not obvious afterwards which entry is the good one."
+    sayf ""
+    sayf "       Reclaim space (this keeps the CURRENT boot and its profile):"
+    sayf "         bootctl cleanup                  # entries no profile references"
+    sayf "         nixos-rebuild boot               # reinstall the profile's entry"
+    sayf "       If the ESP is full because of something other than stale NixOS"
+    sayf "       entries, that is a disk problem, and 'bootCounting' in"
+    sayf "       config/system/boot.nix is where the entry limit lives."
+    return 1
+  fi
+  sayf "stage: ESP has ${free} MiB free on $NM_ESP_PATH (floor ${NM_ESP_MIN_MIB} MiB)"
+  return 0
+}
+
 # PENDING_PHASES are the phases in which a transaction still owns the machine:
 # a confirmation or a deadline is outstanding, or a restore is mid-flight.
 PENDING_PHASES=(armed activating awaiting-confirm restoring)
@@ -1169,6 +1238,14 @@ cmd_confirm() {
     # Ask sshd itself whether it accepted a session from that peer AFTER the
     # switch was armed. A pre-existing socket cannot produce such a line,
     # because the session it belongs to was accepted before armed_at.
+    #
+    # NM_SSH_UNIT (sshd.service) covers BOTH OpenSSH listeners this host has —
+    # 22 and 2222 — because they are one unit: systemd runs both from the same
+    # sshd.service and journald records their sessions under it
+    # (`sshd-session[NNN]: Accepted publickey for … from … port …`). Verified on
+    # this host, where both ports were listening at once. So a confirmation made
+    # over the phone's 2222 session is evidence in exactly the same way a
+    # confirmation over 22 is, and neither needs a second unit.
     local since="${RECORD[armed_at]}"
     if "$NM_JOURNALCTL" -u "$NM_SSH_UNIT" --since "@$since" --no-pager 2>/dev/null |
       grep -q "Accepted .* from ${peer_ip} port ${peer_port}"; then
@@ -1180,6 +1257,30 @@ cmd_confirm() {
       sayf "         switch, which proves nothing about whether a fresh client can get in."
       sayf "         Open a second connection and run this from it, or pass"
       sayf "         --assume-new-connection if you verified it another way."
+      #
+      # A tailnet peer gets the extra sentence it needs, because the ordinary
+      # advice above cannot work there and following it anyway wastes an
+      # afternoon. Tailscale SSH answers on tailnet port 22 BEFORE the OS sshd
+      # sees the connection, and its acceptance is recorded by tailscaled, not
+      # by the sshd unit this check reads. So a confirmation run over Tailscale
+      # SSH is looking for a record that will never be in that journal.
+      #
+      # No second journal source was added for it on purpose. Reading
+      # tailscaled's log instead would mean trusting a line format that is not
+      # part of any interface, is not guaranteed to be emitted at the default
+      # verbosity, and changes between releases — a check that silently finds
+      # nothing would be worse than one that refuses. The supported answer is to
+      # confirm from an OpenSSH session (port 22 or the phone's 2222), which is
+      # where the evidence is.
+      if tailnet_address "$peer_ip"; then
+        sayf ""
+        sayf "         ${peer_ip} is a tailnet address, which is the case to read this:"
+        sayf "         if you got here over Tailscale SSH, its acceptance is recorded by"
+        sayf "         tailscaled, not by ${NM_SSH_UNIT}, so this check will never find it —"
+        sayf "         that is a property of the listener, not a failed update. Confirm"
+        sayf "         from OpenSSH instead (ssh -p 22, or -p 2222 from the phone); those"
+        sayf "         sessions are both recorded in ${NM_SSH_UNIT}."
+      fi
       exit 1
     fi
   elif [[ "$assume" -eq 1 ]]; then
@@ -1362,6 +1463,10 @@ cmd_stage() {
   booted="$(booted_closure)"
   valid_store_path "$running" && gc_protect running "$running"
   valid_store_path "$booted" && gc_protect booted "$booted"
+
+  # Before anything is written to the ESP. See esp_preflight for why this is
+  # here rather than left to the bootloader.
+  esp_preflight || die "stage: refusing to write a boot entry with this little EFI space."
 
   # `boot` and NOT `switch`: this writes the bootloader entry for the candidate
   # and touches nothing that is currently running. That is the entire difference

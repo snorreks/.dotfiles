@@ -5,6 +5,7 @@
   config,
   lib,
   modulesPath,
+  opts,
   ...
 }: {
   imports = [
@@ -27,10 +28,27 @@
     options = ["fmask=0077" "dmask=0077"];
   };
 
-  # --- Shared NTFS Drive for Windows and Nixos ---
-  # Requires Windows Fast Startup to be disabled.
   # --- Shared NTFS Drive for Windows and NixOS ---
-  fileSystems."/mnt/shared" = {
+  #
+  # OFF unless opts.mountShared is true (nixos/options.nix). The reasons are
+  # about unattended operation, not about NTFS:
+  #
+  #   * Windows Fast Startup leaves the volume HIBERNATED. ntfs3 mounted rw on
+  #     a hibernated volume is a way to corrupt it, and the repair needs a
+  #     booted Windows and a keyboard — neither of which an unattended box has.
+  #   * `nofail` was doing the work of "if it does not mount, carry on", which
+  #     is right, and then nothing noticed whether it mounted at all. On a
+  #     machine reached only over the tailnet, a mount that silently did not
+  #     happen is discovered by the thing you needed the files for.
+  #   * Nothing server-critical reads or writes this path. Every state and
+  #     media root in this configuration is a native Linux filesystem.
+  #
+  # Deliberately NOT changed: the partition is not repartitioned, not
+  # reformatted, not resized and not given a different UUID, and the kernel
+  # still has ntfs3 available (boot.supportedFilesystems) so a file can be
+  # copied off it by hand during recovery without it being mounted at boot.
+  # Flipping this on is one boolean.
+  fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/D8ECDAADECDA8562";
     fsType = "ntfs3";
     options = [

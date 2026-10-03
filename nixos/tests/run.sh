@@ -25,6 +25,19 @@ SUITES=(
   "ns-maint-transaction.sh"
   "kill-switch-targets.sh"
   "disk-cleanup-safety.sh"
+  # The server-foundation lane. Standalone and runnable on its own before any
+  # central registry exists — `bash nixos/tests/server-foundation/host-eval.sh`
+  # reproduces one of them without going through this runner at all.
+  #
+  # host-eval.sh is listed LAST and separately below: it evaluates four real
+  # flake configurations, which needs `nix` and takes ~15s rather than
+  # milliseconds. It is still here rather than hidden behind another entry point
+  # so that "run everything this repository can run" means exactly that.
+  "server-foundation/role-policy.sh"
+  "server-foundation/boot-health.sh"
+  "server-foundation/tailscale-reconcile.sh"
+  "server-foundation/ssh-confirm.sh"
+  "server-foundation/host-eval.sh"
 )
 
 failed=0
@@ -35,6 +48,9 @@ printf '\033[1m=== lint: shellcheck\033[0m\n'
 # listed; a repository-wide shellcheck run belongs to the repo-contracts PR.
 SHELLCHECKED=(
   "config/system/maintenance/ns-maint.sh"
+  "config/system/boot/health.sh"
+  "config/system/tailscale/reconcile.sh"
+  "config/system/battery/charge-limit.sh"
   "config/home/scripts/scripts/disk-cleanup.sh"
   "config/home/scripts/scripts/kill-switch.sh"
   "config/home/scripts/scripts/kill-switch-cleanup.sh"
@@ -42,6 +58,11 @@ SHELLCHECKED=(
   "tests/ns-maint-transaction.sh"
   "tests/kill-switch-targets.sh"
   "tests/disk-cleanup-safety.sh"
+  "tests/server-foundation/role-policy.sh"
+  "tests/server-foundation/boot-health.sh"
+  "tests/server-foundation/tailscale-reconcile.sh"
+  "tests/server-foundation/ssh-confirm.sh"
+  "tests/server-foundation/host-eval.sh"
 )
 if command -v shellcheck >/dev/null 2>&1; then
   for f in "${SHELLCHECKED[@]}"; do
@@ -69,6 +90,34 @@ for f in "${SHELLCHECKED[@]}" "tests/run.sh"; do
 done
 
 for suite in "${SUITES[@]}"; do
+  # host-eval.sh evaluates four real flake configurations, which needs a nix
+  # that can reach the store and the flake's inputs. A `checks` sandbox has
+  # neither, so the check declares that it cannot run this one:
+  #
+  #   NM_SKIP_HOST_EVAL=1   set by the flake check, with the reason in
+  #                        nixos/flake.nix
+  #
+  # It is skipped LOUDLY, and it is an error unless the caller has said a skip is
+  # acceptable. NM_REQUIRE_ALL=1 is the default — a developer run — so "the
+  # suite that checks the hosts did not run" can never be a green result there.
+  # Run it directly with:
+  #
+  #   bash nixos/tests/server-foundation/host-eval.sh
+  if [[ "${suite##*/}" == "host-eval.sh" ]] &&
+    { [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; }; then
+    reason="no nix on PATH"
+    [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"
+    if [[ "${NM_REQUIRE_ALL:-1}" != "0" ]]; then
+      printf '\n\033[31mSKIPPED %s (%s), and this run requires every suite to actually run.\033[0m\n' "$suite" "$reason"
+      printf '\033[31mRe-run with nix on PATH and no NM_SKIP_HOST_EVAL, or set NM_REQUIRE_ALL=0\033[0m\n'
+      printf '\033[31mif a skip is expected here.\033[0m\n'
+      failed=1
+    else
+      printf '\n\033[33mSKIPPED %s (%s; expected in the checks sandbox)\033[0m\n' "$suite" "$reason"
+    fi
+    continue
+  fi
+
   printf '\n\033[1m=== %s\033[0m\n' "${suite##*/}"
   if bash "$HERE/$suite"; then
     :

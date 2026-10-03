@@ -27,18 +27,47 @@
 
   # ── Basement server ────────────────────────────────────────────────────────
   # This machine is destined to stay behind as an always-on box reached over
-  # the tailnet. Until then it is a normal three-monitor desktop.
+  # the tailnet. `role = "server"` is that decision, in one line, and it makes
+  # opts.headless resolve to true (see nixos/options.nix and
+  # nixos/lib/host-policy.nix) — so suspend is removed, the lid and power keys
+  # are ignored, system lingering is on, LAN service ports close, the exit node
+  # is advertised and the Proton VPN kill-switch is structurally absent.
   #
-  # BEFORE TRAVEL: flip both of these, rebuild, and work through the checklist
-  # in docs/headless-server.md (BIOS auto-power-on, tailnet IP, ethernet).
+  # The desktop is still installed. Walk up, log in at tuigreet, and mango
+  # starts: "server" means nothing starts one UNATTENDED.
   #
-  #   headless           = true;
-  #   batteryChargeLimit = 60;
-  #
-  headless = false;
+  # BEFORE TRAVEL: rebuild, then work through the checklist in
+  # docs/headless-server.md (BIOS auto-power-on, tailnet address, ethernet,
+  # EFI space, and a reboot you chose to take).
+  role = "server";
+
+  # The compatibility boolean, stated rather than left to be derived. It is not
+  # the switch any more — role is — and setting it here is what makes the
+  # diff readable: a reviewer sees the resolved answer, not a default that
+  # happens to be true. `role = "desktop"` with this true is refused at
+  # evaluation, so the two can never silently disagree.
+  headless = true;
 
   # 80 while it is a daily driver; 60 once it is parked and permanently on AC.
+  #
+  # 🔴 This hardware does not expose charge_control_end_threshold, so the
+  # limit is applied through the ideapad conservation-mode rung, which pins the
+  # pack at about 60% and NOT at the requested percentage. config/system/
+  # battery.nix reports which rung it landed on and what it actually achieved,
+  # because "I set 80" and "the pack sits at 60" should not be a mystery.
   batteryChargeLimit = 80;
+
+  # ── Boot health blessing ───────────────────────────────────────────────────
+  # Still OFF: it needs a reboot to observe working, and the first observation
+  # has to be one you scheduled with access to this machine. Enable it after
+  # the checklist in docs/headless-server.md has been walked once by hand.
+  bootHealth.enable = false;
+
+  # acpi_call was loaded on both hosts for "advanced ACPI functions"; nothing
+  # in this configuration calls it, so it is not loaded here. acpi_osi=Linux
+  # stays: it is how this firmware exposes the hotkeys and the fan control the
+  # Legion modules use.
+  acpi.acpiCall = false;
 
   # ── Phone → herdr over Tailscale ───────────────────────────────────────────
   # The Legion is the host this is for: it stays on and runs the agents worth

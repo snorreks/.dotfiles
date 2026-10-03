@@ -31,6 +31,32 @@ bash nixos/tests/ns-maint-transaction.sh      # one suite, standalone
 | `run.sh` | The single entry point the flake check runs. |
 | `maintenance-vm.nix` | That the above holds on a real, booted, systemd-managed NixOS system. |
 
+### The server-foundation lane
+
+`tests/server-foundation/` is one lane's own scope: the server/travel role, the
+local boot-health gate, tailscale convergence, and the maintenance
+new-connection check. Each suite also runs standalone, which is the point — none
+of them needs this runner, and none of them needs another lane's future files.
+
+| File                             | What it proves                                                                    | Needs `nix` |
+| -------------------------------- | --------------------------------------------------------------------------------- | ----------- |
+| `role-policy.sh`                 | Role resolution, the refusals, host-scoped private overrides, the DNS owner/cap    | yes (`nix eval --file`, no store, no network) |
+| `boot-health.sh`                 | The local boot gate passes offline, and refuses for each local reason               | no          |
+| `tailscale-reconcile.sh`         | Offline boot → later internet return, with no login, no reset, no reboot            | no          |
+| `ssh-confirm.sh`                 | The NEW-session check over both 22 and 2222, and the tailnet-peer explanation      | no          |
+| `host-eval.sh`                   | The real flake outputs for both hosts and both variants, plus role combinations      | yes, and a store with the inputs |
+
+`host-eval.sh` is the one that cannot run inside a `checks` sandbox: it evaluates
+four real flake configurations, and an evaluation inside a build cannot reach the
+flake's inputs. The flake check therefore sets `NM_SKIP_HOST_EVAL=1` and
+`NM_REQUIRE_ALL=0`, which makes `run.sh` print the skip loudly instead of
+pretending the suite passed. Outside a sandbox it runs, and it fails the run if it
+fails.
+
+```console
+bash nixos/tests/server-foundation/host-eval.sh    # ~15s
+```
+
 ## The failure-injection scenarios
 
 Each one is a case where the OLD implementation was wrong, so each has a test
