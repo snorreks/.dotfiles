@@ -98,6 +98,25 @@ FAKE
 
 health() { timeout "${HEALTH_WALL_CLOCK:-60}" bash "$HEALTH" "$@" 2>&1; }
 
+_t_start "failed-unit counts expand to JSON numbers"
+fake systemctl <<'FAKE'
+if [[ "$*" == *list-units* ]]; then
+    if [[ "${FAKE_FAILED_UNITS:-0}" == 1 ]]; then
+        printf '%s\n' 'example.service loaded failed failed Example'
+    fi
+    exit 0
+fi
+exit 1
+FAKE
+for expected in 0 2; do
+    out="$(FAKE_FAILED_UNITS=$((expected / 2)) health --json --no-heartbeat)"
+    # Other report fields have existing string-quoting defects; validate the
+    # numeric count token independently of those unrelated fields.
+    actual="$(printf '%s' "$out" | python3 -c 'import json,re,sys; print(json.loads(re.search(r"\"failedUnits\":.*?,\"count\":([^}]+)}", sys.stdin.read()).group(1)))')"
+    assert_eq "$expected" "$actual" 'combined system/user count is a JSON number'
+    assert_not_contains "$out" 'count_failed: command not found' 'count is expanded, never executed'
+done
+
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "an unconfigured backup is a PROBLEM, not a pass"
 rm -f "$AGENT_OPS_BACKUP_RECORD"

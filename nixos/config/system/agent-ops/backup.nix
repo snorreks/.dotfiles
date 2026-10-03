@@ -43,6 +43,8 @@
   cfg = config.agentOps.backup;
   stateDir = cfg.stateDir;
   script = ./scripts/ns-agent-backup.sh;
+  quiesceTable = pkgs.writeText "agent-ops-quiesce.conf"
+    (lib.concatMapStrings (e: "${e.path}|${e.method}|${e.arg}\n") cfg.quiesce);
 
   tool = pkgs.writeShellApplication {
     name = "ns-agent-backup";
@@ -237,12 +239,7 @@ in {
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-          ExecStart = "${pkgs.coreutils}/bin/sh" "-c" ''            cat > ${stateDir}/quiesce.conf <<'AGENTOPS'
-                    ${lib.concatMapStringsSep "\n" (
-                e: "${e.path}|${e.method}|${e.arg}"
-              )
-              cfg.quiesce}
-                    AGENTOPS'';
+          ExecStart = "${pkgs.coreutils}/bin/install -m 0600 ${quiesceTable} ${lib.escapeShellArg "${stateDir}/quiesce.conf"}";
         };
       };
 
@@ -255,7 +252,7 @@ in {
         # do is block on it forever.
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${tool} --config /etc/agent-ops/backup.conf backup";
+          ExecStart = "${lib.getExe tool} --config /etc/agent-ops/backup.conf backup";
           LoadCredential = [
             "RESTIC_REPOSITORY:${config.sops.secrets.RESTIC_REPOSITORY.path}"
             "RESTIC_PASSWORD:${config.sops.secrets.RESTIC_PASSWORD.path}"
@@ -308,7 +305,7 @@ in {
         description = "Apply restic --forget retention without pruning";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${tool} --config /etc/agent-ops/backup.conf prune";
+          ExecStart = "${lib.getExe tool} --config /etc/agent-ops/backup.conf prune";
           LoadCredential = [
             "RESTIC_REPOSITORY:${config.sops.secrets.RESTIC_REPOSITORY.path}"
             "RESTIC_PASSWORD:${config.sops.secrets.RESTIC_PASSWORD.path}"

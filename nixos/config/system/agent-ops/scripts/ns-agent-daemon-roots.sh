@@ -168,7 +168,14 @@ is_store_path() {
 	local p="$1"
 	[[ "$p" == "$NS_OPS_STORE_ROOT"/* ]] || return 1
 	local base="${p#"$NS_OPS_STORE_ROOT"/}"
+	base="${base%%/*}"
 	[[ "$base" =~ ^[a-z0-9]{32}-[A-Za-z0-9._+-]+$ || "$base" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]]
+}
+
+store_path_of() {
+	is_store_path "$1" || return 1
+	local base="${1#"$NS_OPS_STORE_ROOT"/}"
+	printf '%s/%s' "$NS_OPS_STORE_ROOT" "${base%%/*}"
 }
 
 closure_of() {
@@ -202,7 +209,7 @@ closure_count() {
 cmd_pin() {
 	require_privileged || exit $?
 
-	local pid exe
+	local pid exe store_path
 	if ! pid="$(resolve_pid)" && ! pid="$(resolve_pid_from_proc)"; then
 		sayf "no running herdr server found (unit $UNIT MainPID, and no 'herdr server' in $PROC_ROOT)."
 		sayf "Nothing to pin. A daemon that is not running cannot lose its closure."
@@ -227,8 +234,9 @@ cmd_pin() {
 		return 0
 	fi
 
-	if ! closure_of "$exe" >/dev/null; then
-		sayf "cannot query the closure of $exe — is it still in the store?"
+	store_path="$(store_path_of "$exe")"
+	if ! closure_of "$store_path" >/dev/null; then
+		sayf "cannot query the closure of $store_path — is it still in the store?"
 		sayf "That is the failure this script exists to make impossible."
 		return 1
 	fi
@@ -242,10 +250,10 @@ cmd_pin() {
 		sayf "root name '$name' must be [A-Za-z0-9_.-]+"
 		return 2
 	}
-	pin_root "$name" "$exe"
+	pin_root "$name" "$store_path"
 
-	# The root is only useful if it actually points at the running binary.
-	verify_one "$name" "$exe"
+	# The root is only useful if it points at the store path containing the running binary.
+	verify_one "$name" "$store_path"
 }
 
 verify_one() {

@@ -152,7 +152,7 @@ in {
         after = ["local-fs.target"];
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${tool} --json";
+          ExecStart = "${lib.getExe tool} --json";
           # Bounded on the unit as well as inside the script. A hung collector
           # must not be able to hold this open.
           TimeoutStartSec = "60";
@@ -191,9 +191,9 @@ in {
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-          ExecStart = "${pkgs.coreutils}/bin/sh" "-c" ''
+          ExecStart = pkgs.writeShellScript "agent-ops-health-record" ''
             set -e
-            printf '%s\n' "$(${tool} --json --no-heartbeat || true)" \
+            printf '%s\n' "$(${lib.getExe tool} --json --no-heartbeat || true)" \
               >> /var/lib/agent-ops/health/history.jsonl
           '';
           TimeoutStartSec = "60";

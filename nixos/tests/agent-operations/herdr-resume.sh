@@ -23,6 +23,11 @@ source "$HERE/lib/fixture.sh"
 SUITE_NAME="herdr-resume"
 
 fixture_new
+# Keep fallback coverage independent of the host's user manager.
+unset INVOCATION_ID
+fake systemctl <<'FAKE'
+exit 1
+FAKE
 
 export AGENT_OPS_STATE_DIR="$TMP/state"
 export AGENT_OPS_RESUME_ROOTS="$TMP/roots-file"
@@ -273,6 +278,69 @@ rc=$?
 assert_eq '0' "$rc" 'a mix of present and absent roots still succeeds'
 assert_contains "$out" 'absent' 'the absent root is named'
 assert_contains "$out" 'task' 'and the present one still ran'
+cleanup_runs
+
+# A transient service must run independently, with the same cwd/environment,
+# and the recorded PID must belong to the runner, not systemd-run.
+_t_start "systemd launches a separate service and records its MainPID"
+fake systemctl <<'FAKE'
+case "$2" in
+show-environment) exit "${FAKE_MANAGER_EXIT:-0}" ;;
+show) cat "$TMP/unit.pid" ;;
+stop)
+    printf '%s\n' "$*" >>"$TMP/unit.stops"
+    kill "$(cat "$TMP/unit.pid")" 2>/dev/null || true ;;
+esac
+FAKE
+fake systemd-run <<'FAKE'
+printf '%s\n' "$@" >"$TMP/unit.args"
+[[ "${FAKE_RUN_FAIL:-0}" == 0 ]] || exit 1
+while (($#)); do
+    case "$1" in
+    --working-directory=*) cd "${1#*=}" || exit 1 ;;
+    --setenv=*) export "${1#*=}" ;;
+    --) shift; break ;;
+    esac
+    shift
+done
+setsid "$@" >"$TMP/unit.log" 2>&1 < /dev/null &
+printf '%s\n' "$!" >"$TMP/unit.pid"
+FAKE
+# Variables expand in the generated runner.
+# shellcheck disable=SC2016
+mk_runner "$TMP/project/unit.sh" 'printf "%s|%s|%s\n" "$PWD" "$HERDR_RESUMED_ROOT" "$HERDR_RESUMED_TASK" > "$TMP/unit.context"
+touch "$TMP/project/hb"
+sleep 60'
+opt_in "$TMP/project/unit.sh" "$HEARTBEAT"
+rm -f "$HEARTBEAT"
+out="$(resume)"
+assert_eq '0' "$?" 'transient launch succeeds'
+rec="$(find "$AGENT_OPS_STATE_DIR/records" -type f | head -1)"
+assert_contains "$(cat "$rec")" "PID=$(cat "$TMP/unit.pid")" 'records the service MainPID'
+assert_eq "$TMP/project|$TMP/project|task" "$(cat "$TMP/unit.context")" 'preserves cwd and task environment'
+for arg in --user --collect --service-type=exec "--property=StandardOutput=append:$AGENT_OPS_STATE_DIR/logs/task.log"; do
+    assert_contains "$(cat "$TMP/unit.args")" "$arg" "launch includes $arg"
+done
+assert_not_contains "$(cat "$TMP/unit.args")" '--scope' 'launch uses a service'
+kill -0 "$(cat "$TMP/unit.pid")"
+assert_eq '0' "$?" 'runner is alive after resume returns'
+cleanup_runs
+
+_t_start "failed transient launches do not fall back or record success"
+rm -f "$HEARTBEAT"
+out="$(FAKE_RUN_FAIL=1 resume)"
+assert_eq '1' "$?" 'systemd-run failure is reported'
+assert_no_file "$HEARTBEAT" 'runner was not launched through the fallback'
+assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f | wc -l)" 'no successful record'
+out="$(FAKE_MANAGER_EXIT=1 INVOCATION_ID=fixture resume)"
+assert_eq '1' "$?" 'inside a unit, unavailable user manager is an error'
+assert_no_file "$HEARTBEAT" 'no fallback into the oneshot cgroup'
+
+_t_start "heartbeat timeout stops the transient service"
+opt_in "$TMP/project/silent.sh" "$TMP/project/silent-hb"
+out="$(START_TIMEOUT=2 resume)"
+assert_eq '1' "$?" 'missing heartbeat fails'
+assert_contains "$(cat "$TMP/unit.stops")" '--user stop herdr-task-' 'stops the entire task unit'
 cleanup_runs
 
 assert_no_reboot "$TMP/reboots"

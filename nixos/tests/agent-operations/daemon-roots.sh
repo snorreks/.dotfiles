@@ -178,7 +178,7 @@ mk_proc() {
 	# /proc/PID/exe is a symlink; readlink -f resolves it.
 	ln -sfn "$exe_path" "$TMP/proc/$pid/exe"
 }
-mk_proc 4711 "$EXE"
+mk_proc 4711 "$EXE/bin/herdr"
 export PROC_ROOT="$TMP/proc"
 
 # ── a fake systemd ──────────────────────────────────────────────────────────
@@ -228,7 +228,7 @@ assert_file "$LIB" 'nor the dependency of the dependency'
 
 # And the contrast: an UNPINNED daemon would have been collected.
 UNPINNED="$(add_path herdr-0.10.0)"
-mk_proc 4712 "$UNPINNED"
+mk_proc 4712 "$UNPINNED/bin/herdr"
 collect >/dev/null
 assert_no_file "$UNPINNED" 'an unpinned store path IS collectable — so the pin is doing something'
 

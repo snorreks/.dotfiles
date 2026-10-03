@@ -313,7 +313,7 @@ check_failed_units() {
 		first=0
 		FAILED_JSON+="$(JSON_SAFE "$u")"
 	done
-	FAILED_JSON+="],\"count\":$(count_failed)}"
+	FAILED_JSON+="],\"count\":${count_failed:-0}}"
 	local count
 	count="$count_failed"
 	if ((count > 0)); then

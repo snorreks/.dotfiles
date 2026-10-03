@@ -298,21 +298,49 @@ run_task() {
 	fi
 
 	say "task '$name': launching '$runner' in '$root'."
-	# setsid detaches from the unit's cgroup-independent session so the task
-	# is not SIGTERM'd the moment this oneshot finishes; nohup covers SIGHUP.
-	# stdout/stderr go to the state directory, never to the journald of a unit
-	# that has already exited.
-	local out="$STATE_DIR/logs"
+	# A separate service owns its own cgroup and survives this oneshot's exit.
+	# setsid only detaches the session; it is sufficient outside systemd.
+	local out="$STATE_DIR/logs" new_pid="" task_unit=""
 	mkdir -p "$out"
-	(
-		cd "$root" || exit 2
-		HERDR_RESUMED_TASK="$name" HERDR_RESUMED_ROOT="$root" \
-			setsid "$runner" >>"$out/$name.log" 2>&1 < /dev/null &
-		echo $!
-	) >"$out/$name.pid" || true
-
-	local new_pid
-	new_pid="$(tr -dc '0-9' <"$out/$name.pid" 2>/dev/null || true)"
+	if command -v systemd-run >/dev/null 2>&1 &&
+		systemctl --user show-environment >/dev/null 2>&1; then
+		task_unit="herdr-task-$$-$RANDOM.service"
+		if ! systemd-run --user --quiet --collect --service-type=exec \
+			--unit="$task_unit" --working-directory="$root" \
+			--setenv="HERDR_RESUMED_TASK=$name" --setenv="HERDR_RESUMED_ROOT=$root" \
+			--property="StandardOutput=append:$out/$name.log" \
+			--property="StandardError=append:$out/$name.log" -- "$runner"; then
+			sayf "task '$name': could not start user service $task_unit."
+			RC=1
+			flock -u "$lockfd" 2>/dev/null || true
+			exec {lockfd}>&-
+			return
+		fi
+		new_pid="$(systemctl --user show "$task_unit" --property=MainPID --value 2>/dev/null || true)"
+		if [[ ! "$new_pid" =~ ^[1-9][0-9]*$ ]]; then
+			sayf "task '$name': user service exited before recording its pid."
+			systemctl --user stop "$task_unit" 2>/dev/null || true
+			RC=1
+			flock -u "$lockfd" 2>/dev/null || true
+			exec {lockfd}>&-
+			return
+		fi
+		printf '%s\n' "$new_pid" >"$out/$name.pid"
+	elif [[ -n "${INVOCATION_ID:-}" ]]; then
+		sayf "task '$name': user systemd is unavailable; cannot detach from this unit."
+		RC=1
+		flock -u "$lockfd" 2>/dev/null || true
+		exec {lockfd}>&-
+		return
+	else
+		(
+			cd "$root" || exit 2
+			HERDR_RESUMED_TASK="$name" HERDR_RESUMED_ROOT="$root" \
+				setsid "$runner" >>"$out/$name.log" 2>&1 < /dev/null &
+			echo $!
+		) >"$out/$name.pid" || true
+		new_pid="$(tr -dc '0-9' <"$out/$name.pid" 2>/dev/null || true)"
+	fi
 
 	# ---- wait for the first heartbeat, so a task that dies on startup is
 	# caught here instead of being reported as successfully resumed.
@@ -340,7 +368,10 @@ run_task() {
 
 	if ((beat_seen == 0)) && [[ -n "$heartbeat" ]]; then
 		sayf "task '$name': no heartbeat within ${START_TIMEOUT}s."
-		if [[ -n "$new_pid" && -d "/proc/$new_pid" ]]; then
+		if [[ -n "$task_unit" ]]; then
+			sayf "  stopping unit $task_unit rather than leaving an untracked run."
+			systemctl --user stop "$task_unit" 2>/dev/null || true
+		elif [[ -n "$new_pid" && -d "/proc/$new_pid" ]]; then
 			sayf "  stopping pid $new_pid rather than leaving an untracked run."
 			kill "$new_pid" 2>/dev/null || true
 		fi
