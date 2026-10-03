@@ -127,6 +127,13 @@
     system = "x86_64-linux";
     baseOpts = import ./options.nix;
 
+    # The maintenance transaction package, built once and reused by both the
+    # host configurations and the tests, so the thing the VM test boots is the
+    # same derivation the Legion installs.
+    nsMaintPackage =
+      inputs.nixpkgs.legacyPackages.${system}.callPackage
+      ./config/system/maintenance/package.nix {};
+
     # Optional, gitignored, machine-local overrides — never committed, since
     # they're for one-off personal tweaks (e.g. "externals unplugged today")
     # rather than checked-in host differences. Copy local.nix.example to
@@ -229,5 +236,71 @@
           "${hostname}-fast" = mkHost hostKey hostCfg false;
         }
     ) {} (builtins.attrNames hosts);
+
+    # ── checks ──────────────────────────────────────────────────────────────
+    #
+    # One entry point, `nix/tests/run.sh`, that a developer can also run by
+    # hand, wrapped here so `nix flake check` runs it. Deliberately narrow: the
+    # shell suites this PR adds, plus a shellcheck pass over exactly the files
+    # this PR touched. A repository-wide lint, a secret scan and a CI workflow
+    # belong to the repo-contracts PR; adding them here would mean every
+    # sequential PR carries the noise of the last one.
+    checks.${system} = {
+      maintenance-contracts =
+        nixpkgs.legacyPackages.${system}.runCommand
+        "maintenance-contracts"
+        {
+          nativeBuildInputs = [
+            nixpkgs.legacyPackages.${system}.bash
+            nixpkgs.legacyPackages.${system}.coreutils
+            nixpkgs.legacyPackages.${system}.findutils
+            nixpkgs.legacyPackages.${system}.git
+            nixpkgs.legacyPackages.${system}.gnugrep
+            nixpkgs.legacyPackages.${system}.shellcheck
+            nixpkgs.legacyPackages.${system}.util-linux
+            nixpkgs.legacyPackages.${system}.which
+          ];
+          src = ./.;
+        }
+        ''
+          runHook preInstall
+
+          # runCommand's builder does NOT unpack `src` — it runs in an empty
+          # directory with $src pointing at the copied flake source. Referencing
+          # tests/run.sh relative to the cwd is why this check reported
+          # "No such file or directory" the first time.
+          #
+          # HOME must be set and writable: the cleanup suite builds disposable
+          # git worktrees under it and must not touch the builder's real one.
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+
+          bash "$src/tests/run.sh"
+
+          touch "$out"
+          runHook postInstall
+        '';
+
+      # A real NixOS boot, with the real systemd units, a real root-owned state
+      # directory and a real timer driving `ns-maint tick`. Needs KVM and builds
+      # a whole system, so it is a SEPARATE check rather than part of the fast
+      # one — `nix flake check` runs both, but a contributor running
+      # `nix build .#checks.x86_64-linux.maintenance-contracts` gets the seconds
+      # one and does not silently wait on a VM.
+      #
+      # Not added to `checks` automatically: a missing /dev/kvm would fail the
+      # flake check on machines that cannot run it. It is a normal output, named
+      # so it can be asked for explicitly:
+      #   nix build .#maintenance-vm
+    };
+
+    # The VM test, exposed as a top-level output.
+    maintenanceVm = import ./tests/maintenance-vm.nix {
+      inherit system;
+      pkgs = nixpkgs.legacyPackages.${system};
+      maintenanceModule = ./config/system/maintenance.nix;
+      maintenancePackage = nsMaintPackage;
+      testDir = ./.;
+    };
   };
 }

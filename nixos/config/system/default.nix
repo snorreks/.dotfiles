@@ -20,6 +20,10 @@
       ./security.nix
       ./mouse.nix
       ./server.nix
+      # Transactional, reboot-free OS updates. Installed on every host (see the
+      # module header for why); config/home/fish/default.nix decides which
+      # commands route through it.
+      ./maintenance.nix
       ./mobile-agents.nix # phone→herdr over Tailscale (gated on opts.mobileAgents.enable)
       ./services.nix
       ./ssh.nix

@@ -10,25 +10,67 @@
 #   --reboot           Reboot the machine — the reliable recovery for a GPU/system
 #                      hang. Authorized via polkit; falls back to a full sweep if
 #                      the reboot is not permitted.
+#   --server           Unattended-server targeting rules. Also enabled
+#                      automatically by NS_SERVER_MODE=1 in the environment, which
+#                      config/home/fish/default.nix sets on headless hosts.
+#                      See SERVER MODE below.
+#   --include-runtimes Server mode only. Also allow terminating bare shared
+#                      runtimes (node, bun, python, java, go, …). Off by default
+#                      because on a server those interpreters are how the
+#                      management processes themselves are running.
 #   --dry-run          Show what would be terminated (without killing anything).
 #
 # After the sweep the script scans the kernel log (journalctl -k / dmesg) for GPU/system
 # hang indicators (i915/NVIDIA/amdgpu hangs, Xid, soft lockups, RCU stalls, hung tasks)
 # and reports them — user-space kills cannot unwedge a hung GPU engine.
+#
+# ── SERVER MODE ──────────────────────────────────────────────────────────────
+# On a desktop this script kills your programs. On a box that is only ever
+# reached over a tailnet, "your programs" includes the things you get in
+# through: the multiplexer, the phone bridge, the local dashboard, the agent
+# jobs those are supervising, and the maintenance transaction that would
+# otherwise roll a bad activation back for you.
+#
+# The two rules that follow from that, applied in EVERY mode including --full:
+#
+#   1. MANAGEMENT PROCESSES ARE NEVER TARGETED. herdr, Collie, moshi-hook,
+#      sys-daemon, sshd, tailscaled, aged and the ns-maint helpers are excluded
+#      by name.
+#   2. NEITHER ARE THEIR DESCENDANTS. A job started by herdr is found by
+#      walking the parent chain, so an agent loop running under a multiplexer
+#      survives even when its own cmdline looks like a runaway.
+#
+# Plus one more in server mode:
+#
+#   3. BARE SHARED RUNTIMES ARE NOT TARGETED. "node", "bun", "python" match
+#      almost everything, including the management processes in rule 1 —
+#      Collie is a bun process. A bare `node` on a server is a workload whose
+#      identity this script cannot establish, so killing it is a guess. Use
+#      --include-runtimes when you have established it.
+#
+# Note what this does NOT do: it does not make --light safe to run blind. It
+# makes it impossible for it to take out the way back in.
 
 set -euo pipefail
 export LC_ALL=C
 
 MODE=""
 DRY=0
+# NS_SERVER_MODE is set by config/home/fish/default.nix on headless hosts, so the
+# rule follows the host's declared role instead of a flag somebody has to
+# remember to type while the machine is already misbehaving.
+SERVER="${NS_SERVER_MODE:-0}"
+INCLUDE_RUNTIMES=0
 
 usage() {
-  sed -n '2,13p' "$0"
+  sed -n '2,45p' "$0"
 }
 
 for arg in "$@"; do
   case "$arg" in
     --light | --full | --reboot) MODE="$arg" ;;
+    --server) SERVER=1 ;;
+    --include-runtimes) INCLUDE_RUNTIMES=1 ;;
     --dry-run | --dry) DRY=1 ;;
     --help | -h) usage && exit 0 ;;
     *)
@@ -39,6 +81,13 @@ for arg in "$@"; do
   esac
 done
 MODE="${MODE:---light}"
+
+if [[ "$SERVER" == "1" ]]; then
+  echo "kill-switch: SERVER MODE — management processes and their descendants are" >&2
+  echo "               never targeted; bare shared runtimes are only targeted with" >&2
+  [[ "$INCLUDE_RUNTIMES" -eq 1 ]] &&
+    echo "               --include-runtimes." >&2
+fi
 
 CUR_USER="$(id -un)"
 LOG_FILE="/tmp/kill-switch.log"
@@ -131,6 +180,101 @@ is_loop_prone() {
   return 1
 }
 
+# ── Management processes: never targeted, in ANY mode ────────────────────────
+#
+# These are how the box is reached and observed. Killing any of them from a
+# remote session turns "one process is misbehaving" into "the box is gone and
+# I do not know why", which is the worst outcome this script can produce.
+#
+# herdr and Collie are listed first because they are the ones that were
+# actually at risk: an agent job's cmdline frequently contains the project path
+# herdr was started from, and `aikami` (in LOOP_PRONE above) is itself how some
+# of these jobs are launched.
+MANAGEMENT_PATTERNS=(
+  "herdr" "collie" "moshi" "sys-daemon" "moshi-hook"
+  "sshd" "tailscaled" "tailscale" "aged" "ns-maint" "kill-switch"
+  "systemd --user" "systemd --machine"
+)
+
+# Only workload-owning supervisors confer protection on descendants. Session
+# roots still match MANAGEMENT_PATTERNS directly, but do not exempt their jobs.
+SUPERVISOR_PATTERNS=(
+  "herdr" "collie" "moshi" "sys-daemon" "moshi-hook"
+  "aged" "ns-maint" "kill-switch"
+)
+
+# ── Shared runtimes: interpreters, not workloads ─────────────────────────────
+#
+# `node`, `bun` and `python` are how Collie, moshi-hook and half the dashboard
+# are running. A bare match on one of those names is not evidence of a runaway
+# build; it is evidence that this script cannot tell a workload from the thing
+# providing access to the machine.
+SHARED_RUNTIME_PATTERNS=(
+  "node" "bun" "python" "python3" "deno" "java" "go " "dotnet" "ruby" "php" "perl"
+)
+
+is_management() {
+  local cmd="$1"
+  local pat
+  for pat in "${MANAGEMENT_PATTERNS[@]}"; do
+    [[ "$cmd" == *"$pat"* ]] && return 0
+  done
+  return 1
+}
+
+is_shared_runtime() {
+  local cmd="$1"
+  local pat
+  for pat in "${SHARED_RUNTIME_PATTERNS[@]}"; do
+    [[ "$cmd" == *"$pat"* ]] && return 0
+  done
+  return 1
+}
+
+# has_management_ancestor PID — is this process a descendant of a management
+# process?
+#
+# Matching on cmdline alone is not enough: an agent loop started by herdr runs as
+# `bun run watch` in a project directory, with no hint of herdr anywhere in its
+# own command line. Its parent chain has the answer. Walking the chain costs one
+# `ps` per generation and is the only thing here that understands "this process
+# belongs to someone else's supervision".
+has_management_ancestor() {
+  local pid="$1" hops=0 p cur pat
+  p="$pid"
+  while ((hops < 24)); do
+    cur="$(ps -o args= -p "$p" 2>/dev/null || true)"
+    [[ -n "$cur" ]] || return 1
+    for pat in "${SUPERVISOR_PATTERNS[@]}"; do
+      [[ "$cur" == *"$pat"* ]] && return 0
+    done
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d '[:space:]')"
+    [[ "$p" =~ ^[0-9]+$ ]] || return 1
+    ((p <= 1)) && return 1
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
+# should_protect PID CMD — the server-mode veto, in one place.
+should_protect() {
+  local pid="$1" cmd="$2"
+  is_management "$cmd" && return 0
+  if [[ "$SERVER" == "1" ]]; then
+    has_management_ancestor "$pid" && return 0
+    if [[ "$INCLUDE_RUNTIMES" -ne 1 ]] && is_shared_runtime "$cmd"; then
+      # A shared runtime that is ALSO matched by a specific workload pattern
+      # (vite, next, webpack, pytest, cargo, ...) is a runaway, not a mystery:
+      # the pattern is what makes it identifiable, so allow it.
+      case "$cmd" in
+      *vite* | *webpack* | *rollup* | *next* | *nuxt* | *turbo* | *" nx "* |         *esbuild* | *pytest* | *cargo* | *"go "* | *gradle* | *maven* |         *dotnet* | *npx* | *tsx* | *ts-node* | *typescript* | *rust-analyzer* | *target/debug/* | *target/release/* | *moon*) return 1 ;;
+      esac
+      return 0
+    fi
+  fi
+  return 1
+}
+
 # ── Protected PIDs: self + full ancestor chain ──────────────────────────────
 # Never kill our own launcher (terminal / shell / compositor spawn chain).
 declare -A PROTECTED=()
@@ -161,6 +305,13 @@ gather_targets() {
     [[ -n "$cmdline" ]] || continue
     [[ -n "${PROTECTED[$pid]:-}" ]] && continue
     [[ "$cmdline" == *"kill-switch"* ]] && continue
+    # The management veto runs BEFORE mode selection, so it applies to --full as
+    # well as --light. --full is exactly the case where "everything except the
+    # safelist" would otherwise sweep up the multiplexer and the phone bridge.
+    if should_protect "$pid" "$cmdline"; then
+      SKIPPED=$((SKIPPED + 1))
+      continue
+    fi
     if [[ "$mode" == "light" ]]; then
       is_gui_app "$cmdline" && continue
       is_loop_prone "$cmdline" || continue
@@ -306,6 +457,21 @@ if [[ "$MODE" == "--reboot" ]]; then
   fi
   log "reboot not authorized — falling back to full sweep."
   notify "Reboot not authorized — killing all user processes. Power off manually if still frozen."
+  if [[ "$SERVER" == "1" ]]; then
+    # A full sweep on an unattended box means every agent job, the
+    # multiplexer's own children and anything else the operator had running —
+    # to rescue a machine that is already unreachable. Not a trade worth making
+    # silently. The management veto in should_protect still applies if you run
+    # --full by hand, so this is about the WORKLOADS, not the access paths.
+    log "server mode: NOT falling back to a full sweep. The reboot was refused;"
+    log "server mode: killing every workload instead would destroy unattended work"
+    log "server mode: and still would not unwedge a hung kernel."
+    echo "kill-switch: server mode — reboot was not authorized, so nothing was killed." >&2
+    echo "               A full sweep here would end every running agent job and" >&2
+    echo "               would not fix a GPU/kernel hang anyway. Read the log, then" >&2
+    echo "               decide: ns-maint status, or a deliberate 'kill-switch --full'." >&2
+    exit 1
+  fi
   do_sweep "full"
   pkill -9 -u "$CUR_USER" -f "zen|firefox|chrome|chromium" 2>/dev/null || true
   exit 1
@@ -313,8 +479,10 @@ fi
 
 do_sweep "$SWEEP_MODE"
 
-# Cleanup sweep for browser crash-handler subprocesses (--full only).
-if [[ "$SWEEP_MODE" == "full" ]]; then
+# Cleanup sweep for browser crash-handler subprocesses (--full only, desktop
+# only). A browser is not a runaway on a headless box, and killing one here
+# would take out whichever agent happens to be driving it.
+if [[ "$SWEEP_MODE" == "full" && "$SERVER" != "1" ]]; then
   pkill -9 -u "$CUR_USER" -f "zen|firefox|chrome|chromium" 2>/dev/null || true
 fi
 
@@ -358,6 +526,7 @@ if [[ "$MODE" == "--light" ]]; then
   log "done: $_msg"
 else
   _msg="Full kill: ${#KILLED[@]} process(es) (preserved ${SKIPPED} essential)"
+  [[ "$SERVER" == "1" ]] && _msg="$_msg [server mode: management processes and their descendants were never targets]"
   if [[ -n "$HANG_LINES" && "$HANG_LINES" != "unavailable" ]]; then
     _msg="$_msg. ⚠ GPU hang detected — screen may stay frozen; run kill-switch --reboot."
   fi

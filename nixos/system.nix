@@ -64,10 +64,18 @@
     };
   };
 
+  # programs.nh.clean used to delete old system generations
+  # (`nix-collect-garbage -d`) on a schedule nobody chose and on a machine that
+  # may not be at a keyboard. Deleting a generation deletes a recovery target,
+  # and on an unattended host "which generation did we come up from, and can I
+  # go back to it" is a question you want to still be able to answer. Retention
+  # is now explicit (`ns-maint gc --keep N`, which never passes -d) and the
+  # closures that actually matter — the booted one, the running one, and a
+  # prepared-but-unactivated candidate — are pinned with GC roots by
+  # config/system/maintenance.nix, which survive collection regardless of how
+  # many generations are kept.
   programs.nh = {
     enable = true;
-    clean.enable = true;
-    clean.extraArgs = "--keep-since 4d --keep 3";
     flake = "${opts.flakeDir}";
   };
 

@@ -112,53 +112,224 @@ Off carpet, with clearance around the intakes. The lid can be shut — logind
 ignores it in headless mode — but a stand that keeps the vents clear is better
 than a laptop lying flat on a shelf collecting basement dust for half a year.
 
-## Rebuilding it remotely
+## Updating it remotely
 
-`nixos-rebuild switch` does **not** drop an existing SSH session, so ordinary
-updates are unremarkable. Two rules make them safe anyway.
+There are **four separate operations**, and the words that do them are
+deliberately four different words. This replaces the old `nswitch-safe` wrapper,
+which collapsed all four into one command that armed a dead-man timer *before*
+building and rolled back with `systemctl reboot` — so a slow build rebooted the
+server, and a failed activation was treated as proof that nothing had changed.
 
-### Always work inside a multiplexer
+`ns-maint` implements the transaction. It is in `config/system/maintenance.nix`;
+its header comment explains the reasoning, and `docs/headless-server.md` is only
+the operator's side of it.
 
-A rebuild killed halfway by a dropped connection is its own failure mode, and
-the one most likely to happen on hotel Wi-Fi. `tmux` is installed on headless
-hosts for exactly this, and `nswitch-safe` refuses to run outside one.
+| Operation | Command | Arms a deadline | Activates | Reboots |
+|---|---|---|---|---|
+| Update inputs | `ns-maint prepare --update-input nixpkgs` | no | no | no |
+| Build | `ns-maint prepare` | **no** | no | no |
+| Apply live | `ns-maint activate` | yes, immediately before mutation | yes | no |
+| Confirm | `ns-maint confirm <txid>` | disarms | no | no |
+| Stage a reboot | `ns-maint stage` | no | no | no |
+| Reboot | `ns-maint reboot --yes` | no | no | **yes** |
 
-### Use `nswitch-safe` for anything that touches networking
+### Why the build is a separate command
+
+`prepare` builds the exact closure for the selected host and pins it with a GC
+root. It arms nothing, records no recovery state, and starts no unit — so there
+is no deadline that can fire while a build is running. A build that takes six
+hours causes zero activation and zero rollback, by construction rather than by
+luck.
+
+If a build fails, `prepare` says so and stops. The running system is untouched.
+
+Input updates are separate and explicit. `--update-all` is **refused**: on a
+machine that is your only way in, an unreviewed all-input bump is exactly the
+failure this exists to prevent.
 
 ```console
 ssh legion
-tmux new -s rebuild
-nswitch-safe
+sudo ns-maint prepare --update-input nixpkgs   # rewrites nixos/flake.lock
+git -C ~/.dotfiles diff nixos/flake.lock        # review it before going further
+sudo ns-maint prepare
 ```
 
-This arms a dead man's switch before rebuilding: if `nswitch-confirm` has not
-run within 20 minutes (`ROLLBACK_TIMEOUT` to change), the machine reverts to the
-generation it was on and reboots into it. The timer is a transient _system_
-unit, so it outlives the SSH session that armed it — which is the whole point.
-
-After the rebuild returns, **open a second SSH session** to verify you can still
-get in. Do not trust the one you are holding: an already-established TCP
-connection survives plenty of configurations that would refuse a new one.
+### Applying it, and what "armed" means
 
 ```console
-nswitch-confirm    # disarms; this generation is now permanent
+sudo ns-maint status            # read this first
+sudo ns-maint activate --timeout 20m
 ```
 
-If the rebuild itself fails, no new generation was created, so `nswitch-safe`
-disarms automatically — there is nothing to revert.
+`activate` does four things, in this order:
 
-An autonomous "is the internet up?" watchdog was considered and rejected. It
-cannot tell a config mistake from the parents' ISP having a bad afternoon, so it
-reboots the machine for problems a rollback will not fix. The dead man's switch
-arms only across the window where _you_ changed something, which is when the
-risk actually exists.
+1. reads and records the old running closure, the profile and boot intent, the
+   **booted** closure, the candidate, the transaction id and the deadline —
+   atomically, into a root-owned record;
+2. pins the recovery closure and the booted closure with GC roots, so a
+   collection during the window cannot remove the way back;
+3. refuses if the candidate carries a **different kernel** than the running
+   closure (see "Kernel and driver changes" below);
+4. only then arms the deadline, and hands activation to a transient **system**
+   service — so a dropped SSH connection cannot kill it half-way.
 
-### Manual rollback
+Activation does not need a multiplexer any more. `tmux` is still installed,
+because watching a build scroll for an hour in a bare session is unpleasant,
+but nothing depends on it.
 
-`nixos-rollback-to <generation>` does the same thing on demand — switch the
-profile, write the bootloader entry with `switch-to-configuration boot` (not
-`switch`, since the running generation may be the one with broken networking),
-and reboot.
+### Confirming properly
+
+```console
+sudo ns-maint status        # copy the txid
+```
+
+Then, **from a different connection**:
+
+```console
+ssh legion                   # a NEW session, not the one the activate ran in
+sudo ns-maint confirm tx-20261003T120000Z-a1b2c3
+```
+
+`confirm` checks three things and refuses if any fails:
+
+- **the transaction id matches.** A confirmation for an older update cannot
+  bless a newer one. This is the whole point of printing the id.
+- **local health evidence**: the profile resolves to the candidate,
+  `/run/current-system` is the candidate, and `systemctl --failed` is empty. The
+  evidence is stored in the record, so a later reader can see what was true when
+  you said yes.
+- **a NEW connection was accepted by sshd since the switch was armed.** It reads
+  `SSH_CONNECTION` to identify your peer, then asks the sshd journal whether a
+  session from that peer was accepted *after* the arming time. A socket that was
+  already open when the network unit was rewritten proves nothing about whether
+  a fresh client can get in — that is the check the old workflow was missing.
+
+From a local console there is no `SSH_CONNECTION`; pass
+`--assume-new-connection` once you have actually checked reachability from
+another device. The record notes that the evidence was asserted rather than
+verified.
+
+### When nothing is confirmed
+
+A persistent systemd timer runs `ns-maint tick` every 30 seconds. If the
+deadline passes with the transaction still pending, it restores the old closure
+**live**:
+
+1. `switch-to-configuration switch` on the old closure — runtime, profile and
+   boot entry together;
+2. if that fails, `switch-to-configuration boot` on the old closure, so the next
+   ordinary boot is known-good, and the record is marked `restore-failed` with
+   the reason.
+
+**Nothing reboots.** Not on timeout, not on failure, not as a fallback. The
+previous implementation's rollback was `systemctl reboot`, which on this machine
+means killing every running agent and stream.
+
+Read the result plainly:
+
+```console
+sudo ns-maint status
+```
+
+- `phase=restored` — the old closure is live again.
+- `phase=restore-failed` — **this is an outage, not a warning.** The runtime may
+  be a mixture of two closures. Check what is actually running:
+
+  ```console
+  readlink -f /run/current-system
+  readlink -f /run/booted-system
+  readlink /nix/var/nix/profiles/system
+  bootctl list
+  ```
+
+### A failed activation is not "nothing happened"
+
+`nh os switch` activates with `switch-to-configuration test` before it moves the
+profile. So a failure can leave **live units reconfigured and the profile
+unchanged**. The old wrapper read that as "no new generation exists, nothing to
+revert" and disarmed its rollback — on exactly the case that needed one.
+
+`ns-maint` never infers safety from the profile. A nonzero activation restores,
+whatever the profile says. `restore_result` in the record says whether that
+succeeded.
+
+### Cold boots and the persistent record
+
+The record outlives reboots; a transient timer does not. `ns-maint-reconcile`
+runs once at boot and classifies whatever it finds:
+
+| Situation | Result | What it does |
+|---|---|---|
+| Booted into the candidate | `reconciled-booted` | Clears the deadline. Nothing restored; needs an explicit confirm. |
+| Booted on the old closure | `reconciled-not-applied` | Clears the deadline. **Nothing is retried.** |
+| Was restoring, came back on the old closure | `restored` | Records `restored-by-reboot`. |
+| Was restoring, came back on neither | `restore-failed` | Says so. |
+
+Reconcile never arms anything, never activates and never reboots. That is what
+makes a restore/reboot/restore loop impossible: if it re-armed on boot, a machine
+that fails to restore would boot, re-arm, restore, fail, and reboot forever.
+
+To retry a candidate that was not applied, start a new transaction:
+
+```console
+sudo ns-maint activate
+```
+
+### Kernel and driver changes
+
+A live switch **cannot load a new kernel**. `ns-maint activate` therefore
+compares the kernel module trees of the candidate and the running closure and
+**refuses** if they differ, pointing at staging instead. This is not caution:
+activating userspace that expects different kernel modules is what produces
+`nvidia-smi: Driver/library version mismatch`, and a live rollback cannot fix it
+because the kernel is still the old one.
+
+```console
+sudo ns-maint prepare
+sudo ns-maint stage          # boot entry written, nothing switched live
+sudo bootctl list            # confirm the entry exists
+sudo ns-maint reboot --yes   # the ONLY reboot, and only when you chose it
+```
+
+Read `.pi/skills/nixos-kernel-bump/SKILL.md` for the full procedure. Short
+version: on this machine a reboot needs a window in which you have a second way
+in, and if you do not, stage the kernel and defer it. Applying userspace updates
+without rebooting is safe; rebooting is the part that needs a plan.
+
+### Verifying the installation
+
+`ns-maint-verify` runs at every boot and checks the properties the rest of the
+tool assumes — most importantly that `/var/lib/nixos/maintenance` is root-owned
+and not group/other-writable. A non-root caller that could write the record could
+forge a transaction and make root activate something.
+
+```console
+sudo ns-maint verify-installation
+systemctl status ns-maint-verify ns-maint-reconcile ns-maint-deadline.timer
+```
+
+### Recovery closures and garbage collection
+
+Recovery generations are not enough: a daemon can be running from a closure that
+no generation points at any more. `ns-maint` pins the booted closure, the
+running closure and any prepared candidate with explicit GC roots, so they
+survive collection regardless of how many generations are kept.
+
+```console
+sudo ns-maint roots        # what is pinned, and what it points at
+sudo ns-maint gc --keep 3  # collection, and NEVER -d
+```
+
+`-d` deletes generations. That is the old `ngc -d` alias and the old
+`programs.nh.clean` timer, both removed: deleting a generation deletes a way
+back, and on an unattended box "can I go back to the last known-good system" has
+to keep working.
+
+### Pinned recovery closures are not a backup
+
+These roots protect against *collection*, not against a disk failure, and they
+say nothing about application data. Database migrations, agent conversations and
+media databases do not roll back when you roll back OS packages.
 
 ## Never start the Proton VPN on it
 

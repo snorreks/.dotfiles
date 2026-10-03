@@ -1,9 +1,18 @@
 # nixos/config/home/fish/default.nix
 {
   pkgs,
+  lib,
   opts,
   ...
-}: {
+}: let
+  # This host is an always-on box reached only over the tailnet.
+  #
+  # The distinction matters here and nowhere else: on a desktop you are standing
+  # in front of the machine, so `nh os switch` is the right verb and its extra
+  # conveniences cost you nothing. On a server the same verb means "update every
+  # flake input and apply it, unreviewed, to something nobody is sitting at".
+  serverHost = opts.headless;
+in {
   home.file = {
     # Copy all function files from ./functions to ~/.config/fish/functions
     ".config/fish/functions" = {
@@ -31,52 +40,91 @@
   programs.fish = {
     enable = true;
 
-    shellAliases = {
-      # ls = "lsd";
-      l = "ls -l";
-      # la = "ls -a";
-      # lla = "ls -la";
-      # lt = "ls --tree";
-      ltt = "ls --tree -d";
-      cl = "clear";
-      lgit = "lazygit";
-      ldocker = "lazydocker";
-      conf = "z ~/.config";
-      nixos = "z ~/dotfiles/nixos";
-      store = "z /nix/store";
-      discord = "z ~/.dotfiles/nixos/config/home/discord";
-      # Default offline build — ollama-cuda only if host enables it (options.nix)
-      nswitch = "nh os switch ~/.dotfiles/nixos --offline -- --extra-experimental-features flakes --extra-experimental-features nix-command";
-      nswitcho = "nh os switch ~/.dotfiles/nixos -- --extra-experimental-features flakes --extra-experimental-features nix-command";
-      # Update all flake inputs + switch (ollama-cuda only if host enables it)
-      nswitchu = "nh os switch ~/.dotfiles/nixos --update -- --extra-experimental-features flakes --extra-experimental-features nix-command";
-      # Fast build WITHOUT ollama-cuda (targets whichever host you're on)
-      nswitch-fast = "nh os switch ~/.dotfiles/nixos#(hostname)-fast -- --extra-experimental-features flakes --extra-experimental-features nix-command";
-      portcheck = "toggle-dev-ports";
-      hm = "home-manager switch";
-      nau = "sudo nix-channel --add https://nixos.org/channels/nixos-unstable nixos";
-      nsgc = "sudo nix-store --gc";
-      ngc = "sudo nix-collect-garbage -d";
-      # Reclaim disk: caches, stale /tmp, containers, nix. `dcdeep` also drops
-      # all unused container images + volumes (re-pullable, but large).
-      dclean = "disk-cleanup";
-      dcdeep = "disk-cleanup --deep";
-      reboot = "systemctl reboot";
-      poweroff = "systemctl poweroff";
-      # y = "yazi";
-      a = "ani-cli";
-      brightnessctl = "brightnessctl -d intel_backlight";
-      fetch = "fastfetch -l none";
-      # ssh alias removed — Foot supports OSC 52 clipboard natively over SSH
+    # `lib.optionalAttrs` rather than `lib.mkIf`: shellAliases is a plain
+    # attrsOf, and mkIf inside a nested attrset is NOT unwrapped by the module
+    # system — it would leave the alias defined with the value `false`.
+    shellAliases =
+      {
+        # ls = "lsd";
+        l = "ls -l";
+        # la = "ls -a";
+        # lla = "ls -la";
+        # lt = "ls --tree";
+        ltt = "ls --tree -d";
+        cl = "clear";
+        lgit = "lazygit";
+        ldocker = "lazydocker";
+        conf = "z ~/.config";
+        nixos = "z ~/dotfiles/nixos";
+        store = "z /nix/store";
+        discord = "z ~/.dotfiles/nixos/config/home/discord";
 
-      fuck = "f";
-      cu = "claude_usage";
-      pi-update = "cd $HOME/.pi; and bun run update; and cd -";
+        # ── OS updates ─────────────────────────────────────────────────────────
+        #
+        # On a DESKTOP host these are unchanged: `nh os switch` against the flake,
+        # exactly as before. On a headless host they are NOT emitted at all — fish
+        # resolves an alias before a function of the same name, so leaving the
+        # alias in place here would silently win over the guarded functions
+        # defined further down. The server variants are deliberately explicit
+        # about which of the four operations they perform (build / activate /
+        # update inputs / stage a reboot) rather than collapsing them into one
+        # word that does all four.
+        # ── Garbage collection ─────────────────────────────────────────────────
+        #
+        # The old value was `nix-collect-garbage -d`. `-d` is "also delete
+        # generations", and a deleted generation is a deleted way back: on a box
+        # with no operator, "go back to the last known-good system" has to keep
+        # working. Retention and generation deletion are now separate decisions,
+        # and the second one is made by a human on purpose.
+        #
+        # On a server this goes through ns-maint gc, which also prints what is
+        # currently pinned against collection. It never passes -d.
+        nsgc = "sudo nix-collect-garbage";
+        # Read-only, so no sudo prompt surprises in the middle of a rebuild.
+        nmroots = "ns-maint roots";
+        portcheck = "toggle-dev-ports";
+        hm = "home-manager switch";
+        nau = "sudo nix-channel --add https://nixos.org/channels/nixos-unstable nixos";
+        nac = "ani-cli";
+        brightnessctl = "brightnessctl -d intel_backlight";
+        # Reclaim disk: caches, and a REPORT of what is reclaimable.
+        # `dcdeep` additionally drops unused container images (re-pullable, but
+        # large) and editor/agent caches. It no longer deletes generations,
+        # volumes, worktrees or /tmp entries by age — see disk-cleanup.sh for
+        # which of those now need a human and why.
+        dclean = "disk-cleanup";
+        dcdeep = "disk-cleanup --deep";
+        reboot = "systemctl reboot";
+        poweroff = "systemctl poweroff";
+        # y = "yazi";
+        fetch = "fastfetch -l none";
+        # ssh alias removed — Foot supports OSC 52 clipboard natively over SSH
 
-      where = "curl -s https://ipinfo.io/json | grep -E '\"ip\":|\"country\":|\"city\":'";
+        fuck = "f";
+        cu = "claude_usage";
+        pi-update = "cd $HOME/.pi; and bun run update; and cd -";
 
-      c = "pyroclear";
-    };
+        where = "curl -s https://ipinfo.io/json | grep -E '\"ip\":|\"country\":|\"city\":'";
+
+        c = "pyroclear";
+      }
+      // (lib.optionalAttrs serverHost {
+        # ── Server OS updates ────────────────────────────────────────────────
+        # These are the guarded fish FUNCTIONS defined in interactiveShellInit
+        # below, not aliases — but the alias entries still have to be absent,
+        # because fish expands an alias before it looks up a function of the
+        # same name. See there for what each one refuses to do.
+        nmstatus = "sudo ns-maint status";
+        nmabort = "sudo ns-maint abort";
+      })
+      // (lib.optionalAttrs (!serverHost) {
+        # Desktop hosts keep the exact commands they have always had.
+        nswitch = "nh os switch ~/.dotfiles/nixos --offline -- --extra-experimental-features flakes --extra-experimental-features nix-command";
+        nswitcho = "nh os switch ~/.dotfiles/nixos -- --extra-experimental-features flakes --extra-experimental-features nix-command";
+        nswitchu = "nh os switch ~/.dotfiles/nixos --update -- --extra-experimental-features flakes --extra-experimental-features nix-command";
+        nswitch-fast = "nh os switch ~/.dotfiles/nixos#(hostname)-fast -- --extra-experimental-features flakes --extra-experimental-features nix-command";
+        ngc = "sudo nix-collect-garbage";
+      });
 
     shellAbbrs = {
       ".." = "cd ..";
@@ -110,6 +158,91 @@
       end
 
       set fish_greeting # Disable greeting
+      ${lib.optionalString serverHost ''        # ── Server OS updates ───────────────────────────────────────────────
+        #
+        # On a host nobody is sitting at, the desktop one-liners
+        # (`nh os switch [--update]`, `nh os switch #host-fast`) hide three
+        # decisions that must not be made implicitly:
+        #
+        #   1. "--update" moves EVERY flake input. Unreviewed, on the machine
+        #      that is your only way in.
+        #   2. "switch" activates. The old nswitch-safe armed a dead-man timer
+        #      BEFORE building and rolled back with `systemctl reboot`, so a slow
+        #      build rebooted the server and a failed activation was assumed to
+        #      have changed nothing. See config/system/maintenance.nix.
+        #   3. '#host-fast' is not a faster host, it is a host WITHOUT
+        #      ollama-cuda. Activating it removes Ollama from the running
+        #      system, including the models resident in the 4090's VRAM.
+        #
+        # So each verb here names exactly one step. Nothing here reboots; the
+        # only reboot is `ns-maint reboot --yes`, a separate command on purpose.
+        #
+        # Published so the emergency scripts can tell they are on an unattended
+        # host without having to be told on the command line while the machine
+        # is already misbehaving. kill-switch.sh reads it (management processes
+        # and their descendants are never targets, bare shared runtimes are not
+        # either); kill-switch-cleanup.sh reads it (dropping the page cache and
+        # cycling swap make a remote box briefly LESS responsive, so it refuses).
+        set -gx NS_SERVER_MODE 1
+
+        # NOTE on quoting: the messages below use single-quoted fish strings.
+        # Double quotes work too, but every backslash would then have to be
+        # doubled to survive both Nix and fish, which is exactly where this went
+        # wrong once already.
+        function nswitch --description 'build, then activate the OS as a guarded no-reboot transaction'
+            if test (count $argv) -gt 0
+                echo 'nswitch: no arguments on this host.' >&2
+                echo '         build only:   ns-maint prepare' >&2
+                echo '         activate:     ns-maint activate' >&2
+                return 1
+            end
+            # Build first, offline from what is already fetched. This step arms
+            # nothing: there is no deadline that can fire during it, so however
+            # long it takes, the result is zero activation and zero rollback.
+            sudo ns-maint prepare --offline; or return $status
+            # Only now arm the deadline and hand activation to a system service.
+            sudo ns-maint activate --timeout 20m
+        end
+
+        function nswitcho --description 'same as nswitch, but allows fetching from the network'
+            sudo ns-maint prepare; or return $status
+            sudo ns-maint activate --timeout 20m
+        end
+
+        function nswitchu --description 'update exactly ONE named flake input, then build and activate'
+            if test (count $argv) -eq 0
+                echo 'nswitchu no longer means "--update every input and switch".' >&2
+                echo 'It means "update the one input you are about to review".' >&2
+                echo >&2
+                echo '  nswitchu nixpkgs        # update that input, rebuild, activate' >&2
+                echo >&2
+                echo 'It rewrites nixos/flake.lock, so review that diff before you' >&2
+                echo 'confirm the transaction. Moving the whole input set in one' >&2
+                echo 'unreviewed step is the failure this host cannot recover from.' >&2
+                return 1
+            end
+            sudo ns-maint prepare --update-input $argv[1]; or return $status
+            sudo ns-maint activate --timeout 20m
+        end
+
+        function nswitch-fast --description 'PREPARE the ollama-free output; activation is a separate, explicit step'
+            set -l out (hostname)-fast
+            echo "nswitch-fast builds the flake output '$out', which is this host" >&2
+            echo 'WITHOUT ollama-cuda. That is the only difference from the default' >&2
+            echo "output, and it is a real one: activating $out REMOVES ollama" >&2
+            echo 'and the models resident in the GPU memory.' >&2
+            echo >&2
+            echo 'This command only PREPARES it. Nothing is activated, and nothing is' >&2
+            echo 'rolled back, until you run ns-maint activate yourself.' >&2
+            if not set -q NS_MAINT_ALLOW_FAST
+                echo >&2
+                echo 'Not doing it. If you have actually weighed that:' >&2
+                echo '  set -gx NS_MAINT_ALLOW_FAST 1; nswitch-fast' >&2
+                return 1
+            end
+            sudo ns-maint prepare --output $out --tag $out
+        end
+      ''}
       if status is-interactive
           # Dynamic theme: prefer the runtime-rendered starship config
           # (wallpaper colors), fall back to the HM-managed static one.
