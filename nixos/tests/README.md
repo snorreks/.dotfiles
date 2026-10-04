@@ -10,18 +10,101 @@ reboots anything.
 ```console
 nix build ./nixos#checks.x86_64-linux.maintenance-contracts   # fast, seconds
 nix build ./nixos#checks.x86_64-linux.agent-operations        # credentials, lifetime, daemon roots, health, backup
-nix build ./nixos#maintenanceVm                             # VM, needs KVM
-nix flake check ./nixos                                      # runs the fast ones
+nix build ./nixos#checks.x86_64-linux.media-travel            # media namespace/travel state
+nix build ./nixos#checks.x86_64-linux.repo-contracts-shells   # registry tests, update_dotfiles scope, repo-wide lint
+nix build ./nixos#checks.x86_64-linux.repo-contracts          # sys-daemon HTTP admission + process-kill tests
+nix build ./nixos#maintenanceVm                               # VM, needs KVM
+nix flake check ./nixos                                        # runs the fast ones
 ```
 
 Or, while editing, without nix:
 
 ```console
-bash nixos/tests/run.sh                            # lint + every shell suite
+bash nixos/tests/run.sh                            # lint + every registered suite
 bash nixos/tests/ns-maint-transaction.sh           # one suite, standalone
 bash nixos/tests/agent-operations/run.sh           # the agent-operations lane
 bash nixos/tests/agent-operations/daemon-roots.sh  # one lane suite, standalone
 ```
+
+## The registry, and why it exists
+
+`tests/run.sh` does not keep its own list of suites. It reads
+`tests/registry.tsv`, which declares every suite as
+`lane | path | scope | kind`.
+
+The reason is a specific, already-happened failure. The `agent-operations`
+lane landed with its own `run.sh`, that runner was never added to the
+top-level list, and so its suites did not run — while the runner still
+printed **all checks passed**. A check registered nowhere cannot report that
+it was skipped.
+
+So discovery is inverted. Every suite under `tests/` must be reachable — either
+registered directly, or inside a directory owned by a registered lane
+entry point. One that is not is a **failure**, not an omission. Adding a suite
+and forgetting to register it cannot produce a green run.
+
+`tests/check-registry.sh` tests this claim rather than asserting it: it adds a
+fixture suite and watches the failure propagate, adds an unregistered suite and
+watches the run go red, and asserts that a suite which was skipped is never
+reported as one that passed.
+
+### Scopes
+
+| Scope | Meaning | Skippable? |
+|---|---|---|
+| `fast` | Pure bash/cargo. No nix, no privileges. Seconds. | No |
+| `eval` | Evaluates configurations with `nix`. | Only in a sandbox |
+| `kvm` | Builds a NixOS system and boots it. | Never in `run.sh` |
+
+**A check that did not run is never reported as a check that passed.**
+`NM_REQUIRE_ALL` defaults to `1`: a suite that cannot run fails the run. Set
+`NM_REQUIRE_ALL=0` to allow a skip — the skip stays loud and is counted in the
+summary, and the summary then says "passed with N declared skip(s)" rather than
+claiming an unqualified pass.
+
+## Known failures on master (not introduced by this work)
+
+Both of these fail on a pristine `master` checkout and are **not** fixed here,
+because both live in lanes owned by other PRs:
+
+1. **`media-travel`** — `state-restore.sh` cannot find `sqlite3`. The flake
+   input is `sqlite`, but in the pinned nixpkgs its `outPath` resolves to the
+   main output rather than the `-bin` split, so the binary is neither on PATH
+   nor visible to the suite's store scan.
+2. **`server-foundation/host-eval.sh`** — 24 assertions fail. `hostPolicy.role`
+   evaluates correctly, but `networking.networkmanager.wifi.macAddress` and
+   `nix.settings.trusted-users` do not evaluate on this nixpkgs revision.
+
+Both stay registered, so they fail loudly rather than disappearing.
+
+## What is not automated
+
+Manual hardware drills. These are real procedures with no automated form, and
+they are listed here so their absence is on the record rather than assumed:
+
+- kernel bump after an NVIDIA driver/library mismatch, and the reboot-free
+  staged-boot path in `ns-maint`
+- GPU hang recovery (`kill-switch`, kernel-log triage)
+- rollback of a bad activation on real hardware
+
+Run these on the machine. CI is not a substitute.
+
+## Continuous integration
+
+`.github/workflows/fast-checks.yml` runs the fast lane on every push and pull
+request. Actions are enabled on this repository, so it does run — the earlier
+"no CI, because a workflow that never runs is worse than none" note applied to
+a repository where that was true, and no longer is.
+
+Every action is pinned to a commit SHA, and every tool comes from the flake's
+own locked nixpkgs through `nix build`, so a run today and a run in six months
+use the same shellcheck, fish and cargo. `permissions: contents: read`. No
+secrets are used or needed.
+
+Host evaluation and the VM test are **excluded from CI on purpose**, and the
+workflow says so in its own header: wiring a known-failing suite into CI
+produces a permanently red badge, which gets ignored. Those two exclusions are
+the ones listed above.
 
 ## Per-lane directories
 
@@ -197,3 +280,47 @@ evaluates the hosts did not run" cannot be a green result.
 - The test VM's driver script is **Python**. A bare shell line like
   `ns-maint status` does not parse, and the type checker reports it as an
   unrelated storm of "name not defined" errors.
+## The dev-ports dashboard (`sys-daemon serve`)
+
+Binds `127.0.0.1:3333` and exposes one mutating endpoint, `POST /api/kill`.
+
+A loopback bind stops other *machines* connecting. It stops nothing on this
+one: every local process can reach it, and so can the user's browser, because a
+page the browser loads runs with the user's privileges and can issue requests
+to loopback addresses. Two shapes turn that into "any page the user visits can
+terminate processes":
+
+- **DNS rebinding.** Attacker DNS returns `127.0.0.1` for `evil.example`. The
+  browser now believes it is talking to `evil.example`, sends
+  `Host: evil.example`, and nothing about the request looks cross-origin — so
+  browser-side protections do not engage. The defence is validating `Host`
+  against the authorities actually served. This is the load-bearing check.
+- **CSRF.** A page on any origin can POST to the dashboard. Defended by an
+  exact-match `Origin` check and a per-run token minted from `/dev/urandom`,
+  delivered only over a request that already passed the `Host` check.
+
+Reads (`/`, `/api/status`, `/api/stream`) are held to the `Host` rule alone —
+they expose the project and port map, but cannot change anything, and requiring
+a token for them would break `curl` on the command line.
+
+`POST /api/kill` additionally validates, in `killsafe.rs`:
+
+- **UID** — only processes owned by the daemon's own user are signalled.
+- **Identity** — a pidfd opened at *discovery* time, so PID reuse cannot
+  redirect the signal. Opening it at signal time would look like the same
+  protection and would not be: a pidfd opened after a reuse pins whatever now
+  holds the number. Where the kernel has no pidfd, a start-time comparison is
+  the fallback, and the result reports which path was used rather than
+  presenting them as equivalent.
+- **Protected targets** — the dashboard's own port (tracked by identity, so it
+  stays protected if moved), sshd, tailscaled's ports, and the herdr / collie /
+  moshi-hook / sys-daemon process names. A refusal is all-or-nothing: if one
+  process on a port is protected, nothing on that port is killed.
+
+`tests/api_negative.rs`, `tests/kill_safety.rs` and `tests/config_metadata.rs`
+cover this. They drive the pure decision functions and disposable child
+processes, so they never bind a port, never signal a process they did not
+spawn, and never talk to a running daemon. The kill-safety suite is
+deliberately single-threaded and capped with `ulimit -v`, so that a runaway
+allocation in test code aborts one process instead of triggering the kernel OOM
+killer on the host.

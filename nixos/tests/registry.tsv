@@ -1,0 +1,47 @@
+# nixos/tests/registry.tsv — every suite this repository can run, declared.
+#
+# WHY A FILE INSTEAD OF AN ARRAY IN run.sh
+#
+# Three lists had to be kept in step by hand: the suites to run, the files to
+# shellcheck, and the nix flake outputs. They drifted. The clearest drift was
+# silent: the agent-operations lane landed with its own run.sh, that run.sh was
+# never added to the top-level list, and so its suites simply did not run —
+# while the overall runner still printed "all checks passed". A check that is
+# registered nowhere cannot report that it was skipped.
+#
+# So registration is data, and discovery checks it. Every executable suite
+# under tests/ must appear here; one that does not is a FAILURE, not an
+# omission. That inverts the default: the safe state is a loud error, and
+# adding a suite without registering it cannot pass.
+#
+# COLUMNS (tab-separated):
+#   lane      which PR/area owns this suite; the lane is the unit of ownership
+#   path      relative to nixos/ (the flake root), e.g. tests/... or config/...
+#   scope     fast   pure bash / cargo, no nix, no privileges, < ~10s
+#             eval   needs `nix` to evaluate configurations
+#             kvm    needs KVM and a full NixOS build; NOT run by run.sh
+#   kind      shell  a standalone bash suite
+#             lane   a run.sh that aggregates its own sub-suites
+#             cargo  a crate whose `cargo test` is the suite
+#
+# `kvm` is declared but never executed by run.sh. It is listed so that
+# maintenance-vm.nix is accounted for somewhere and cannot quietly vanish from
+# the picture; it is run with `nix build`, and run.sh says so when asked.
+
+maintenance	tests/ns-maint-transaction.sh	fast	shell
+maintenance	tests/kill-switch-targets.sh	fast	shell
+maintenance	tests/disk-cleanup-safety.sh	fast	shell
+
+server-foundation	tests/server-foundation/role-policy.sh	eval	shell
+server-foundation	tests/server-foundation/boot-health.sh	fast	shell
+server-foundation	tests/server-foundation/tailscale-reconcile.sh	fast	shell
+server-foundation	tests/server-foundation/ssh-confirm.sh	fast	shell
+server-foundation	tests/server-foundation/host-eval.sh	eval	shell
+
+media-travel	tests/media-travel/run.sh	eval	lane
+
+agent-operations	tests/agent-operations/run.sh	eval	lane
+
+repo-contracts	tests/update-dotfiles-scope.sh	fast	shell
+repo-contracts	config/home/sys-daemon	fast	cargo
+repo-contracts	tests/check-registry.sh	fast	shell

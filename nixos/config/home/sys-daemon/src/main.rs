@@ -28,17 +28,9 @@
 //! than suspending blindly, since seat idle says nothing about whether a
 //! herdr agent or a download is still active. See `idle.rs`.
 
-mod config;
-mod http;
-mod idle;
-mod light;
-mod ports;
-mod power;
-mod tomato;
-mod vpn;
-mod waybar;
-
 use std::env;
+
+use sys_daemon::{http, idle, light, ports, power, tomato, vpn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

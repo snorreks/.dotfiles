@@ -609,6 +609,171 @@
       # flake check on machines that cannot run it. It is a normal output, named
       # so it can be asked for explicitly:
       #   nix build .#maintenance-vm
+
+      # ── repo-contracts ──────────────────────────────────────────────────
+      #
+      # Registration only. Host construction above this point is untouched: no
+      # `mkHost` change, no import change, no option change. This adds one
+      # output so the checks this lane owns can be asked for by name, the same
+      # way each other lane has its own output.
+      #
+      # What is in it:
+      #   * tests/check-registry.sh  — the registry verifies itself: discovery,
+      #                                 failure propagation, and that a suite
+      #                                 which did not run never reads as passed.
+      #   * tests/update-dotfiles-scope.sh — the fish function's refusals,
+      #                                 against throwaway git fixtures.
+      #   * cargo test for sys-daemon — the dashboard's HTTP admission rules and
+      #                                 the process-kill safety rules.
+      #
+      # `cargo` and `rustc` come from the pinned nixpkgs, not from the host, so
+      # this build does not depend on whatever toolchain the contributor
+      # happens to have. The vendored crate sources are fetched through
+      # `cargoLock`, exactly as package.nix already does for the daemon itself.
+      repo-contracts =
+        let
+          inherit (nixpkgs.legacyPackages.${system}) runCommand;
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        pkgs.rustPlatform.buildRustPackage
+        {
+          pname = "repo-contracts-tests";
+          version = "0.1.0";
+          # The fileset is rooted at the CRATE, not at ./ — buildRustPackage
+          # expects Cargo.lock at the source root, so a fileset rooted higher
+          # up lands it at config/home/sys-daemon/Cargo.lock and the build
+          # fails in cargoSetupPostPatchHook.
+          src = pkgs.lib.fileset.toSource {
+            root = ./config/home/sys-daemon;
+            fileset = pkgs.lib.fileset.unions [
+              ./config/home/sys-daemon/Cargo.toml
+              ./config/home/sys-daemon/Cargo.lock
+              ./config/home/sys-daemon/ports.json
+              ./config/home/sys-daemon/src
+              ./config/home/sys-daemon/tests
+            ];
+          };
+          cargoLock.lockFile = ./config/home/sys-daemon/Cargo.lock;
+          # Only the Rust half. The shell suites run in the `repo-contracts`
+          # check below; `doCheck` here would run them a second time.
+          doCheck = false;
+          # buildRustPackage wants to build something. There is no binary in
+          # this crate — it is the library plus its tests — so the default
+          # cargo build is satisfied by the library and the tests are run
+          # explicitly.
+          # The tests are RUN, not merely compiled.
+          #
+          # An earlier revision of this used `cargo test --no-run --tests`,
+          # which compiles every test and executes none of them. The check
+          # passed, green, having verified nothing — the exact failure this
+          # lane exists to prevent, committed inside the check that exists to
+          # detect it. If this ever stops executing the tests again, the
+          # output of this step must not contain "test result:".
+          buildPhase = ''
+            runHook preBuild
+            cargo test --offline -- --test-threads=1
+            runHook postBuild
+          '';
+          installPhase = ''
+            runHook preInstall
+            touch "$out"
+            runHook postInstall
+          '';
+          meta = {
+            description = "sys-daemon HTTP admission and process-kill safety tests";
+          };
+        };
+
+      # The shell half of the same lane: the registry's own tests and the
+      # update_dotfiles scope tests. Kept separate from the Rust half so a
+      # contributor can run `nix build .#checks.…repo-contracts-shells` in
+      # seconds without building a Rust toolchain, and so a failure in one is
+      # not confused with a failure in the other.
+      repo-contracts-shells =
+        nixpkgs.legacyPackages.${system}.runCommand
+        "repo-contracts-shells"
+        {
+          nativeBuildInputs = [
+            nixpkgs.legacyPackages.${system}.bash
+            nixpkgs.legacyPackages.${system}.coreutils
+            nixpkgs.legacyPackages.${system}.findutils
+            nixpkgs.legacyPackages.${system}.git
+            nixpkgs.legacyPackages.${system}.gnugrep
+            # fish, because the function under test is a fish function and
+            # check-registry.sh drives the real `run.sh`.
+            nixpkgs.legacyPackages.${system}.fish
+            nixpkgs.legacyPackages.${system}.shellcheck
+          ];
+          src = ./.;
+        }
+        ''
+          runHook preInstall
+
+          # Both suites build throwaway git repositories under HOME and must
+          # never reach the builder's real one. update-dotfiles-scope.sh also
+          # refuses to run against $HOME/.dotfiles outright, which is what
+          # stops a broken path in it from driving the operator's real repo.
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+
+          export NM_REQUIRE_ALL=0
+
+          # Repo-wide lint, discovered by shebang rather than by a maintained
+          # list. The list is what used to drift: every PR that added a script
+          # had to remember to add it here, and the ones that did not simply
+          # were not linted.
+          echo "--- shellcheck (repo-wide, new findings only) ---"
+          lint_failed=0
+          current="$(
+            cd "$src" || exit 1
+            find . -name '*.sh' -type f | sort | while IFS= read -r f; do
+              # "$f" is relative ("./config/..."), so shellcheck reports that
+              # same relative path and it lines up with the baseline. Passing
+              # "$src/$f" instead makes shellcheck report the store path, which
+              # matches nothing in the baseline and turns every finding into a
+              # "new" one.
+              shellcheck -x -P "$src/tests" -S style "$f" -f gcc 2>/dev/null || true
+            done | sed 's|^\./||' | sort -u
+          )"
+          baseline="$src/tests/shellcheck-baseline.txt"
+          if [ -f "$baseline" ]; then
+            # grep -Fxv -f, not `comm`. `comm` requires both inputs sorted in
+            # the SAME collation, and inside the build sandbox the two sorts
+            # do not agree, so every baseline line came back as "new". This
+            # comparison does not care about ordering or locale at all.
+            new_findings="$(printf '%s\n' "$current" | grep -Fxv -f "$baseline" || true)"
+          else
+            new_findings="$current"
+          fi
+          if [ -n "$new_findings" ]; then
+            echo "shellcheck: findings not in the baseline:" >&2
+            printf '%s\n' "$new_findings" | sed 's/^/    /' >&2
+            lint_failed=1
+          else
+            echo "    ok   no new shellcheck findings"
+          fi
+
+          echo "--- fish syntax ---"
+          while IFS= read -r f; do
+            rel="''${f#"$src/"}"
+            if fish -n "$f"; then
+              echo "    ok   $rel"
+            else
+              echo "    FAIL $rel"
+              lint_failed=1
+            fi
+          done < <(find "$src" -name '*.fish' -type f | sort)
+          if [ "$lint_failed" -ne 0 ]; then
+            echo "repo-contracts-shells: lint failed" >&2
+            exit 1
+          fi
+
+          bash "$src/tests/check-registry.sh"
+          bash "$src/tests/update-dotfiles-scope.sh"
+
+          touch "$out"
+          runHook postInstall
+        '';
     };
 
     # The VM test, exposed as a top-level output.

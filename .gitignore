@@ -16,6 +16,21 @@ nixos/local.nix
 result
 result-*
 
+# Generated caches — these were tracked and had to be removed.
+#
+# Two `__pycache__/*.pyc` files were committed at some point. They are build
+# output: they encode a CPython version, they go stale the moment the source
+# changes, and they differ between machines for no reason anyone wants. The
+# 14-byte difference between two contributors' checkouts is a real cost for
+# something nobody edits.
+__pycache__/
+*.py[cod]
+
+# Rust build output. The crate's own .gitignore covers this directory, but the
+# pattern belongs here too: a generated tree is generated wherever it appears,
+# and `cargo` in the wrong directory should not produce a reviewable diff.
+target/
+
 # Age/Sops keys — never commit
 *.age
 keys.txt
