@@ -82,10 +82,13 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4
 
       - name: Shell suites, registry tests, repo-wide lint
-        run: nix build --print-build-logs -L .#checks.x86_64-linux.repo-contracts-shells
+        # `./nixos#…` — the flake is in the nixos/ SUBDIRECTORY, not at the
+        # repository root. `nix build .#…` from here fails with "path … is not
+        # part of a flake". This is the same form tests/README.md documents.
+        run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.repo-contracts-shells
 
       - name: sys-daemon HTTP admission and process-kill tests
-        run: nix build --print-build-logs -L .#checks.x86_64-linux.repo-contracts
+        run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.repo-contracts
 
       # Deliberately not `nix flake check`: it would pull in host evaluation
       # and the VM test. The exclusion is documented at the top of this file
