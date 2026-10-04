@@ -1,0 +1,439 @@
+# Media and travel
+
+Private media on the Legion, and the MSI travel workflow. Both are **off by
+default** and stay that way until somebody provisions them.
+
+| Area | Where | Default |
+|---|---|---|
+| Jellyfin | `nixos/config/system/media/jellyfin.nix` | off |
+| Isolated downloads | `nixos/config/system/media/torrents.nix` | off |
+| Optional selective sync | `nixos/config/system/media/syncthing.nix` | off |
+| Travel laptop | `nixos/config/home/travel.nix` | on for `gs65` |
+| Media state + offline prep | `nixos/config/system/media/scripts/` | with Jellyfin |
+
+Options live in `nixos/options.nix` under `opts.media` and `opts.travel`.
+
+---
+
+## Turning media on
+
+Every switch is off because none of the three can be **half**-configured
+safely:
+
+* **Jellyfin** — its first-run wizard *creates* the administrator account.
+  Until one exists, any tailnet device can reach the wizard and claim it.
+  Enabling it from a repository is enabling an open admin UI.
+* **Torrents** — needs a WireGuard credential that cannot honestly be generated
+  here. A private key in a git repository is a credential in history.
+* **Syncthing** — propagates deletions, and must not be switched on before the
+  folder list has been chosen deliberately.
+
+The modules, their refusals and their tests are present and evaluated. What is
+missing is your provisioning, which is a deployment step.
+
+---
+
+## Jellyfin
+
+### 1. Enable and create the administrator
+
+```nix
+# hosts/legion/options.nix
+media.jellyfin.enable = true;
+```
+
+Open Jellyfin over the tailnet, complete the wizard, create an administrator,
+then record that you did:
+
+```nix
+media.jellyfin.setupCompleted = true;
+```
+
+While that is `false` you get a build warning. It does not check for an
+account — it records that you completed the wizard, so the fact is in the diff
+rather than in your memory.
+
+### 2. After the setup wizard — three things to do by hand
+
+These are **not** applied declaratively, and the reason is stated in
+`jellyfin.nix`: nixpkgs' Jellyfin module exposes no option for them, so
+declaring one would evaluate and silently do nothing.
+
+* **Dashboard → Playback → Transcoding**: leave *hardware acceleration* off
+  until `jellyfin-accel-check` passes (below).
+* **Dashboard → Network → Enable external access**: leave off. The service is
+  published through a private Tailscale Serve listener; Jellyfin must not also
+  believe it is on the public internet.
+* **Dashboard → Advanced → Intelltutor**: turn it **off**. It is on by default,
+  it phones home, and on a tailnet-reachable server that is a server making
+  outbound requests nobody asked for.
+
+### 3. The Serve port
+
+Collie owns tailnet HTTPS **443** (`config/system/mobile-agents.nix`). Jellyfin
+takes **8443** by default. If you set Jellyfin's port to 443 while Collie is
+enabled, the build **fails** — two units writing one Serve port is a race where
+the loser is silently broken, so it is an evaluation error rather than a
+boot-time surprise.
+
+`ExecStop` turns off its own port and nothing else. `tailscale serve reset`
+erases every mapping on the node, including Collie's — which is why A's
+reconcile script avoids it and why no unit here runs it.
+
+#### Checking the Serve port
+
+The pinned Tailscale is **1.102.5**. Confirm before enabling:
+
+```console
+$ tailscale serve --help | grep -A2 -- --https
+```
+
+`--https=<port>` is accepted; the CLI also refuses conflicting listeners
+(`cannot serve TCP; already serving web on %d`). 8443 is the alternate HTTPS
+port Tailscale Serve supports. Verify on your own node with
+`tailscale serve status` after the first activation.
+
+### 4. Hardware transcoding — check first, then decide
+
+"It has an Intel GPU" is not a statement about QSV being usable. The render
+node, `intel-media-driver`, the GuC/HuC firmware and the codec build each have
+to be present independently.
+
+```console
+$ jellyfin-accel-check
+ok   VAAPI render node present: /dev/dri/renderD128
+ok   intel-media-driver userspace present (/nix/store/…/bin/vainfo)
+ok   codec available: h264_vaapi
+ok   codec available: hevc_vaapi
+=== verdict ===
+Hardware transcoding is available.
+```
+
+If it fails, **leave it off**. Software transcoding is correct and slower, and
+it keeps the discrete NVIDIA GPU free for inference. To override deliberately:
+
+```nix
+media.jellyfin.hardwareAcceleration.enable = true;
+media.jellyfin.hardwareAcceleration.acknowledgeMissing = true;   # visible in the diff
+```
+
+`type = "nvenc"` is **refused by assertion**. The discrete GPU is for inference
+in this configuration; handing the transcoder the same device is the ordinary
+way inference runs out of memory the first time somebody plays something.
+
+> **PENDING — real hardware.** Hardware acceleration, playback and seek, and
+> real-WAN throughput have **not** been verified on this machine. Nothing below
+> is a claim that they work. Run § "Acceptance before travelling" yourself.
+
+---
+
+## Isolated downloads
+
+qBittorrent runs **unprivileged, inside a dedicated network namespace**, whose
+only way out is a WireGuard tunnel.
+
+### The property that matters
+
+The tunnel disappearing must stop downloads. It must **not** stop SSH,
+tailscaled, Collie, herdr or Jellyfin.
+
+That is structural rather than a matter of unit ordering: none of those are in
+the namespace. Inside it, `OUTPUT`'s policy is `DROP` and the tunnel is allowed
+**by name**:
+
+```sh
+iptables -A OUTPUT -o wg0 -j ACCEPT     # while wg0 is absent this matches NOTHING
+iptables -A OUTPUT -j DROP              # so everything falls through to DROP
+```
+
+Binding qBittorrent to the tunnel is **defence in depth**, not the kill switch.
+It covers only the paths that go through that socket — a resolver running
+separately, or any code that opens its own socket, is not covered by it.
+
+### Egress, exhaustively
+
+| Rule | Purpose |
+|---|---|
+| `-o lo` | loopback |
+| `-o wg0` | the tunnel; matches nothing while absent |
+| `-o mtns0` UDP → one numeric endpoint:port | tunnel establishment, and nothing else |
+| `-o mtns0` udp/tcp 53 **DROP** | no DNS outside the tunnel |
+| `OUTPUT` **DROP** | policy |
+| `ip6tables OUTPUT` **DROP** | all IPv6 |
+| `INPUT` allow lo, allow host proxy, **DROP** | only the loopback proxy may reach in |
+
+There is **no default route via the veth** — a `/32` host route to the veth
+peer and nothing more. Routing and netfilter are two independent mechanisms;
+either alone would be a single point of failure.
+
+### Why the endpoint is numeric
+
+A hostname endpoint needs a DNS query to leave through the veth *before the
+tunnel exists* — which is precisely the bootstrap leak the namespace exists to
+prevent. `netns-up.sh` **refuses** to build a namespace with a non-numeric
+endpoint and says so.
+
+Resolve once, on the host, and paste the result:
+
+```console
+$ getent ahosts vpn.example.com | head -1
+203.0.113.7
+```
+
+### The host firewall is not touched
+
+**Nothing in this lane changes the host OUTPUT policy.** Not one rule.
+
+The existing wg-quick kill-switch in `config/system/networking.nix` is why:
+an OUTPUT rule that rejects everything not marked for the tunnel rejects the
+**tailnet** too, and on a box in a basement that is a lockout. That module
+structurally omits it on a server for exactly this reason.
+
+The only host firewall change when torrents are enabled is an
+interface-scoped **INPUT** port on `mthost`. `mthost` is deliberately **not** in
+`trustedInterfaces`, which accepts everything unconditionally.
+
+### The WebUI
+
+Reachable from exactly one place: `127.0.0.1` on the server, through a proxy
+that refuses to bind anything else at start-up and requires a token from a
+**systemd credential**. A refused request never produces a packet inside the
+namespace.
+
+qBittorrent's own authentication is necessary but not sufficient: a freshly
+provisioned instance — and an instance restored from backup — has no password.
+
+### Upload is bounded, or not at all
+
+`uploadLimitKbit = null` means **unbounded seeding**, and you get a build
+warning saying so. Seeding competes directly with remote builds, SSH and
+streaming over the tailnet.
+
+Shape it on the tunnel with a token bucket, not in qBittorrent's settings: a
+UI change cannot raise it.
+
+### Provisioning
+
+```nix
+# hosts/legion/options.nix
+media.torrents.enable = true;
+media.torrents.tunnel.endpoint = "203.0.113.7:51820";   # numeric, from getent
+media.torrents.uploadLimitKbit = 900;                   # after measuring
+```
+
+Generate the WireGuard config **on a machine already configured for the
+provider**, and keep it out of this repository:
+
+```console
+$ wg-quick strip wg0 > media-wg.conf     # on the provider-configured machine
+$ sops --encrypt --in-place media-wg.conf
+# store at the path in opts.media.torrents.tunnel.configSecretPath
+```
+
+Do the same for the proxy token:
+
+```console
+$ openssl rand -hex 32 | sops --encrypt --in-place   # -> proxyTokenSecretPath
+```
+
+### Verify before travelling
+
+```console
+$ netns-audit
+=== netns-audit: namespace medtns ===
+  ok   iptables OUTPUT policy is DROP
+  ok   iptables INPUT policy is DROP
+  ok   an ACCEPT rule for -o wg0 is installed
+  ok   no default route via mtns0
+  ok   every permitted INPUT rule is loopback or the host proxy on 18080
+  --- permitted rules scoped to mtns0 (3) ---
+      -A OUTPUT -o mtns0 -p udp -d 203.0.113.7 --dport 51820 -j ACCEPT
+      -A OUTPUT -o mtns0 -p udp --dport 53 -j DROP
+      -A OUTPUT -o mtns0 -p tcp --dport 53 -j DROP
+=== netns-audit: 14 check(s), 0 failure(s) ===
+The namespace is fail-closed.
+```
+
+It is **read-only**: it adds, removes and flushes nothing. Run it against the
+live namespace, and again after pulling the tunnel.
+
+---
+
+## The travel laptop
+
+### SSH aliases
+
+Two aliases, because they are two different services:
+
+| Alias | Port | Auth | Use for |
+|---|---|---|---|
+| `legion` | 2222 | key | scripts, the Nix builder, port forwards |
+| `legion-tailscale` | 22 | Tailscale identity | a device with no private key |
+
+The Tailscale alias deliberately offers **no** `IdentityFile`: a key cannot
+authenticate there, and offering one just waits for a handshake that will not
+succeed.
+
+#### Pin the host key
+
+Unpinned is generated as a **visible failing configuration**, not a working one:
+
+```console
+$ legion$ cat /etc/ssh/ssh_host_ed25519_key.pub
+```
+
+```nix
+# hosts/gs65/options.nix
+travel.serverHostKey = "ssh-ed25519 AAAAC3…";
+```
+
+A TOFU prompt on a tailnet is exactly where you do not want to be asked to
+approve a key you did not verify.
+
+### The Nix builder
+
+**Port 2222, not 22.** `--ssh=true` means Tailscale SSH answers on tailnet port
+22 *before* the OS sshd sees the connection, authenticating with a Tailscale
+identity and bypassing `authorized_keys`. A key-based builder pointed at 22
+stalls on a handshake or is refused by the ACL, and reports from the wrong
+layer. "SSH to the Legion works" is **not** evidence the builder works.
+
+> The port travels inside `hostName` (`"legion -p 2222"`) because this nixpkgs'
+> `nix.buildMachines` has no `sshOptions`. That looks like a hack and is; an
+> unpinned default of 22 is a worse trade.
+
+**On privilege:** the builder's account is in `nix.settings.trusted-users`, and
+trusted users can drive the daemon, which is **root-equivalent**. A dedicated
+account does not make that unprivileged — it makes it separately revocable. It
+is deliberately **not** given blanket `NOPASSWD` sudo to imitate a narrower
+boundary.
+
+### herdr remote attachment
+
+```console
+$ herdr-travel status
+$ herdr-travel attach legion        # native --machine <id>, resolved from herdr machine list
+$ herdr-travel run legion <cmd>
+$ herdr-travel local <cmd>          # no server needed — the offline fallback
+```
+
+* **`--machine` is not sticky.** Selecting a machine in the UI does not
+  retarget your shell. Every remote command passes an explicit `--machine <id>`,
+  resolved from the server rather than hard-coded.
+* **Nothing here restarts, upgrades or replaces a herdr server.** The server
+  holds your running agents; an incompatible client is refused with a pointer
+  to fixing the *client*, and the local fallback works with no server at all.
+
+---
+
+## Offline media preparation
+
+Copies **already-chosen** library items to a cache the laptop can carry. No
+downloads, no purchases, no subscriptions, no services.
+
+```console
+$ media-offline-prep 'Films/Example (2024)/Example (2024).mkv'
+  Films/Example (2024)/Example (2024).mkv                      12G
+1 item(s), 12G total
+[offline-prep] space ok: 410000 MiB free
+[offline-prep] copied Films/Example (2024)/Example (2024).mkv
+[offline-prep] offline cache ready: 1 item(s)
+```
+
+The selector is **required** and all-or-nothing: every item is resolved before
+anything is copied, because a partial offline cache is indistinguishable from a
+complete one until you are on a plane. It then verifies readability *as the
+media user*, because a cache that Jellyfin cannot open looks like an empty
+library.
+
+Dry run first: `MEDI_DRY_RUN=1`.
+
+---
+
+## Sync is not backup
+
+🔴 **Syncthing propagates deletions.** A file removed on the laptop is removed
+on the server, immediately.
+
+* **restic** — a snapshot in time; deleting a file does not delete yesterday's
+  copy. **This is the backup.**
+* **Syncthing** — a live mirror. Not a backup, under any reading.
+
+The ignore rules are the security control, not a convenience:
+
+* `.git/`, `worktrees/` — two repositories that disagree; corrupted uncommitted
+  work.
+* `*.db`, `*.sqlite*`, `*-wal`, `*-journal` — a half-copied database is valid
+  and corrupt at once.
+* `.pi/`, `sessions/`, `herdr/` — two agents writing one synchronised session
+  store corrupts both.
+* `.ssh/`, `id_*`, `*.age`, `*.key`, `*.pem`, `.env*`, `secrets.yaml` — a
+  synchronised private key is a private key on another device.
+* `tailscaled.state` — two devices sharing one node key is a tailnet incident.
+
+Folders default to **empty**. The module refuses a whole-home or Tailscale-state
+folder at evaluation.
+
+Media state is **exported** (`media-state`) and backed up by restic, not
+mirrored — see `docs/agent-operations.md`.
+
+---
+
+## Measuring bandwidth
+
+Tailscale may use direct UDP or relays; encryption does not guarantee
+worldwide bitrate. Reserve upload headroom for interactive access.
+
+1. Measure the **home upstream** from where you will actually be — an upload
+   from a hotel measures the hotel.
+2. Reserve headroom for SSH, builds and streaming.
+3. Set `uploadLimitKbit` to 20–30% of the measured upstream. A starting point,
+   not a recommendation.
+
+A 1080p 4–8 Mbps remote profile is an experiment, not a promise. Test a
+representative high-bitrate file and seek behaviour.
+
+---
+
+## Acceptance before travelling
+
+**Not performed. Recorded as pending, not as passing.**
+
+- [ ] `netns-audit` against the live namespace, before and after pulling the tunnel
+- [ ] Leak drill: remove the tunnel mid-transfer; confirm IPv4, IPv6 and direct
+      DNS are all dead **and** that SSH, Tailscale, Collie and Jellyfin stay up
+- [ ] `jellyfin-accel-check`; playback and seek of a representative high-bitrate file
+- [ ] Direct-vs-relay measurement from the real WAN
+- [ ] Confirm `herdr-travel local` works with no server reachable (hotel wifi)
+- [ ] `media-offline-prep` dry run, then a real copy
+- [ ] Builder: `nix build` on the laptop, confirm it ran on the Legion
+- [ ] Confirm restic restore into a scratch location (never over live data)
+
+---
+
+## Tests
+
+```console
+$ bash nixos/tests/media-travel/run.sh          # developer run; every suite must run
+$ nix build .#checks.x86_64-linux.media-travel  # sandbox
+```
+
+| Suite | Covers |
+|---|---|
+| `netns-failclosed.sh` | hostname refusal, DROP policies on both stacks, single-UDP bootstrap, DNS drops, no default route, INPUT scope |
+| `state-restore.sh` | real SQLite export, corrupt database refused, previous export preserved, missing export is a failure |
+| `selective-sync.sh` | ignore rules against a fixture tree of one of each hazard |
+| `travel-builder.sh` | explicit `--machine`, capability refusal, **server-restart tripwire**, local fallback |
+| `host-isolation.sh` | both hosts evaluated: media inert by default, Collie keeps 443, firewall unchanged, builder pinned |
+
+`netns-failclosed.sh` drives the **shipped** `netns-up.sh` with stubbed
+privileged tools, so it asserts the netfilter calls the script actually makes
+rather than that a string appears in a file.
+
+**Pending:** a live namespace (`netns-audit.sh`, needs root and a provisioned
+tunnel) and real hardware. See "Acceptance before travelling".
+
+> **Known pre-existing failure, not caused by this PR:**
+> `nixos/tests/server-foundation/host-eval.sh` fails 24 assertions on `master`
+> (`1a4d262`) as well as on this branch. It is a server-foundation issue and is
+> left alone here; see the PR description.

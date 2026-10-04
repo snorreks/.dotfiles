@@ -227,6 +227,39 @@ rec {
   remoteBuilder = {
     enable = false;
     hostName = "legion";
+
+    # 🔴 PORT 2222, NOT 22. This is the single most important field here.
+    #
+    # config/system/server.nix starts tailscaled with `--ssh=true`, and
+    # Tailscale SSH answers on tailnet port 22 BEFORE the OS sshd sees the
+    # connection — authenticating with a Tailscale identity and bypassing
+    # authorized_keys entirely. Nix's distributed builder authenticates with a
+    # KEY FILE, so against port 22 it stalls on the Tailscale handshake or is
+    # refused by the tailnet ACL, and the useful error is not on the nix side.
+    # Port 2222 is ordinary OpenSSH (config/system/mobile-agents.nix owns that
+    # listener), so the builder key in authorized_keys is actually checked.
+    #
+    # 22 and 2222 are NOT interchangeable here. "ssh works to that host" is not
+    # evidence that the builder works.
+    port = 2222;
+
+    # The account the builder logs in as. It does not have to be the operator:
+    # a dedicated account is what makes revoking build access a one-line change
+    # instead of rotating the key that also pushes to Git and logs in to both
+    # machines.
+    #
+    # 🔴 Whatever account this names is in nix's trusted-users (server.nix), and
+    # trusted-users can drive the daemon, which is root-equivalent. A dedicated
+    # account does not make that unprivileged — it makes the privilege explicit
+    # and separately revocable. It is deliberately NOT given blanket NOPASSWD
+    # sudo to imitate a narrower boundary.
+    sshUser = username;
+
+    # Nix's actual SSH transport. `ssh-ng` is the modern one; `builtin` speaks no
+    # SSH at all and would silently ignore every option above, which is the
+    # failure mode that makes a port mistake look like a Nix bug.
+    protocol = "ssh-ng";
+
     # Root's private key: nix runs distributed builds as the daemon user.
     sshKey = "/root/.ssh/id_nixbuilder";
 
@@ -412,6 +445,188 @@ rec {
       # over the 2222 session. Not a listening port on any interface; the sshd
       # Match block for sshPort carries AllowTcpForwarding for exactly this.
       gatewayPort = 24543;
+    };
+  };
+
+  # ── Private media and isolated downloads ─────────────────────────────────
+  #
+  # Everything here is OFF by default, and off on both hosts as shipped. An
+  # import changes nothing until somebody asks for it, which is the property
+  # that makes it safe to land this before the machine has been provisioned.
+  #
+  # Three services, three separate switches, deliberately: Jellyfin is a server
+  # you watch things on, the torrent namespace is a security boundary, and
+  # Syncthing is an optional convenience that propagates deletions. Turning one
+  # on must never imply the other two.
+  media = {
+    # ── Jellyfin ─────────────────────────────────────────────────────────
+    jellyfin = {
+      enable = false;
+
+      # Native Linux paths only. /mnt/shared (the Windows NTFS volume,
+      # opts.mountShared) is refused by an assertion below rather than merely
+      # discouraged: an unattended server writing to a hibernated Windows
+      # filesystem corrupts it, and repairing that needs a keyboard.
+      dataDir = "/var/lib/jellyfin";
+      configDir = "/etc/jellyfin";
+      libraryDir = "/srv/media/library";
+      downloadDir = "/srv/media/download";
+
+      # Loopback port. NOT opened in the firewall — Jellyfin binds 127.0.0.1
+      # only and is published through a private Tailscale Serve listener, which
+      # is why no allowedTCPPorts entry exists anywhere for it.
+      port = 8096;
+
+      # Tailnet HTTPS port for Jellyfin. MUST differ from 443: Collie owns 443
+      # (config/system/mobile-agents.nix) and two units writing the same Serve
+      # port is a race where the loser is silently broken.
+      #
+      # 8443 is Tailscale Serve's alternate HTTPS port. VERIFY IT against the
+      # pinned Tailscale before enabling — see docs/media-travel.md § "Checking
+      # the Serve port".
+      serveHttpsPort = 8443;
+
+      # Jellyfin's first-run setup wizard creates the administrator account, and
+      # until one exists ANY tailnet device can reach it and claim it. This flag
+      # does not create an account or check for one; it records that the wizard
+      # was completed, and false produces a build warning saying so.
+      setupCompleted = false;
+
+      hardwareAcceleration = {
+        # OFF until jellyfin-accel-check passes on this machine. See
+        # jellyfin.nix for why "it has an Intel GPU" is not sufficient.
+        enable = false;
+
+        # Overrides the check's verdict deliberately. Present so that a machine
+        # where acceleration does not work has to say so in the diff.
+        acknowledgeMissing = false;
+
+        # "vaapi" or "qsv". "nvenc" is REFUSED by assertion — the discrete GPU
+        # is for inference in this configuration.
+        type = "vaapi";
+      };
+    };
+
+    # ── Isolated downloads ───────────────────────────────────────────────
+    torrents = {
+      enable = false;
+
+      package = null; # null -> pkgs.qbittorrent
+
+      # The namespace everything is confined to. Named rather than generated so
+      # that `ip netns list` and the audit script agree without configuration.
+      namespace = "medtns";
+
+      vethHost = "mthost";
+      veth = "mtns0";
+
+      # 10.77.0.0/30 — a /30 because exactly two endpoints exist and a wider
+      # range would be address space nothing has a reason to be in.
+      vethHostAddr = "10.77.0.1/30";
+      vethAddr = "10.77.0.2/30";
+      gateway = "10.77.0.1";
+
+      # qBittorrent's WebUI, INSIDE the namespace. Reachable only through the
+      # host's loopback proxy. Not 8080: a well-known admin port is the wrong
+      # thing to be reachable at, even by accident.
+      webuiPort = 18080;
+
+      # The host-side proxy. Loopback only, token-gated, and it refuses to bind
+      # anything else at start-up.
+      proxyPort = 18081;
+
+      stateDir = "/var/lib/qbittorrent";
+      configDir = "/var/lib/qbittorrent-config";
+      incompleteDir = "/srv/media/incomplete";
+      downloadDir = "/srv/media/download";
+
+      tunnel = {
+        interface = "wg0";
+
+        # 🔴 NUMERIC IP:PORT, REQUIRED, AND VALIDATED. A hostname endpoint
+        # needs a DNS query to leave the namespace before the tunnel exists,
+        # which is exactly the bootstrap leak the namespace prevents. Empty
+        # here means "not configured", and netns-up.sh refuses to build a
+        # namespace without it.
+        endpoint = "";
+
+        # Where the `wg-quick strip` output lives in sops-nix. There is no
+        # default: generating a keypair here would put a private key in a git
+        # repository, and defaulting to something plausible is how a real
+        # credential ends up committed.
+        configSecretPath = "/run/agenix/media-wg-config";
+      };
+
+      # sops-nix paths for the two runtime credentials. Generated once by hand;
+      # no defaults, for the same reason as configSecretPath.
+      proxyTokenSecretPath = "/run/agenix/media-webui-token";
+
+      # 🔴 NULL MEANS UNBOUNDED SEEDING. Measure the home upstream, reserve
+      # headroom for management, and set a number. 20–30%% of measured upstream
+      # is the documented starting point, not a recommendation.
+      uploadLimitKbit = null;
+
+      resources = {
+        memoryMax = "2G";
+        cpuQuota = 200;
+      };
+    };
+
+    # ── Optional selective synchronisation ───────────────────────────────
+    #
+    # 🔴 SYNCHRONISATION PROPAGATES DELETION. Restic remains the backup for
+    # everything here. See docs/media-travel.md § "Sync is not backup".
+    syncthing = {
+      enable = false;
+
+      package = null; # null -> pkgs.syncthing
+      dataDir = "/var/lib/syncthing";
+      guiPort = 8384;
+
+      # A DIFFERENT Serve port from both Collie (443) and Jellyfin (8443). Two
+      # units writing one Serve port is a race, not a conflict error.
+      serveHttpsPort = 8444;
+
+      # Deliberately EMPTY by default. An empty list means "nothing is
+      # synchronised", which is safe; a default of "$HOME" would mean a private
+      # key and a decrypted environment reach a second device.
+      folders = [];
+    };
+  };
+
+  # ── Travel laptop workflow ───────────────────────────────────────────────
+  #
+  # The GS65 half: SSH aliases, native herdr remote attachment, and the remote
+  # builder. Deliberately host-scoped — the Legion must not gain travel
+  # helpers, and the GS65 must not inherit server policy. See
+  # config/home/travel.nix.
+  travel = {
+    enable = false;
+
+    # Host-key-pinned aliases for the Legion. Two, because they are genuinely
+    # different services:
+    #
+    #   legion        ordinary OpenSSH on 2222. Key authentication. This is the
+    #                 one the Nix builder uses and the one to reach for.
+    #   legion-tailscale
+    #                 Tailscale SSH on 22. A Tailscale IDENTITY, not a key, so
+    #                 it works from a device with no private key — which is also
+    #                 why it cannot be used for key-based automation.
+    serverHost = "legion";
+    sshPort = 2222;
+    tailscalePort = 22;
+
+    # Filled in by the operator from the server's own /etc/ssh/ssh_host_*.pub.
+    # Empty rather than fabricated: a wrong pin is worse than no pin, because a
+    # wrong pin is a host key change the operator will be told to "just accept".
+    serverHostKey = "";
+    serverHostKeyType = "ssh-ed25519";
+
+    # herdr remote attachment. Native `herdr --remote`, no wrapper that replaces
+    # or upgrades anything on the server.
+    herdrRemote = {
+      enable = false;
+      label = "legion";
     };
   };
 }

@@ -547,6 +547,57 @@
           runHook postInstall
         '';
 
+      # The media-travel lane: private media, a namespace-confined qBittorrent,
+      # the travel workflow. A SEPARATE output, for the same reason
+      # agent-operations is one — the lanes were developed independently and
+      # each has to stay runnable on its own.
+      #
+      # sqlite and jq are runtime inputs rather than optional extras:
+      # state-restore.sh creates a REAL database and checks that a corrupt one is
+      # refused, and host-isolation.sh parses evaluated host configurations.
+      # A suite that quietly skipped the only test proving a media backup can be
+      # verified would be worse than having no such test.
+      media-travel =
+        nixpkgs.legacyPackages.${system}.runCommand
+        "media-travel"
+        {
+          nativeBuildInputs = [
+            nixpkgs.legacyPackages.${system}.bash
+            nixpkgs.legacyPackages.${system}.coreutils
+            nixpkgs.legacyPackages.${system}.findutils
+            nixpkgs.legacyPackages.${system}.git
+            nixpkgs.legacyPackages.${system}.gnugrep
+            nixpkgs.legacyPackages.${system}.jq
+            nixpkgs.legacyPackages.${system}.nix
+            nixpkgs.legacyPackages.${system}.shellcheck
+            nixpkgs.legacyPackages.${system}.sqlite
+            nixpkgs.legacyPackages.${system}.util-linux
+            nixpkgs.legacyPackages.${system}.which
+          ];
+          src = ./.;
+
+        }
+        ''
+          runHook preInstall
+
+          # runCommand's builder runs in an empty directory with $src pointing
+          # at the copied flake source; every path below is relative to $src.
+          export HOME="$TMPDIR/home"
+          mkdir -p "$HOME"
+
+          # A skip is acceptable here and WHICH one it is says why: the two
+          # host-evaluation suites evaluate real flake configurations, and an
+          # evaluation inside a build sandbox cannot reach the flake's inputs.
+          # Outside a sandbox, `bash nixos/tests/media-travel/run.sh` runs them
+          # and FAILS if they do not pass, because NM_REQUIRE_ALL defaults to 1.
+          export NM_REQUIRE_ALL=0
+          export NM_SKIP_MEDIA_HOST_EVAL=1
+          bash "$src/tests/media-travel/run.sh"
+
+          touch "$out"
+          runHook postInstall
+        '';
+
       # A real NixOS boot, with the real systemd units, a real root-owned state
       # directory and a real timer driving `ns-maint tick`. Needs KVM and builds
       # a whole system, so it is a SEPARATE check rather than part of the fast

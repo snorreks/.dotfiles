@@ -38,6 +38,10 @@ SUITES=(
   "server-foundation/tailscale-reconcile.sh"
   "server-foundation/ssh-confirm.sh"
   "server-foundation/host-eval.sh"
+  # The media-travel lane, added as an entry rather than by rewriting the list:
+  # it brings its own run.sh with the same skip semantics as the lanes above, so
+  # one failing suite names itself instead of being buried in a longer run.
+  "media-travel/run.sh"
 )
 
 failed=0
@@ -63,6 +67,13 @@ SHELLCHECKED=(
   "tests/server-foundation/tailscale-reconcile.sh"
   "tests/server-foundation/ssh-confirm.sh"
   "tests/server-foundation/host-eval.sh"
+  "tests/media-travel/run.sh"
+  "config/home/scripts/herdr-travel.sh"
+  "config/system/media/scripts/netns-up.sh"
+  "config/system/media/scripts/netns-audit.sh"
+  "config/system/media/scripts/media-state.sh"
+  "config/system/media/scripts/media-offline-prep.sh"
+  "config/system/media/scripts/jellyfin-accel-check.sh"
 )
 if command -v shellcheck >/dev/null 2>&1; then
   for f in "${SHELLCHECKED[@]}"; do
@@ -103,7 +114,11 @@ for suite in "${SUITES[@]}"; do
   # Run it directly with:
   #
   #   bash nixos/tests/server-foundation/host-eval.sh
-  if [[ "${suite##*/}" == "host-eval.sh" ]] &&
+  # Two suites evaluate real flake configurations and cannot run inside a build
+  # sandbox: server-foundation/host-eval.sh, and the media-travel runner (whose
+  # host-isolation suite evaluates both hosts). Both are named explicitly rather
+  # than pattern-matched, because "run.sh" on its own matches every lane.
+  if [[ "$suite" == "server-foundation/host-eval.sh" || "$suite" == "media-travel/run.sh" ]] &&
     { [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; }; then
     reason="no nix on PATH"
     [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"

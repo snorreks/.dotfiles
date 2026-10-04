@@ -237,7 +237,17 @@ in {
     {
       ${opts.username}.openssh.authorizedKeys.keys =
         opts.sshAuthorizedKeys
-        ++ lib.optional (opts.remoteBuilder.enable && opts.remoteBuilder.authorizedKey != null)
+        # The builder's key belongs on the BUILDER side regardless of whether
+        # this machine is also a client.
+        #
+        # This used to read `opts.remoteBuilder.enable` alone, which is the
+        # enable-switch on the *client* — so the server, the one machine that
+        # actually has to accept the key, never added it. A builder configured
+        # on both ends and still unable to log in is a genuinely confusing
+        # failure, and it looks like a key or firewall problem rather than a
+        # condition that was never true on the server.
+        ++ lib.optional
+          ((opts.remoteBuilder.enable || headless) && opts.remoteBuilder.authorizedKey != null)
           opts.remoteBuilder.authorizedKey;
     }
 
@@ -311,9 +321,34 @@ in {
       settings.builders-use-substitutes = true;
       buildMachines = [
         {
-          inherit (opts.remoteBuilder) hostName maxJobs speedFactor sshKey;
-          sshUser = opts.username;
-          protocol = "ssh-ng";
+          sshUser = opts.remoteBuilder.sshUser;
+          inherit (opts.remoteBuilder) maxJobs speedFactor sshKey;
+
+          # 🔴 PORT 2222, PINNED, AND DELIBERATELY EXPLICIT.
+          #
+          # Nix defaults to port 22, and port 22 on this tailnet is Tailscale
+          # SSH (`--ssh=true` in the `services.tailscale` block above). Tailscale
+          # SSH intercepts port 22 BEFORE the OS sshd sees it and authenticates
+          # with a Tailscale identity, bypassing authorized_keys entirely — so a
+          # key-based builder aimed at 22 stalls on a Tailscale handshake, or is
+          # refused by the tailnet ACL, and reports an error from the wrong layer.
+          #
+          # 2222 is ordinary OpenSSH (config/system/mobile-agents.nix owns that
+          # listener), so the key in authorized_keys above is actually checked.
+          # "SSH to the Legion works" is not evidence that the builder works.
+          #
+          # The port travels INSIDE hostName because nixpkgs' buildMachines in
+          # this tree has no sshOptions option: Nix splits a build machine's
+          # string on whitespace, so the extra tokens become ssh arguments. That
+          # looks like a hack and is, but it is the only spelling available here
+          # — and an unpinned default of 22 is a silent, hard-to-diagnose
+          # failure, which is a far worse trade than an odd-looking string.
+          hostName = "${opts.remoteBuilder.hostName} -p ${toString opts.remoteBuilder.port}";
+
+          # `ssh-ng` is Nix's actual SSH transport. `builtin` speaks no SSH at
+          # all and would silently ignore sshOptions above, which turns a port
+          # mistake into something that looks like a Nix bug.
+          inherit (opts.remoteBuilder) protocol;
           system = "x86_64-linux";
           supportedFeatures = ["nixos-test" "benchmark" "big-parallel" "kvm"];
         }
