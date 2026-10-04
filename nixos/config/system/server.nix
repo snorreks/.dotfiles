@@ -337,13 +337,20 @@ in {
           # listener), so the key in authorized_keys above is actually checked.
           # "SSH to the Legion works" is not evidence that the builder works.
           #
-          # The port travels INSIDE hostName because nixpkgs' buildMachines in
-          # this tree has no sshOptions option: Nix splits a build machine's
-          # string on whitespace, so the extra tokens become ssh arguments. That
-          # looks like a hack and is, but it is the only spelling available here
-          # — and an unpinned default of 22 is a silent, hard-to-diagnose
-          # failure, which is a far worse trade than an odd-looking string.
-          hostName = "${opts.remoteBuilder.hostName} -p ${toString opts.remoteBuilder.port}";
+          # BARE hostname, deliberately.
+          #
+          # nixpkgs writes /etc/nix/machines as
+          #     <hostName> <system> <sshKey> <maxJobs> <speedFactor> ...
+          # and Nix then parses that line by SPLITTING ON WHITESPACE. Putting
+          # "-p 2222" in hostName therefore did not add an ssh option: it made
+          # the system field "-p", the sshKey field "2222", and every field
+          # after it shift by two — so the entry no longer advertised
+          # x86_64-linux and the builder was silently skipped for those builds.
+          #
+          # The port is pinned by NIX_SSHOPTS below, which is Nix's own
+          # mechanism for extra ssh arguments (nixpkgs' rebuild tests use it the
+          # same way), plus the generated `Host legion / Port 2222` ssh_config.
+          hostName = opts.remoteBuilder.hostName;
 
           # `ssh-ng` is Nix's actual SSH transport. `builtin` speaks no SSH at
           # all and would silently ignore sshOptions above, which turns a port
@@ -355,6 +362,20 @@ in {
       ];
     })
   ];
+
+  # ── The port the builder is reached on, for the Nix DAEMON ────────────────
+  #
+  # The machine entry above can only carry a bare hostname, so the port has to
+  # reach Nix another way. NIX_SSHOPTS is that way: Nix prepends it to every ssh
+  # it makes, and it only makes ssh to builders.
+  #
+  # Without it the daemon falls back to port 22, which on this tailnet is
+  # Tailscale SSH — it intercepts before the OS sshd and authenticates with a
+  # Tailscale identity, so a key-based builder stalls or is refused by the ACL,
+  # reporting from the wrong layer entirely.
+  systemd.services.nix-daemon.environment = lib.mkIf (opts.remoteBuilder.enable && opts.headless == false) {
+    NIX_SSHOPTS = "-p ${toString opts.remoteBuilder.port}";
+  };
 
   environment.systemPackages = [
     # A long remote build still wants a multiplexer to live in — not because

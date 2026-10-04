@@ -232,11 +232,38 @@ $ sops --encrypt --in-place media-wg.conf
 
 Do the same for the proxy token:
 
+SOPS rejects `--in-place` when the value arrives on stdin with no input file,
+so piping `openssl` into it cannot produce the encrypted file this module
+reads. Write it first, then encrypt that file in place:
+
 ```console
-$ openssl rand -hex 32 | sops --encrypt --in-place   # -> proxyTokenSecretPath
+$ umask 077 && openssl rand -hex 32 > media-webui-token
+$ sops --encrypt --in-place media-webui-token   # -> proxyTokenSecretPath
 ```
 
-### Verify before travelling
+### Checking the ENABLED configuration
+
+Every media service ships disabled, so ordinary evaluation only proves the
+defaults are inert — and an inert-but-broken configuration looks exactly like an
+inert one. The enabled path has to be checked by hand, by temporarily flipping
+the `enable = false` defaults in `nixos/options.nix`:
+
+```console
+$ cd nixos
+$ nix eval --raw '.#nixosConfigurations.legion.config.system.build.toplevel.drvPath'
+$ git checkout -- options.nix        # revert; never commit the flip
+```
+
+Do this before merging anything that touches these modules. On this PR it found
+faults that no default-off evaluation could see: an unresolved `package = null`
+reaching `lib.getExe`, a tmpfiles rule naming `cfg.incompleteDir` in a module
+that has no such option, `networking.firewall.interfaces.*.log` (not an option),
+an attrset passed to `serviceConfig.Environment` on three units, and a
+self-referencing `config.environment.etc` read that presented as infinite
+recursion. Each would have been the first failure of a real deployment, found
+after the fact instead of in review.
+
+## Verify before travelling
 
 ```console
 $ netns-audit
@@ -298,9 +325,12 @@ identity and bypassing `authorized_keys`. A key-based builder pointed at 22
 stalls on a handshake or is refused by the ACL, and reports from the wrong
 layer. "SSH to the Legion works" is **not** evidence the builder works.
 
-> The port travels inside `hostName` (`"legion -p 2222"`) because this nixpkgs'
-> `nix.buildMachines` has no `sshOptions`. That looks like a hack and is; an
-> unpinned default of 22 is a worse trade.
+> `hostName` is kept **bare**. `/etc/nix/machines` is a whitespace-split line of
+> `<host> <system> <sshKey> <maxJobs> …`, so an `-p 2222` inside `hostName`
+> shifts every later field — the builder then no longer advertises
+> `x86_64-linux` and is silently skipped for those builds. The port is pinned
+> with `NIX_SSHOPTS` on the Nix daemon, which is Nix's own mechanism, plus the
+> generated `Host legion / Port 2222` ssh config.
 
 **On privilege:** the builder's account is in `nix.settings.trusted-users`, and
 trusted users can drive the daemon, which is **root-equivalent**. A dedicated

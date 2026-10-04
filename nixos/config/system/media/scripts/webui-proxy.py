@@ -55,6 +55,7 @@
 # needs. Refusing it is a smaller thing to keep correct than proxying it.
 import hmac
 import http.client
+import http.server
 import os
 import socket
 import socketserver
@@ -90,7 +91,8 @@ HOP_BY_HOP = frozenset(
 # Refused rather than forwarded. See the module header.
 REFUSED_REQUEST_HEADERS = frozenset({"upgrade", "connect"})
 
-_log_lock = None
+# Distinct from None, which means "a request with no body".
+BODY_REFUSED = object()
 
 
 def log(message):
@@ -126,7 +128,7 @@ def load_token():
 TOKEN = load_token()
 
 
-class Handler(http.client.BaseHTTPRequestHandler):
+class Handler(http.server.BaseHTTPRequestHandler):
     # HTTP/1.1 so keep-alive works; the browser is talking to a local proxy and
     # a new connection per asset is a needless tax.
     protocol_version = "HTTP/1.1"
@@ -225,9 +227,19 @@ class Handler(http.client.BaseHTTPRequestHandler):
         self._proxy(None)
 
     def do_POST(self):  # noqa: N802
-        self._proxy(self._read_body())
+        body = self._read_body()
+        if body is BODY_REFUSED:
+            return
+        self._proxy(body)
 
     def _read_body(self):
+        """Return the body, or BODY_REFUSED after having answered 413.
+
+        The sentinel exists because the caller must NOT then go on to proxy the
+        request. Returning None is indistinguishable from "empty body", and the
+        caller would forward a request whose body was never read: two responses
+        on one connection, and the unread bytes parsed as the next request.
+        """
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -238,11 +250,17 @@ class Handler(http.client.BaseHTTPRequestHandler):
         # read is a way to use it as a memory-pressure lever on the host.
         if length > 32 * 1024 * 1024:
             self._refuse(413, "body too large for the admin proxy\n")
-            return None
+            # The body is still in the socket, so the connection cannot be
+            # reused: the next request would begin mid-body.
+            self.close_connection = True
+            return BODY_REFUSED
         return self.rfile.read(length)
 
     def do_PUT(self):  # noqa: N802
-        self._proxy(self._read_body())
+        body = self._read_body()
+        if body is BODY_REFUSED:
+            return
+        self._proxy(body)
 
     def do_DELETE(self):  # noqa: N802
         self._proxy(None)

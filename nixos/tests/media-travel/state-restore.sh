@@ -31,11 +31,13 @@ printf '=== state-restore ===\n'
 # than on the developer's PATH.
 SQLITE="${MEDI_SQLITE:-sqlite3}"
 if ! command -v "$SQLITE" >/dev/null 2>&1; then
-  SQLITE="$(ls -d /nix/store/*-sqlite-*/bin/sqlite3 2>/dev/null | sort | tail -1 || true)"
+  # find, not ls: a store path is fine today, but ls parsing is what breaks
+  # first on a path with an unexpected character in it.
+  SQLITE="$(find /nix/store -maxdepth 3 -path '*-sqlite-*/bin/sqlite3' -type f 2>/dev/null | sort | tail -1)"
 fi
 if [[ -z "$SQLITE" || ! -x "$SQLITE" ]]; then
   printf 'sqlite3 not available — cannot exercise the export path.\n' >&2
-  printf 'It is in the flake check closure (nativeBuildInputs) for `nix build`.\n' >&2
+  printf 'It is in the flake check closure (nativeBuildInputs) for nix build.\n' >&2
   exit 1
 fi
 

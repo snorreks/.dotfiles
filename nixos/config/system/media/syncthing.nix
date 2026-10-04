@@ -48,6 +48,24 @@
 # devices sharing one node key is a tailnet incident, not a sync.
 {config, pkgs, lib, opts, ...}: let
   cfg = opts.media.syncthing;
+  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
+  # its options — which is a decision, not a constant. Reading
+  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
+  # missing" the moment media was enabled with backups off, i.e. in the default
+  # state of every host here. `opts ? agentOps` short-circuits first.
+  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+
+  # Same as torrents.nix: `package = null` means "whatever nixpkgs ships", and
+  # options.nix has no pkgs in scope to resolve it.
+  package = if cfg.package == null then pkgs.syncthing else cfg.package;
+
+  # The rules file's path.
+  #
+  # A literal rather than `config.environment.etc."…".path`, because that file is
+  # written by THIS module: referencing it from the module's own `let` is a
+  # self-reference and Nix reports it as infinite recursion.
+  ignoreRulesPath = "/etc/syncthing/media-ignore.rules";
+
 in {
   # The account. Gated with everything else, because defining it unconditionally
   # would create a system user on machines with Syncthing switched off — and an
@@ -55,17 +73,19 @@ in {
   #
   # It is in `media` so Syncthing can read the selected folders, and nothing
   # more: not in `wheel`, not the operator, no shell.
-  users.users.syncthing = lib.mkIf cfg.enable {
-    isSystemUser = true;
-    group = "syncthing";
-    extraGroups = ["media"];
-    description = "Syncthing, optional selective folder synchronisation";
-  };
-  users.groups.syncthing = lib.mkIf cfg.enable {};
+  # ONLY the extra group. nixpkgs creates the account itself under
+  # `systemService` (users.users.syncthing with uid, home, createHome and a
+  # description), so declaring `isSystemUser` here put a second, contradictory
+  # definition on the same user — NixOS requires exactly one of
+  # isSystemUser / isNormalUser / uid.
+  #
+  # `media` is the whole point: Syncthing can read the selected folders, and
+  # nothing more — not `wheel`, not the operator, no shell.
+  users.users.syncthing = lib.mkIf cfg.enable {extraGroups = ["media"];};
 
   services.syncthing = lib.mkIf cfg.enable {
     enable = true;
-    package = pkgs.syncthing;
+    package = package;
     dataDir = cfg.dataDir;
     user = "syncthing";
     group = "syncthing";
@@ -79,7 +99,24 @@ in {
     # and Collie. Not on the LAN, not on the tailnet directly, and never with
     # Funnel: the Syncthing GUI can add devices and read file listings for every
     # synchronised folder, which makes it an unusually valuable target.
-    guiAddress = "127.0.0.1";
+    # Host AND port. nixpkgs' default is "127.0.0.1:8384" and its `apply`
+    # turns a leading "/" into a unix socket — a bare "127.0.0.1" is not a
+    # complete listen address, so the GUI never served the endpoint the Serve
+    # mapping targets.
+    guiAddress = "127.0.0.1:${toString cfg.guiPort}";
+
+    # cfg.folders mapped into Syncthing's own configuration. It used to be
+    # validated and then dropped on the floor, so Syncthing started with no
+    # folders and the module's assertions governed nothing.
+    #
+    # `devices` is empty on a single-device setup, and that is correct rather
+    # than missing: it is filled in when the travel laptop presents its id.
+    settings.folders = lib.genAttrs cfg.folders (path: {
+      id = "media";
+      path = path;
+      devices = [];
+      rescanIntervalS = 3600;
+    });
 
     # 🔴 nixpkgs opens 8384 (GUI), 22000 (discovery) and 21027 (relay) by
     # default when this is true. Every one of those would publish the admin UI
@@ -90,6 +127,49 @@ in {
   systemd.tmpfiles.rules = lib.mkIf cfg.enable [
     "d ${cfg.dataDir} 0700 syncthing syncthing -"
   ];
+
+  # ── The folders actually configured ───────────────────────────────────────
+  #
+  # `cfg.folders` used to be validated and then dropped on the floor: nothing
+  # mapped it into `settings.folders`, so Syncthing started with no folders and
+  # the module's own assertions were checking an option that governed nothing.
+  #
+  # Each folder needs an `id` (Syncthing's own directory name), a path (the
+  # attrset key), and `devices` — which is empty on a single-device setup, and
+  # that is correct rather than missing: it is filled in when the travel laptop
+  # presents its device id.
+  # ── The exclusions have to be IN the folders, not beside them ────────────
+  #
+  # ð THE RULES FILE BELOW WAS NOT BEING APPLIED TO ANYTHING.
+  #
+  # Syncthing reads ignore patterns from a `.stignore` at the ROOT OF EACH
+  # SHARED FOLDER. Writing them to /etc and hoping was the whole
+  # implementation: Syncthing never opened that file, so every exclusion in it
+  # — every private key, every live database — was documentation.
+  #
+  # So the rules are now COPIED INTO each configured folder before Syncthing
+  # starts, and syncthing requires this unit to have succeeded.
+  systemd.services.syncthing-stignore = lib.mkIf (cfg.enable && cfg.folders != []) {
+    description = "Install the media ignore rules into each shared folder";
+    before = ["syncthing.service"];
+    after = ["local-fs.target"];
+    wantedBy = ["multi-user.target"];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # Each folder is handled separately: one unreadable folder must not leave
+      # the others unprotected, and must not be silent either.
+      ExecStart = lib.concatMapStringsSep "\n" (folder:
+        "${pkgs.coreutils}/bin/install -D -m 0644 "
+        + ignoreRulesPath
+        + " ${lib.escapeShellArg (folder + "/.stignore")}") cfg.folders;
+      TimeoutStartSec = "30s";
+    };
+  };
+
+  systemd.services.syncthing = {
+    requiredBy = ["syncthing.service"];
+  };
 
   systemd.services.tailscale-serve-syncthing = lib.mkIf cfg.enable {
     description = "Syncthing admin on the node's private Tailscale HTTPS endpoint";
@@ -179,7 +259,10 @@ in {
 
   assertions = lib.optionals cfg.enable [
     {
-      assertion = !lib.any (f: f == "/" || f == "" || f == "$HOME") cfg.folders;
+      # Checked against what Syncthing is actually configured with, not only
+      # the option: those were two different lists until this mapping existed.
+      assertion = !lib.any (f: f == "/" || f == "" || f == "$HOME")
+        (lib.attrNames (lib.mkIf cfg.enable config.services.syncthing.settings.folders));
       message = ''
         media: opts.media.syncthing.folders contains a whole-home or whole-root
         entry. Select specific directories; a home-directory folder would pull
@@ -189,7 +272,8 @@ in {
     }
 
     {
-      assertion = !lib.any (f: lib.hasPrefix "/var/lib/tailscale" f) cfg.folders;
+      assertion = !lib.any (f: lib.hasPrefix "/var/lib/tailscale" f)
+        (lib.attrNames (lib.mkIf cfg.enable config.services.syncthing.settings.folders));
       message = ''
         media: opts.media.syncthing.folders must not include Tailscale state.
         Synchronising it puts one node identity on two devices.
@@ -218,7 +302,7 @@ in {
       Restic is the backup; see docs/media-travel.md § "Sync is not backup".
     '';
 
-  agentOps.backup = lib.mkIf (cfg.enable && opts.agentOps.backup.enable) {
+  agentOps.backup = lib.mkIf (cfg.enable && backupEnabled) {
     sources = [{paths = [cfg.dataDir];}];
   };
 }

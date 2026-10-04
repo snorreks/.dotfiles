@@ -64,7 +64,11 @@ fi
 # different design and would not have the same failure behaviour, so the
 # policy itself is what is asserted, not merely that something is dropped.
 for tool in "$IPT" "$IP6T"; do
-  policy="$("$IP" netns exec "$NS" "$tool" -S OUTPUT 2>/dev/null | head -1 | awk '{print $1}')"
+  # `iptables -S OUTPUT` prints `-P OUTPUT ACCEPT` FIRST, then the rules, so
+  # field 1 of the first line is the literal "-P" and every policy check failed
+  # — which meant this audit refused to let anything start, on a namespace whose
+  # policy was correct. The policy is field 3 of the line beginning with -P.
+  policy="$("$IP" netns exec "$NS" "$tool" -S OUTPUT 2>/dev/null | awk '/^-P /{print $3; exit}')"
   if [[ "$policy" == "DROP" || "$policy" == "REJECT" ]]; then
     pass "$tool OUTPUT policy is $policy"
   else
@@ -112,7 +116,7 @@ done
 # egress but an open ingress has not been isolated, it has only been half
 # isolated. Anything on the host that can route to the namespace address would
 # otherwise reach the WebUI directly, bypassing the loopback proxy entirely.
-input_policy="$("$IP" netns exec "$NS" "$IPT" -S INPUT 2>/dev/null | head -1 | awk '{print $1}')"
+input_policy="$("$IP" netns exec "$NS" "$IPT" -S INPUT 2>/dev/null | awk '/^-P /{print $3; exit}')"
 if [[ "$input_policy" == "DROP" || "$input_policy" == "REJECT" ]]; then
   pass "iptables INPUT policy is $input_policy"
 else

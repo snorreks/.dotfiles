@@ -97,6 +97,20 @@ IP="${MEDI_IP:-ip}"
 SYSCTL="${MEDI_SYSCTL:-sysctl}"
 
 log() { printf '[netns-up] %s\n' "$*" >&2; }
+
+# Run a command INSIDE the namespace.
+#
+# 🔴 THIS IS LOAD-BEARING, and getting it wrong is catastrophic rather than
+# merely broken. `$IPT -A OUTPUT -j DROP` run in the HOST namespace installs a
+# deny-all OUTPUT policy on this machine — on a box whose only ingress is the
+# tailnet. Every netfilter and sysctl operation below must therefore go through
+# here. The kernel's default INPUT policy is ACCEPT, so an unguarded namespace
+# is reachable from the host; and `net.ipv6.conf.all.disable_ipv6` in the HOST
+# namespace would change this machine's IPv6, not the namespace's.
+#
+# The interface was moved into $NS earlier in this script, so a bare `sysctl`
+# naming it cannot even find it — which is how the wrong scope was caught.
+nsx() { "$IP" netns exec "$NS" "$@"; }
 die() {
   printf '[netns-up] FATAL: %s\n' "$*" >&2
   exit 1
@@ -156,9 +170,9 @@ log "namespace=$NS veth=$VETH_HOST/$VETH_NS endpoint=$WG_HOST:$WG_PORT (IPv4-onl
 #
 # Disabled per-interface rather than globally so this namespace's policy does
 # not depend on — or alter — the host's sysctls.
-"$SYSCTL" -q -w "net.ipv6.conf.${VETH_NS}.disable_ipv6=1" \
+nsx "$SYSCTL" -q -w "net.ipv6.conf.${VETH_NS}.disable_ipv6=1" \
   || die "could not disable IPv6 on $VETH_NS"
-"$SYSCTL" -q -w "net.ipv6.conf.all.disable_ipv6=1" \
+nsx "$SYSCTL" -q -w "net.ipv6.conf.all.disable_ipv6=1" \
   || die "could not disable IPv6 in namespace $NS"
 "$IP" -n "$NS" -6 addr flush dev "$VETH_NS" 2>/dev/null || true
 "$IP" -n "$NS" -6 route flush dev "$VETH_NS" 2>/dev/null || true
@@ -177,13 +191,12 @@ log "namespace=$NS veth=$VETH_HOST/$VETH_NS endpoint=$WG_HOST:$WG_PORT (IPv4-onl
 #
 # Flush first, always. Appending rules to whatever a previous run left behind is
 # how an allowance outlives the thing that justified it.
-"$IPT" -w -t nat -F "$NS" 2>/dev/null || true
-"$IPT" -w -F || true
-"$IPT" -w -X || true
-"$IP6T" -w -F || true
+nsx "$IPT" -w -F || true
+nsx "$IPT" -w -X || true
+nsx "$IP6T" -w -F || true
 
 # loopback is trusted, and nothing else on lo is permitted to leave the box
-"$IPT" -w -A OUTPUT -o lo -j ACCEPT
+nsx "$IPT" -w -A OUTPUT -o lo -j ACCEPT
 
 # ── THE TUNNEL ──────────────────────────────────────────────────────────────
 #
@@ -191,14 +204,14 @@ log "namespace=$NS veth=$VETH_HOST/$VETH_NS endpoint=$WG_HOST:$WG_PORT (IPv4-onl
 # existing. That is deliberate and it is the property the whole design rests
 # on: while wg0 is absent this rule matches NOTHING, so a client with no tunnel
 # falls through to the DROP policy below rather than being let out.
-"$IPT" -w -A OUTPUT -o "$WG_IF" -j ACCEPT
+nsx "$IPT" -w -A OUTPUT -o "$WG_IF" -j ACCEPT
 
 # ── Endpoint bootstrap: the ONLY other permitted egress ─────────────────────
 #
 # One flow. UDP, one numeric destination, one port. Not a subnet, not a range.
 # This is what lets the tunnel be established while the tunnel does not exist,
 # and it is deliberately the minimum that accomplishes that.
-"$IPT" -w -A OUTPUT -o "$VETH_NS" -p udp -d "$WG_HOST" --dport "$WG_PORT" -j ACCEPT
+nsx "$IPT" -w -A OUTPUT -o "$VETH_NS" -p udp -d "$WG_HOST" --dport "$WG_PORT" -j ACCEPT
 
 # ── INPUT: only the host's proxy may reach anything in here ────────────────
 #
@@ -210,9 +223,9 @@ log "namespace=$NS veth=$VETH_HOST/$VETH_NS endpoint=$WG_HOST:$WG_PORT (IPv4-onl
 #
 # Leaving this out is the difference between "downloads cannot leak" and "the
 # admin UI is unreachable from everything except one loopback proxy".
-"$IPT" -w -A INPUT -i lo -j ACCEPT
-"$IPT" -w -A INPUT -i "$VETH_NS" -s "$GATEWAY" -p tcp --dport "$WEBUI_PORT" -j ACCEPT
-"$IPT" -w -A INPUT -j DROP
+nsx "$IPT" -w -A INPUT -i lo -j ACCEPT
+nsx "$IPT" -w -A INPUT -i "$VETH_NS" -s "$GATEWAY" -p tcp --dport "$WEBUI_PORT" -j ACCEPT
+nsx "$IPT" -w -A INPUT -j DROP
 
 # ── DNS: nothing outside the tunnel ─────────────────────────────────────────
 #
@@ -225,24 +238,26 @@ log "namespace=$NS veth=$VETH_HOST/$VETH_NS endpoint=$WG_HOST:$WG_PORT (IPv4-onl
 # This is also why there is no OUTPUT rule permitting the namespace to reach the
 # host at all: it has no reason to, and not needing to is stronger than
 # permitting it narrowly.
-"$IPT" -w -A OUTPUT -o "$VETH_NS" -p udp --dport 53 -j DROP
-"$IPT" -w -A OUTPUT -o "$VETH_NS" -p tcp --dport 53 -j DROP
+nsx "$IPT" -w -A OUTPUT -o "$VETH_NS" -p udp --dport 53 -j DROP
+nsx "$IPT" -w -A OUTPUT -o "$VETH_NS" -p tcp --dport 53 -j DROP
 
 # ── And the policy that actually does the work ──────────────────────────────
-"$IPT" -w -A OUTPUT -j DROP
+nsx "$IPT" -w -A OUTPUT -j DROP
 
 # IPv4-mapped and v4-in-v6 traffic is the classic way a "we blocked IPv6"
 # policy gets walked around, so it is dropped before the generic IPv6 drop and
 # is written separately so that it can be distinguished in a ruleset dump.
-"$IP6T" -w -A OUTPUT -o lo -j ACCEPT
-"$IP6T" -w -A OUTPUT -o "$WG_IF" -j ACCEPT
-"$IP6T" -w -A OUTPUT -j DROP
+nsx "$IP6T" -w -A OUTPUT -o lo -j ACCEPT
+nsx "$IP6T" -w -A OUTPUT -o "$WG_IF" -j ACCEPT
+nsx "$IP6T" -w -A OUTPUT -j DROP
 
 # ── Reassembly ──────────────────────────────────────────────────────────────
 # Without this, fragments of a permitted packet are unmatchable and get
 # dropped, which shows up as a mysteriously half-working tunnel.
-"$IPT" -w -C FORWARD 2>/dev/null || true
-sysctl -q -w net.ipv4.ip_forward=0 2>/dev/null || true
+nsx "$IPT" -w -C FORWARD 2>/dev/null || true
+# Host-level: the host must not route between namespaces. Left unscoped on
+# purpose, which is why it is commented — every other sysctl here is nsx.
+"$SYSCTL" -q -w net.ipv4.ip_forward=0 2>/dev/null || true
 
 log "egress policy installed:"
 log "  allow lo"

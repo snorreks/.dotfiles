@@ -46,7 +46,7 @@ ok "ignore rules extracted from the module"
 
 # ── Build a fixture tree containing one of each hazard ─────────────────────
 TREE="$FIXTURE_TMP/sync"
-mkdir -p "$TREE"/{media,repo/.git,repo/worktrees,db,agent/sessions,keys,tailscale,build}
+mkdir -p "$TREE"/{media,repo/.git,repo/worktrees,db,agent/sessions,agent/herdr,keys,tailscale,build}
 
 # Ordinary media: MUST survive.
 : >"$TREE/media/Movie (2024).mkv"
@@ -60,7 +60,7 @@ mkdir -p "$TREE"/{media,repo/.git,repo/worktrees,db,agent/sessions,keys,tailscal
 : >"$TREE/db/library.db-wal"
 : >"$TREE/db/qBittorrent.sqlite3"
 : >"$TREE/agent/sessions/session-1.jsonl"
-: >"$TREE/agent/herdr/state.db"
+: >"$TREE/agent/herdr/state.db" || die "fixture: could not create agent/herdr/state.db"
 : >"$TREE/keys/id_ed25519"
 : >"$TREE/keys/repo.age"
 : >"$TREE/keys/tls.pem"
@@ -101,15 +101,34 @@ excluded() {
       [[ "$rel" == "$stripped" || "$rel" == "$stripped"/* \
          || "$rel" == *"/$stripped" || "$rel" == *"/$stripped"/* ]] && return 0
     else
+      # DELIBERATELY UNQUOTED. The rules ARE globs (`*.db`, `*.age`,
+      # `result-*`) and the glob is the entire point: quoting the pattern makes
+      # `case` match it literally, so `library.db` stops matching `*.db` and the
+      # suite passes while the rule does nothing.
+      #
+      # (shellcheck would quote the pattern to avoid accidental globbing; that
+      # is precisely the behaviour required here.)
+      # shellcheck disable=SC2254
+      # shellcheck disable=SC2254
       case "$rel" in
         $rule) return 0 ;;
       esac
+      # shellcheck disable=SC2254
       case "${rel##*/}" in
         $rule) return 0 ;;
       esac
     fi
   done <"$EXTRACT"
   return 1
+}
+
+# Any failure while BUILDING the fixture has to be fatal. Without this the
+# `: > file` for a directory that does not exist failed silently and the suite
+# went on to report success on an incomplete tree.
+die() {
+  printf '    FATAL fixture error: %s\n' "$1" >&2
+  summary "selective-sync"
+  exit 1
 }
 
 expect_kept() {
@@ -177,7 +196,10 @@ if grep -q 'lib.hasPrefix "/var/lib/tailscale"' "$SYN"; then
 else
   bad "no assertion refusing a Tailscale-state folder"
 fi
-if grep -q 'f == "\$HOME"' "$SYN"; then
+# -F, because the Nix source contains a literal `f == "$HOME"` and shellcheck
+# reads single-quoted $ as an unexpanded expansion that will confuse a reader.
+# shellcheck disable=SC2016
+if grep -qF 'f == "$HOME"' "$SYN"; then
   ok "the module refuses a whole-home folder at evaluation"
 else
   bad "no assertion refusing a whole-home folder"

@@ -67,7 +67,13 @@ in
     # ── The remote builder (Legion side is trusted-users; GS65 side builds) ─
     buildMachines = map (m: {hostName = m.hostName; sshUser = m.sshUser; protocol = m.protocol;}) (c.nix.buildMachines or []);
     trustedUsers = c.nix.settings.trusted-users;
+
+    # How the builder's PORT is pinned. It cannot live in `hostName`:
+    # /etc/nix/machines is whitespace-split, so "-p 2222" there shifts the
+    # system/sshKey/maxJobs fields and silently un-advertises the builder.
+    nixDaemonSshOpts = c.systemd.services.nix-daemon.environment.NIX_SSHOPTS or "";
     sshdPorts = c.services.openssh.ports;
+    pinnedKnownHosts = c.home-manager.users.sonny.home.file.".ssh/known_hosts.travel".text or "";
 
     # ── The travel laptop ──────────────────────────────────────────────────
     #

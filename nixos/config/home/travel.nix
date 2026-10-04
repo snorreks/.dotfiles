@@ -32,12 +32,22 @@
   # tailnet is exactly where you do not want a MITM prompt.
   pinned = cfg.serverHostKey != "";
 
+  # `HostKey` is an sshd_config DIRECTIVE. There is no such option in
+  # ssh_config, so the pinned branch made ssh reject the whole file with
+  # "Bad configuration option" — the alias did not work at all once pinned.
+  #
+  # The client-side equivalent is a known_hosts ENTRY, so that is what is
+  # written (see `home.file` below) and what `UserKnownHostsFile` points at.
   hostKeyLine = ''
-    HostKey ${cfg.serverHostKeyType} ${cfg.serverHostKey}
     StrictHostKeyChecking yes
-    UserKnownHostsFile /etc/ssh/ssh_known_hosts.d/travel
+    UserKnownHostsFile ~/.ssh/known_hosts.travel
     UpdateHostKeys no
   '';
+
+  # The pinned entry itself: "<host> <type> <key>", the known_hosts(5) format.
+  # Written only when a key has been configured, so the file never exists in an
+  # unpinned machine's half-finished state.
+  knownHostsEntry = "${cfg.serverHost} ${cfg.serverHostKeyType} ${cfg.serverHostKey}";
 in {
   # ── SSH aliases ────────────────────────────────────────────────────────────
   #
@@ -70,15 +80,20 @@ in {
           # closing should be noticed quickly, because the fallback (a plain
           # SSH over the home LAN) is a different trust path entirely.
       ${if pinned then hostKeyLine else ''
-          # 🔴 NOT PINNED. opts.travel.serverHostKey is empty.
+          # ð NOT PINNED, AND THIS REFUSES TO CONNECT.
           #
-          # Generated here as a visible, failing configuration rather than a
-          # working one: the alternative is a first-connection TOFU prompt,
-          # which on a tailnet is exactly where you do not want to be asked to
-          # approve a key you did not verify. Populate it and rebuild.
-          StrictHostKeyChecking no
+          # This was `StrictHostKeyChecking no` with `UserKnownHostsFile
+          # /dev/null` and `LogLevel ERROR` — which is WEAKER than trust-on-first-use,
+          # not stronger: every key is accepted on every connection with no
+          # warning at all, so an impostor on the tailnet path or the LAN
+          # fallback is trusted silently, and forwarded sessions go to it.
+          #
+          # `yes` plus an empty known_hosts file means the connection FAILS until
+          # the key is pinned. That is the correct failure: a loud one at the
+          # moment you are on the machine, rather than a quiet one later.
+          StrictHostKeyChecking yes
           UserKnownHostsFile /dev/null
-          LogLevel ERROR
+          LogLevel VERBOSE
       ''}
 
       Host ${cfg.serverHost}-tailscale
@@ -92,11 +107,33 @@ in {
     '';
   };
 
+  # ── The pinned key, as a known_hosts entry ────────────────────────────────
+  #
+  # This is what makes the pin real. Without a file containing the entry, and
+  # with `StrictHostKeyChecking yes`, ssh would fail on every connection — which
+  # is the safe failure, but it means the pinned state never actually works.
+  #
+  # A SEPARATE file rather than ~/.ssh/known_hosts: that one grows live as ssh
+  # appends newly-trusted hosts, and nixos/tests' own history records home
+  # manager fighting that file over backups.
+  home.file = lib.mkIf (cfg.enable && pinned) {
+    ".ssh/known_hosts.travel".text = knownHostsEntry + "\n";
+  };
+
   # ── Native herdr remote attachment ────────────────────────────────────────
   home.packages = lib.mkIf (cfg.enable && cfg.herdrRemote.enable) [
     (pkgs.writeShellApplication {
       name = "herdr-travel";
-      runtimeInputs = [pkgs.coreutils pkgs.gnugrep pkgs.which pkgs.ripgrep];
+      # python3 and sed are CALLED by the script. Without them on PATH,
+      # resolve_machine fails and reports "no saved machine labelled legion" —
+      # a message that hides the real cause completely. `herdr` is deliberately
+      # NOT here: it is the user's own installed binary, and pinning one in
+      # would put a second version in the store next to it.
+      runtimeInputs = [
+        pkgs.coreutils
+        pkgs.gnugrep
+        pkgs.python3
+      ];
       # The script lives in its own file rather than inline in this module.
       # It is bash full of ${...} and $(), and keeping it here means every
       # shell expansion is also a Nix interpolation that has to be escaped — a
@@ -106,14 +143,26 @@ in {
   ];
 
   # ── Visible half-configuration ────────────────────────────────────────────
-  warnings = lib.mkIf (cfg.enable && cfg.herdrRemote.enable && !pinned) ''
+  # `lib.optional`, not `lib.mkIf`: `warnings` is a listOf str, and mkIf wraps
+  # the STRING rather than the list, so the moment the condition became true
+  # evaluation failed instead of warning.
+  #
+  # The condition does NOT include herdrRemote.enable: the pin is about the SSH
+  # ALIASES, which exist whenever travel is enabled. Gating on herdrRemote
+  # (default false) meant the GS65 never saw the warning about its own unpinned
+  # aliases.
+  warnings = lib.optional (cfg.enable && !pinned) ''
     travel: opts.travel.serverHostKey is empty, so the SSH aliases are generated
-    WITHOUT a host key pin (StrictHostKeyChecking no, UserKnownHostsFile
-    /dev/null).
+    WITHOUT a host key pin: StrictHostKeyChecking yes with an empty
+    known_hosts file, so every connection to it FAILS.
 
-    That is a visible, failing configuration on purpose rather than a working one
-    with a first-connection prompt. On a tailnet, an unverified host key prompt
-    is exactly the wrong place to be asked to approve a key.
+    That is deliberate, and it is the opposite of the earlier behaviour, which
+    was `StrictHostKeyChecking no` plus `UserKnownHostsFile /dev/null` plus
+    LogLevel ERROR — weaker than trust-on-first-use, because every key was
+    accepted on every connection with no warning printed at all.
+
+    A loud failure while you are sitting at the machine beats a quiet one on a
+    hotel network.
 
     On the server:
       cat /etc/ssh/ssh_host_ed25519_key.pub

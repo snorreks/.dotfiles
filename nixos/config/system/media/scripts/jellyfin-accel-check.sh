@@ -33,7 +33,11 @@
 set -uo pipefail
 
 VAINFO="${MEDI_VAINFO:-vainfo}"
-REQUIRE_CODECS="${MEDI_REQUIRE_CODECS:-h264_vaapi hevc_vaapi}"
+# PREFIXES, not exact names. vainfo reports VAProfileH264Main and
+# VAProfileHEVCMain, which normalise to "h264main" and "hevcmain"; neither
+# equals "h264_vaapi", so an exact match reported every codec missing and would
+# have kept acceleration off on a machine that has it.
+REQUIRE_CODECS="${MEDI_REQUIRE_CODECS:-h264 hevc}"
 BUS="${MEDI_INTEL_BUS_ID:-}"
 
 failures=0
@@ -86,7 +90,8 @@ fi
 
 missing=""
 for codec in $REQUIRE_CODECS; do
-  if printf '%s\n' "$available" | grep -qx "$codec"; then
+  # Prefix match: "h264" is satisfied by h264, h264main, h264high, ...
+  if printf '%s\n' "$available" | grep -q "^${codec}"; then
     pass "codec available: $codec"
   else
     missing="$missing $codec"

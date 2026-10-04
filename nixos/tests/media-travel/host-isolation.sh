@@ -123,13 +123,28 @@ fi
 
 # ── 4. The travel builder is pinned to 2222 / ssh-ng ──────────────────────
 machines="$(json '.buildMachines' "$GS65")"
-if [[ "$machines" == *"legion -p 2222"* ]]; then
-  ok "the remote builder is pinned to port 2222, not 22"
+
+# The hostname must be BARE. /etc/nix/machines is
+# "<host> <system> <sshKey> <maxJobs> ..." and Nix splits it on whitespace, so an
+# "-p 2222" embedded in hostName shifts every later field: the entry stops
+# advertising x86_64-linux and the builder is silently skipped for those builds.
+# That is worse than the port mistake it was meant to fix, and a substring check
+# for "legion -p 2222" would have PASSED on exactly that malformed value.
+if [[ "$machines" != *"legion -p"* ]]; then
+  ok "buildMachines hostName is a bare hostname (no ssh options smuggled into it)"
 else
-  bad "the builder is not pinned to 2222" "$machines — port 22 is Tailscale SSH and ignores authorized_keys"
+  bad "ssh options are embedded in hostName" "$machines - /etc/nix/machines is whitespace-split, so every later field is shifted"
+fi
+
+# The port is pinned by NIX_SSHOPTS on the nix daemon instead.
+sshopts="$(json '.nixDaemonSshOpts' "$GS65")"
+if [[ "$sshopts" == *"-p 2222"* ]]; then
+  ok "the Nix daemon is told to use port 2222 (NIX_SSHOPTS)"
+else
+  bad "NIX_SSHOPTS does not pin port 2222" "$sshopts - without it the daemon falls back to port 22 (Tailscale SSH, ignores authorized_keys)"
 fi
 if [[ "$machines" == *'"ssh-ng"'* ]]; then
-  ok "the builder protocol is ssh-ng (not builtin, which would ignore the port)"
+  ok "the builder protocol is ssh-ng (not builtin, which would ignore ssh options)"
 else
   bad "unexpected builder protocol" "$machines"
 fi
@@ -181,6 +196,28 @@ if grep -q "NOT PINNED" <<<"$sshcfg"; then
   ok "the missing host-key pin is reported in the generated config"
 else
   bad "no visible warning about the missing host-key pin" "an unpinned alias looks identical to a pinned one"
+fi
+
+# The unpinned branch must FAIL CLOSED. `StrictHostKeyChecking no` plus an empty
+# known_hosts file accepts every key on every connection and prints no warning,
+# which is WEAKER than trust-on-first-use — an impostor on the tailnet path or
+# the LAN fallback is trusted silently.
+unpinned_block="$(awk '/^Host legion$/{f=1} f&&/^Host /&&!/legion$/{exit} f' <<<"$sshcfg")"
+unpinned_effective="$(grep -v '^[[:space:]]*#' <<<"$unpinned_block")"
+if grep -q "StrictHostKeyChecking yes" <<<"$unpinned_effective"; then
+  ok "the unpinned alias refuses connections instead of trusting any key"
+else
+  bad "the unpinned alias does not fail closed" "$(grep -i strict <<<"$unpinned_effective" || echo '<no StrictHostKeyChecking line>')"
+fi
+if grep -q "LogLevel ERROR" <<<"$unpinned_effective"; then
+  bad "LogLevel ERROR suppresses the warning this relies on"
+else
+  ok "ssh warnings are not suppressed on the unpinned alias"
+fi
+if grep -q "HostKey " <<<"$sshcfg"; then
+  bad "ssh_config contains a HostKey directive" "HostKey is an sshd_config option; ssh rejects the whole file"
+else
+  ok "no server-only HostKey directive in the client ssh_config"
 fi
 
 summary "host-isolation"

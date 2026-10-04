@@ -39,6 +39,13 @@
 # explicit fallback and is unaffected by any of this.
 {config, pkgs, lib, opts, ...}: let
   cfg = opts.media.jellyfin;
+  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
+  # its options — which is a decision, not a constant. Reading
+  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
+  # missing" the moment media was enabled with backups off, i.e. in the default
+  # state of every host here. `opts ? agentOps` short-circuits first.
+  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+
 in {
   services.jellyfin = lib.mkIf cfg.enable {
     enable = true;
@@ -134,8 +141,13 @@ in {
   # parent, so a half-written download is never something a library scan can
   # pick up.
   systemd.tmpfiles.rules = lib.mkIf cfg.enable [
-    "d ${cfg.incompleteDir} 0750 jellyfin media -"
-    "d ${cfg.downloadDir} 0750 jellyfin media -"
+    # cfg.incompleteDir is deliberately NOT here: it belongs to the torrent
+    # client, and jellyfin has no such option — naming it made evaluation fail
+    # with "attribute 'incompleteDir' missing" the moment Jellyfin was enabled.
+    # cfg.downloadDir is NOT declared here: config/system/media/torrents.nix
+    # owns it (qbBittorrent writes it), and two tmpfiles rules for one path
+    # with different owners is a boot-time duplicate. jellyfin serves
+    # cfg.libraryDir, which it does own.
     "d ${cfg.libraryDir} 0750 jellyfin media -"
     "d ${cfg.dataDir} 0755 jellyfin media -"
     "d ${cfg.configDir} 0755 jellyfin media -"
@@ -187,11 +199,13 @@ in {
       name = "jellyfin-accel-check";
       runtimeInputs = [
         # Provides vainfo — the VAAPI entrypoint enumeration the check reads.
+        #
+        # `intel-media-sdk` (oneVPL, for the QSV entrypoints) is deliberately
+        # NOT a dependency: nixpkgs marks it insecure and refusing it, and the
+        # VAAPI check does not need it. If you want oneVPL/QSV rather than
+        # VAAPI, add it AND `permittedInsecurePackages` deliberately — with the
+        # CVE list you are accepting.
         pkgs.intel-media-driver
-        # Provides oneVPL/QSV, which is the other half of "QSV is available".
-        # Installed but not enabled by default: see the hardwareAcceleration
-        # block above.
-        pkgs.intel-media-sdk
         pkgs.pciutils
         pkgs.coreutils
       ];
@@ -208,7 +222,7 @@ in {
   # media/default.nix owns the export service and the heartbeatHook; this module
   # only declares WHAT has to survive, so the two cannot disagree about which
   # database matters.
-  agentOps.backup = lib.mkIf (cfg.enable && opts.agentOps.backup.enable) {
+  agentOps.backup = lib.mkIf (cfg.enable && backupEnabled) {
     sources = [
       {
         paths = ["${cfg.dataDir}/data"];
@@ -233,7 +247,7 @@ in {
 
         Collie owns 443 (config/system/mobile-agents.nix). Give Jellyfin its
         own port:
-          opts.media.jellyfin.serveHttpsPort = ${toString cfg.serveHttpsPort + 8440};
+          opts.media.jellyfin.serveHttpsPort = 8443;
       '';
     }
 

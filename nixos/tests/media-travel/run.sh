@@ -141,11 +141,20 @@ Not covered here, and reported as PENDING rather than assumed:
         netns-audit
 
   * Media services enabled. Every media service ships disabled, so this suite
-    proves the defaults are inert. Forcing them on during evaluation turned out
-    not to be expressible: the flake passes `opts` through specialArgs, which
-    outrank `_module.args`, so an extendModules override of `opts` is ignored.
-    The enabled-configuration assertions therefore live in the modules as
-    build-time assertions and refusals, which are evaluated by a real build.
+    proves the defaults are inert — and inert-but-broken looks identical to
+    inert. It is NOT expressible through `_module.args`: the flake passes
+    `opts` via specialArgs, which outrank `_module.args`, so an extendModules
+    override of `opts` is silently ignored.
+
+    Instead, enable them in options.nix itself (the `enable = false` defaults
+    under `media`, plus a tunnel endpoint and an upload limit), evaluate, and
+    revert. That is how the enabled path gets checked, and it has to be done by
+    hand: it found a set of faults that no default-off evaluation can see,
+    including an unresolved `package = null`, a tmpfiles rule naming a
+    directory option that did not exist, `networking.firewall.interfaces.*.log`,
+    which is not an option, and an attrset passed to `serviceConfig.Environment`
+    on three units. Any of those would have been the FIRST failure of a real
+    deployment, discovered after the fact rather than in review.
 
   * Real hardware: Intel QSV/VAAPI acceleration, playback and seek, real-WAN
     throughput, direct-versus-relay. See docs/media-travel.md.

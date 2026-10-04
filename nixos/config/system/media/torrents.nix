@@ -37,6 +37,11 @@
 {config, pkgs, lib, opts, ...}: let
   cfg = opts.media.torrents;
 
+  # The namespace-side address as a BARE IP, derived rather than declared as a
+  # second option so the CIDR used by `ip addr add` and the address used as an
+  # HTTP host can never disagree.
+  vethIp = lib.head (lib.splitString "/" cfg.vethAddr);
+
   netnsEnv = {
     MEDI_NS = cfg.namespace;
     MEDI_VETH_HOST = cfg.vethHost;
@@ -52,24 +57,41 @@
     MEDI_WG_ENDPOINT = "${cfg.tunnel.endpoint}";
   };
 
-  # Upload shaping. A token bucket on the tunnel interface inside the namespace,
-  # rather than a number in qBittorrent's own settings — qBittorrent's limit is
-  # mutable state that a UI change can raise, and this one cannot.
-  tcUnit = lib.optionalAttrs (cfg.uploadLimitKbit != null) ''
-    ${pkgs.iproute2}/bin/tc qdisc add dev ${cfg.tunnel.interface} root tbf \
-      rate ${toString cfg.uploadLimitKbit}kbit \
-      latency 400ms burst 64kb
-  '';
+  # A generated script rather than an interpolated command string: the rate has
+  # to reach `tc` as one token, and building the command by concatenating Nix
+  # and shell text is how that quietly stops being true.
+  tcUnit = lib.optionalAttrs (cfg.uploadLimitKbit != null) (
+    pkgs.writeShellApplication {
+      name = "media-tc-upload-limit";
+      runtimeInputs = [pkgs.iproute2];
+      text = ''
+        exec ${pkgs.iproute2}/bin/tc qdisc add dev ${cfg.tunnel.interface} root tbf \
+          rate ${toString cfg.uploadLimitKbit}kbit latency 400ms burst 64kb
+      '';
+    }
+  );
+  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
+  # its options — which is a decision, not a constant. Reading
+  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
+  # missing" the moment media was enabled with backups off, i.e. in the default
+  # state of every host here. `opts ? agentOps` short-circuits first.
+  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+
+  # `package = null` in options.nix means "whatever nixpkgs ships". options.nix
+  # is pure data with no pkgs in scope, so the resolution has to happen HERE —
+  # and it did not, which made every reference to the package fail with
+  # "The first argument is of type null" the moment torrents were enabled.
+  package = if cfg.package == null then pkgs.qbittorrent else cfg.package;
+
 in {
   # ── Accounts ──────────────────────────────────────────────────────────────
   #
   # Two distinct accounts, for two distinct jobs:
   #
-  #   qbittorrent  owns nothing except the client. Cannot read the media
-  #                library's read-only export, cannot read anything of the
-  #                operator's, and is not in any group that would let it.
-  #   media         read/write on the media tree, which is what Jellyfin and
-  #                the namespace need to share.
+  #   qbittorrent  owns nothing except the client. Cannot read the operator's
+  #                files, is not in `wheel`, and cannot read the library.
+  #   media         read/write on the media tree, which is what Jellyfin and the
+  #                namespace need to share.
   users.users.qbittorrent = {
     isSystemUser = true;
     group = "qbittorrent";
@@ -91,10 +113,13 @@ in {
   # trust.
   networking.firewall.interfaces = lib.mkIf cfg.enable {
     ${cfg.vethHost} = {
+      # Nothing may be routed THROUGH this host from the namespace; the
+      # namespace has no default route and this is the host-side half of that.
+      #
+      # There is no `log` option on a firewall interface in this nixpkgs, and
+      # adding one made evaluation fail with "option ... does not exist" the
+      # moment torrents were enabled.
       allowedTCPPorts = [cfg.webuiPort];
-      # Nothing may be routed THROUGH this host from the namespace. The
-      # namespace has no route and this forbids it being granted one.
-      log = false;
     };
   };
 
@@ -153,9 +178,14 @@ in {
   # "move to library when complete" is a separate, visible step rather than an
   # accident of directory permissions.
   systemd.tmpfiles.rules = lib.mkIf cfg.enable [
+    # This module owns both: qBittorrent is what writes them. jellyfin.nix
+    # declares neither, because a second rule for the same path with a
+    # different owner is a boot-time duplicate rather than a merge.
     "d ${cfg.incompleteDir} 0750 qbittorrent media -"
     "d ${cfg.downloadDir} 0750 qbittorrent media -"
-    "d ${cfg.libraryDir} 0750 media jellyfin -"
+    # cfg.libraryDir is deliberately absent: jellyfin.nix owns it. Two tmpfiles
+    # rules for one path with different owners is a boot-time duplicate, and
+    # the owner named here ("media") is not a user this module creates.
   ];
 
   # ── 1. The namespace ──────────────────────────────────────────────────────
@@ -166,10 +196,13 @@ in {
     wantedBy = ["multi-user.target"];
     unitConfig.DefaultDependencies = false;
 
+    # `environment`, not `serviceConfig.Environment`: the latter is a systemd
+    # unit option and an attrset cannot serialise into `Environment=` lines.
+    environment = netnsEnv;
+
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      Environment = netnsEnv;
       ExecStart = "${pkgs.runtimeShell} ${./scripts/netns-up.sh}";
       # The namespace is the security boundary; if it takes longer than this
       # something is wrong, and a half-built namespace must not linger.
@@ -195,6 +228,10 @@ in {
     partOf = ["media-netns.service"];
     wantedBy = ["multi-user.target"];
 
+    # `environment`, not `serviceConfig.Environment`: the latter is a systemd
+    # unit option and an attrset cannot serialise into `Environment=` lines.
+    environment = netnsEnv;
+
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -208,7 +245,6 @@ in {
         "${cfg.proxyTokenSecretPath}"
       ];
       LoadCredential = "wg.conf:${config.sops.secrets.MEDIA_WG_CONFIG.path}";
-      Environment = netnsEnv;
       # wg-quick wants the config on disk, and $CREDENTIALS_DIRECTORY is
       # private to this service and per-invocation. The copy is into
       # PrivateTmp, so it never lands on a world-readable filesystem.
@@ -225,7 +261,11 @@ in {
       # Shaping is applied here rather than in qBittorrent's settings because
       # the tunnel is where the limit belongs: it applies to every client
       # configuration and cannot be raised from a web UI.
-      ExecStartPost = lib.mkIf (cfg.uploadLimitKbit != null) pkgs.runtimeShell + '' -c ${tcUnit}'';
+      # A generated script, referenced by path. Building this as an
+      # interpolated command string meant the rate ended up as shell text that
+      # had to be escaped, and a rate that failed to expand produced a qdisc
+      # command that quietly succeeded in shaping nothing.
+      ExecStartPost = lib.mkIf (cfg.uploadLimitKbit != null) "${tcUnit}";
       PrivateTmp = true;
       TimeoutStartSec = "30s";
     };
@@ -245,10 +285,13 @@ in {
     partOf = ["media-netns.service"];
     wantedBy = ["multi-user.target"];
 
+    # `environment`, not `serviceConfig.Environment`: the latter is a systemd
+    # unit option and an attrset cannot serialise into `Environment=` lines.
+    environment = netnsEnv;
+
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      Environment = netnsEnv;
       ExecStart = "${pkgs.runtimeShell} ${./scripts/netns-audit.sh}";
       TimeoutStartSec = "30s";
     };
@@ -296,14 +339,18 @@ in {
       AssertPathIsDirectory = [cfg.incompleteDir cfg.downloadDir];
 
       ExecStart = lib.escapeShellArgs [
-        (lib.getExe cfg.package)
+        (lib.getExe package)
         # Bound to the tunnel. Fails to connect when the tunnel is absent,
         # which is the correct behaviour: no tunnel, no downloads.
         "--interface"
         cfg.tunnel.interface
         "--webui-port=${toString cfg.webuiPort}"
       ];
-      ExecStopPost = "${pkgs.coreutils}/bin/rm -rf ${cfg.stateDir}";
+      # NO ExecStopPost. There was an `rm -rf ${cfg.stateDir}` here, which ran
+      # on every stop AND every on-failure restart and erased the torrent list,
+      # the resume data and the WebUI password — while cfg.stateDir is also the
+      # directory registered as a backup source, so it deleted what it existed
+      # to protect.
       Restart = "on-failure";
       RestartSec = "10s";
       # Startup order matters: network (the namespace) before the client.
@@ -329,24 +376,38 @@ in {
     wants = ["qbittorrent.service"];
     wantedBy = ["multi-user.target"];
 
+    # `environment`, NOT `serviceConfig.Environment`: the latter is a systemd
+    # unit option, and an attrset there cannot serialise into `Environment=`
+    # lines. NixOS's `environment` option does that conversion.
+    environment = {
+      MEDI_PROXY_LISTEN_HOST = "127.0.0.1";
+      MEDI_PROXY_LISTEN_PORT = toString cfg.proxyPort;
+      # The BARE address. cfg.vethAddr carries a /30 for `ip addr add`, and a
+      # CIDR is not a hostname — every proxied request was going to a Host
+      # header that could not resolve.
+      MEDI_PROXY_BACKEND_HOST = vethIp;
+      MEDI_PROXY_BACKEND_PORT = toString cfg.webuiPort;
+      # %d is the private, per-service credential directory.
+      MEDI_PROXY_TOKEN_FILE = "%d/proxy-token";
+    };
+
     serviceConfig = {
       Type = "simple";
       User = opts.username;
       LoadCredential = "proxy-token:${config.sops.secrets.MEDIA_WEBUI_TOKEN.path}";
-      Environment = {
-        MEDI_PROXY_LISTEN_HOST = "127.0.0.1";
-        MEDI_PROXY_LISTEN_PORT = toString cfg.proxyPort;
-        MEDI_PROXY_BACKEND_HOST = cfg.vethAddr;
-        MEDI_PROXY_BACKEND_PORT = toString cfg.webuiPort;
-        # %d is the private, per-service credential directory.
-        MEDI_PROXY_TOKEN_FILE = "%d/proxy-token";
-      };
       ExecStart = "${pkgs.python3}/bin/python3 ${./scripts/webui-proxy.py}";
       Restart = "on-failure";
       RestartSec = "5s";
       # Loopback is a socket, not a firewall rule, so this needs no host
       # firewall entry and no trustedInterfaces change.
-      IPAddressAllow = "localhost";
+      # BOTH: loopback (the browser) and the namespace backend. With
+      # `Deny = any` and only loopback allowed, the kernel blocked every
+      # request to the backend before python saw it, so the WebUI returned 502
+      # for everything.
+      IPAddressAllow = [
+        "localhost"
+        vethIp
+      ];
       IPAddressDeny = "any";
       NoNewPrivileges = true;
       ProtectSystem = "strict";
@@ -389,7 +450,7 @@ in {
       # 8080 is qBittorrent's own default and a famously scanned port. It is not
       # reachable from outside here, but keeping the default invites someone
       # later to "fix" reachability by opening it.
-      assertion = cfg.webuiPort != 8080 || cfg.proxyPort != 8080;
+      assertion = cfg.webuiPort != 8080 && cfg.proxyPort != 8080;
       message = ''
         media: the WebUI or proxy port is qBittorrent's default 8080. Pick
         something else; a well-known admin port is the wrong thing to be
@@ -398,7 +459,7 @@ in {
     }
 
     {
-      assertion = !cfg.enable || opts.media.jellyfin.enable
+      assertion = !cfg.enable || !opts.media.jellyfin.enable
         || cfg.downloadDir != opts.media.jellyfin.libraryDir;
       message = ''
         media: the torrent download directory is the Jellyfin library directory.
@@ -438,7 +499,7 @@ in {
   # Reuses the backup lane's sources list so a qBittorrent library survives a
   # restore; the export itself is media/default.nix's, because the export has to
   # outlive the run to be verifiable.
-  agentOps.backup = lib.mkIf (cfg.enable && opts.agentOps.backup.enable) {
+  agentOps.backup = lib.mkIf (cfg.enable && backupEnabled) {
     sources = [{paths = [cfg.stateDir];}];
   };
 }

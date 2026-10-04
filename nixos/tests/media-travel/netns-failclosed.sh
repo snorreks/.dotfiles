@@ -56,7 +56,7 @@ if log_has "netns add"; then
 else
   ok "no namespace was created"
 fi
-if log_has "iptables -w -A OUTPUT"; then
+if log_has "iptables -w -A OUTPUT" || log_has "NSEXEC iptables"; then
   bad "netfilter rules were installed despite the bad endpoint" "validation must happen first"
 else
   ok "no netfilter rules were installed"
@@ -85,29 +85,33 @@ fi
 
 # ── 3. Both policies are DROP, on both stacks ──────────────────────────────
 for tool in iptables ip6tables; do
-  if grep -qE "^$tool -w -A OUTPUT -j DROP$" "$FAKE_LOG"; then
+  if grep -E "^NSEXEC $tool -w -A OUTPUT -j DROP$" "$FAKE_LOG" | grep -q .; then
     ok "$tool OUTPUT policy is DROP"
   else
     bad "$tool OUTPUT policy is not DROP" "the policy IS the kill switch; binding is only extra"
   fi
 done
-grep -qE "^iptables -w -A INPUT -j DROP$" "$FAKE_LOG" \
-  && ok "iptables INPUT policy is DROP" \
-  || bad "iptables INPUT policy is not DROP" "a closed egress with open ingress is only half isolated"
+# if/then rather than `grep && ok || bad`: with `A && B || C`, C also runs when
+# B fails, so a FAIL line is printed alongside the ok one.
+if grep -E "^NSEXEC iptables -w -A INPUT -j DROP$" "$FAKE_LOG" | grep -q .; then
+  ok "iptables INPUT policy is DROP"
+else
+  bad "iptables INPUT policy is not DROP" "a closed egress with open ingress is only half isolated"
+fi
 
 # ── 4. The tunnel is allowed BY NAME ────────────────────────────────────────
 #
 # Unconditional: the rule must be installed whether or not wg0 currently
 # exists. An absent wg0 is what makes the rule match nothing, which is the
 # fail-closed property.
-if log_has "iptables -w -A OUTPUT -o wg0 -j ACCEPT"; then
+if ns_has "iptables -w -A OUTPUT -o wg0 -j ACCEPT"; then
   ok "tunnel allowed via '-o wg0', installed unconditionally"
 else
   bad "no unconditional '-o wg0' ACCEPT rule" "the fail-closed behaviour depends on it matching nothing while absent"
 fi
 
 # ── 5. The ONLY non-tunnel egress is one UDP flow ───────────────────────────
-endpoint_rules="$(grep -E "^iptables -w -A OUTPUT -o mtns0" "$FAKE_LOG" | grep -v -- "--dport 53" || true)"
+endpoint_rules="$(grep -E "^NSEXEC iptables -w -A OUTPUT -o mtns0" "$FAKE_LOG" | grep -v -- "--dport 53" || true)"
 count="$(printf '%s\n' "$endpoint_rules" | grep -c . || true)"
 if [[ "$count" == "1" ]]; then
   ok "exactly one non-DNS rule scoped to the veth"
@@ -115,7 +119,7 @@ else
   bad "expected 1 non-DNS veth rule, found $count" "$endpoint_rules"
 fi
 
-if log_has "iptables -w -A OUTPUT -o mtns0 -p udp -d 203.0.113.7 --dport 51820 -j ACCEPT"; then
+if ns_has "iptables -w -A OUTPUT -o mtns0 -p udp -d 203.0.113.7 --dport 51820 -j ACCEPT"; then
   ok "the single veth egress is UDP to the pinned numeric endpoint"
 else
   bad "the endpoint bootstrap rule is not the expected single UDP flow" "$endpoint_rules"
@@ -129,10 +133,16 @@ else
 fi
 
 # ── 6. DNS cannot leave over the veth ───────────────────────────────────────
-grep -qE "^iptables -w -A OUTPUT -o mtns0 -p udp --dport 53 -j DROP$" "$FAKE_LOG" \
-  && ok "UDP/53 over the veth is dropped" || bad "UDP/53 over the veth is not dropped"
-grep -qE "^iptables -w -A OUTPUT -o mtns0 -p tcp --dport 53 -j DROP$" "$FAKE_LOG" \
-  && ok "TCP/53 over the veth is dropped" || bad "TCP/53 over the veth is not dropped"
+if grep -E "^NSEXEC iptables -w -A OUTPUT -o mtns0 -p udp --dport 53 -j DROP$" "$FAKE_LOG" | grep -q .; then
+  ok "UDP/53 over the veth is dropped"
+else
+  bad "UDP/53 over the veth is not dropped"
+fi
+if grep -E "^NSEXEC iptables -w -A OUTPUT -o mtns0 -p tcp --dport 53 -j DROP$" "$FAKE_LOG" | grep -q .; then
+  ok "TCP/53 over the veth is dropped"
+else
+  bad "TCP/53 over the veth is not dropped"
+fi
 
 if printf '%s\n' "$endpoint_rules" | grep -q -- "--dport 53"; then
   bad "a DNS rule is not a DROP" "an ACCEPT of DNS on the veth is a working leak"
@@ -141,8 +151,11 @@ else
 fi
 
 # ── 7. IPv4-mapped traffic and IPv6 are both dropped ────────────────────────
-grep -qE "^ip6tables -w -A OUTPUT -j DROP$" "$FAKE_LOG" \
-  && ok "all IPv6 OUTPUT is dropped" || bad "IPv6 OUTPUT is not dropped"
+if grep -E "^NSEXEC ip6tables -w -A OUTPUT -j DROP$" "$FAKE_LOG" | grep -q .; then
+  ok "all IPv6 OUTPUT is dropped"
+else
+  bad "IPv6 OUTPUT is not dropped"
+fi
 
 # ── 8. The namespace has a host route but NO default route ─────────────────
 if log_has "ip -n medtns route add 10.77.0.1/32 dev mtns0"; then
@@ -157,13 +170,19 @@ else
 fi
 
 # ── 9. IPv6 is disabled on the interfaces, not merely unrouted ─────────────
-grep -q "sysctl -q -w net.ipv6.conf.mtns0.disable_ipv6=1" "$FAKE_LOG" \
-  && ok "IPv6 disabled on mtns0" || bad "IPv6 not disabled on mtns0"
-grep -q "sysctl -q -w net.ipv6.conf.all.disable_ipv6=1" "$FAKE_LOG" \
-  && ok "IPv6 disabled across the namespace" || bad "IPv6 not disabled namespace-wide"
+if ns_has "sysctl -q -w net.ipv6.conf.mtns0.disable_ipv6=1"; then
+  ok "IPv6 disabled on mtns0"
+else
+  bad "IPv6 not disabled on mtns0"
+fi
+if ns_has "sysctl -q -w net.ipv6.conf.all.disable_ipv6=1"; then
+  ok "IPv6 disabled across the namespace"
+else
+  bad "IPv6 not disabled namespace-wide"
+fi
 
 # ── 10. INPUT permits only loopback and the host proxy ─────────────────────
-input_allow="$(grep -E "^iptables -w -A INPUT" "$FAKE_LOG" | grep -v -- "-j DROP" || true)"
+input_allow="$(grep -E "^NSEXEC iptables -w -A INPUT" "$FAKE_LOG" | grep -v -- "-j DROP" || true)"
 if printf '%s\n' "$input_allow" | grep -q -- "-i lo -j ACCEPT"; then
   ok "loopback INPUT accepted"
 else
@@ -180,10 +199,31 @@ else
   ok "no other INPUT rule is permitted"
 fi
 
+# ── 10b. NOTHING firewall-related ran in the HOST namespace ───────────────
+#
+# This is the assertion that matters most in this suite, and it is the reason
+# the fixture models `netns exec` at all.
+#
+# `$IPT -A OUTPUT -j DROP` executed in the host namespace installs a deny-all
+# OUTPUT policy on this machine. On a box whose only ingress is the tailnet,
+# that is a lockout with no console. A suite that only checked the rules were
+# present would pass while they were being installed in the wrong place.
+# The one deliberate exception: net.ipv4.ip_forward is a HOST property (the
+# host must not route between namespaces), so it is set unscoped on purpose and
+# named here. Every other call must be inside the namespace.
+for tool in iptables ip6tables sysctl; do
+  escaped="$(grep -E "^$tool " "$FAKE_LOG" | grep -v 'net.ipv4.ip_forward=0' || true)"
+  if [[ -n "$escaped" ]]; then
+    bad "a $tool call ran in the HOST namespace" "$(printf '%s\n' "$escaped" | head -3)"
+  else
+    ok "no $tool call escaped the namespace (except the host ip_forward sysctl)"
+  fi
+done
+
 # ── 11. Re-running is idempotent (flush before rebuild) ────────────────────
 : >"$FAKE_LOG"
 run_netns_up "$STUBS" "203.0.113.7:51820"
-if grep -q "iptables -w -F" "$FAKE_LOG" && grep -q "iptables -w -X" "$FAKE_LOG"; then
+if ns_has "iptables -w -F" && ns_has "iptables -w -X"; then
   ok "rules are flushed before being rebuilt"
 else
   bad "rules are not flushed" "appending to a previous run's rules is how an allowance outlives its justification"

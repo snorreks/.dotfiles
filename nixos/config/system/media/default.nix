@@ -19,6 +19,25 @@
   # Anything that should be exported before a backup runs.
   exportAny = jellyfin.enable || torrents.enable;
   exportDir = "/var/lib/agent-ops/media-exports";
+
+  # Built once and used twice: installed into the system PATH for the operator,
+  # and referenced by ABSOLUTE path from the unit. A bare `media-state` in
+  # ExecStart resolves against the unit's PATH, which is NixOS's default
+  # utility set rather than `environment.systemPackages` — so the pre-backup
+  # export would not run, and the backup hook would then verify an export that
+  # was never made.
+  mediaState = pkgs.writeShellApplication {
+    name = "media-state";
+    runtimeInputs = [pkgs.sqlite pkgs.coreutils pkgs.util-linux];
+    text = builtins.readFile ./scripts/media-state.sh;
+  };
+  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
+  # its options — which is a decision, not a constant. Reading
+  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
+  # missing" the moment media was enabled with backups off, i.e. in the default
+  # state of every host here. `opts ? agentOps` short-circuits first.
+  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+
 in {
   imports = [
     ./jellyfin.nix
@@ -41,41 +60,55 @@ in {
   #
   # NVIDIA is untouched. Inference runs as the operator's own process and keeps
   # the discrete GPU; see jellyfin.nix for why Jellyfin is never pointed at it.
-  systemd.slices.mediaWorkload = lib.mkIf exportAny {
+  # NAMED `system-mediaWorkload.slice`, not `mediaWorkload.slice`.
+  #
+  # systemd derives a unit's parent from its name: everything before the final
+  # `-<name>` is the hierarchy. A slice called `mediaWorkload.slice` therefore
+  # resolves to a top-level slice with no named parent, and asking for
+  # `Slice = "system.slice"` as well does not fix that — it is the NAME that
+  # places the unit, and the two disagreed. The prefix is the parent.
+  systemd.slices."system-mediaWorkload" = lib.mkIf exportAny {
     description = "Media workloads: transcoding, scanning, downloading";
     sliceConfig = {
-      # Under system.slice, NOT under user.slice: management responsiveness is
-      # the property being protected, and this is the workload it protects
-      # against.
-      Slice = "system.slice";
       IOAccounting = true;
       TasksAccounting = true;
       MemoryAccounting = true;
       # A low IOWeight means downloads and library scans yield to the machine's
       # other work at the block layer, without either being stopped.
       IOWeight = 50;
-    };
-  };
-
-  # The operator's own slice is preferred as an OOM victim over the media
-  # workloads. `avoid` does not forbid the OOM killer; it makes the choice
-  # explicit and predictable instead of leaving it to allocation order.
-  systemd.user.slices.mediaAvoidOom = lib.mkIf exportAny {
-    description = "Prefer the operator's session over media workloads under memory pressure";
-    sliceConfig = {
-      Slice = "user.slice";
-      ManagedOOMPreference = "avoid";
+      # `evacuate` rather than `avoid` on the WORKLOAD. See the note above the
+      # management slice below for why the operator side cannot carry `avoid`.
+      ManagedOOMPreference = "evacuate";
       ManagedOOMSwap = "kill";
       ManagedOOMMemoryPressure = "kill";
     };
   };
+
+  # THE OPERATOR'S SIDE IS NOT CONFIGURED HERE, AND CANNOT BE.
+  #
+  # This previously declared a `mediaAvoidOom.slice` carrying
+  # `ManagedOOMPreference = avoid` with `Slice = "user.slice"`, on the theory
+  # that it protected the operator's session. It did not: the slice was EMPTY,
+  # so nothing ran in it, and the operator's login session lives in the
+  # system-managed `user-<uid>.slice`, which cannot be given `avoid` from here
+  # without claiming the whole system-managed slice.
+  #
+  # The preference is therefore expressed from the side that CAN be configured:
+  # the media workloads are marked `evacuate` above, which is systemd's
+  # supported way to say "these are the ones to kill". Same effect - a
+  # transcoding OOM takes the transcoder, not the session used to fix it -
+  # without claiming protection that was never there.
+  #
+  # Actually protecting the operator's slice would mean a logind drop-in and a
+  # per-slice property: a change to how login sessions are managed, which does
+  # not belong in a media PR.
 
   # `Slice` lives under serviceConfig in NixOS' systemd submodule — there is no
   # `sliceConfig` option, and `systemd.services.jellyfin` already exists
   # (nixpkgs' own jellyfin module defines it), so this merges across modules
   # rather than conflicting within this one.
   systemd.services.jellyfin.serviceConfig = lib.mkIf jellyfin.enable {
-    Slice = "mediaWorkload.slice";
+    Slice = "system-mediaWorkload.slice";
   };
 
   # ── Commands ──────────────────────────────────────────────────────────────
@@ -94,13 +127,7 @@ in {
   # services. The selector is required, so "copy the library" is never
   # something it does on its own.
   environment.systemPackages =
-    lib.optional exportAny (
-      pkgs.writeShellApplication {
-        name = "media-state";
-        runtimeInputs = [pkgs.sqlite pkgs.coreutils pkgs.util-linux];
-        text = builtins.readFile ./scripts/media-state.sh;
-      }
-    )
+    lib.optional exportAny mediaState
     ++ lib.optional jellyfin.enable (
       pkgs.writeShellApplication {
         name = "media-offline-prep";
@@ -118,30 +145,35 @@ in {
   # The seam config/system/agent-ops/backup.nix declares, filled in here. The
   # `after` includes the media services on purpose: exporting a database that
   # has never been created would report success for a state that does not exist.
-  systemd.services.media-state-export = lib.mkIf (exportAny && opts.agentOps.backup.enable) {
+  systemd.services.media-state-export = lib.mkIf (exportAny && backupEnabled) {
     description = "Export media service state for the backup (application-consistent)";
     before = ["agent-ops-backup.service"];
-    after = lib.mkMerge [
+    after = [
       "local-fs.target"
       "jellyfin.service"
       "qbittorrent.service"
     ];
     wantedBy = ["multi-user.target"];
+
+    # `environment`, not `serviceConfig.Environment`: the latter is a systemd
+    # unit option, and an attrset there cannot serialise into `Environment=`
+    # lines. NixOS's `environment` option does that conversion.
+    environment = {
+      MEDI_STATE_DIR = exportDir;
+      MEDI_JELLYFIN_DB =
+        lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/library.db";
+      MEDI_QBITTORRENT_PATHS =
+        lib.optionalString torrents.enable "${torrents.stateDir}/qBittorrent.conf";
+    };
+
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      Environment = {
-        MEDI_STATE_DIR = exportDir;
-        MEDI_JELLYFIN_DB =
-          lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/library.db";
-        MEDI_QBITTORRENT_PATHS =
-          lib.optionalString torrents.enable "${torrents.stateDir}/qBittorrent.conf";
-      };
-      ExecStart = "media-state export";
+      ExecStart = "${lib.getExe mediaState} export";
     };
   };
 
-  agentOps.backup = lib.mkIf (exportAny && opts.agentOps.backup.enable) {
+  agentOps.backup = lib.mkIf (exportAny && backupEnabled) {
     # Both switches, or neither: backup.nix refuses one without the other,
     # because a hook that never runs and a hook that runs against nothing look
     # identical from the outside.

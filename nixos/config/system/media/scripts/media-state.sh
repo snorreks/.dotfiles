@@ -138,11 +138,16 @@ do_verify() {
   local health="${2:-$HEALTH_DIR}"
   local record="$health/media-state.json"
 
+  # Created FIRST. The "missing" record below is the one an operator most needs
+  # to see, and writing it into a directory that does not exist yet failed
+  # silently — the missing report and the failure to write it look identical.
+  mkdir -p "$health"
+
   # A missing export directory means the pre-backup export did not run, which
   # is a FAILURE of the backup's completeness, not a reason to pass quietly.
   if [[ ! -d "$exports" ]]; then
     log "FAIL: $exports does not exist — the media export did not run"
-    printf '{"mediaExport":"missing"}\n' >"$record" 2>/dev/null || true
+    printf '{"mediaExport":"missing"}\n' >"$record"
     return 1
   fi
 
@@ -183,7 +188,6 @@ do_verify() {
   # operator is between "verified, and there was nothing to verify" and "never
   # ran".
   log "verified $checked database(s) and $plain plain export(s)"
-  mkdir -p "$health"
   printf '{"mediaExport":"ok","checked":%d,"plain":%d}\n' "$checked" "$plain" >"$record"
   return 0
 }

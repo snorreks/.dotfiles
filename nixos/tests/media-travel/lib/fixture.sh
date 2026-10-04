@@ -65,27 +65,62 @@ summary() {
 # exercised rather than accidentally satisfied.
 fake_root_bin() {
   local dir="$1"
+  # Resolved once, here, because the stubs are executed by netns-up.sh and a
+  # "#!/usr/bin/env bash" shebang fails outright in the nix build sandbox, where
+  # /usr/bin/env does not exist. nixos/tests/README.md records this for the
+  # other lanes' fakes; the stubs inherit the same constraint.
+  local TEST_BASH="${TEST_BASH:-}"
+  if [[ -z "$TEST_BASH" ]]; then
+    TEST_BASH="$(command -v bash || true)"
+  fi
+  if [[ ! -x "$TEST_BASH" ]]; then
+    printf 'fixture: no bash found; set TEST_BASH to an absolute path\n' >&2
+    return 1
+  fi
   mkdir -p "$dir"
   export FAKE_LOG="$dir/calls.log"
   : >"$FAKE_LOG"
 
   cat >"$dir/ip" <<'EOF'
-#!/usr/bin/env bash
+@@BASH@@
 printf 'ip %s\n' "$*" >>"$FAKE_LOG"
 # `netns del` on an absent namespace must FAIL, so the caller's `|| true` is
 # genuinely exercised rather than passing because the stub always succeeds.
 if [[ "$1" == "netns" && "$2" == "del" ]]; then exit 1; fi
+# `netns exec NS CMD ARGS...` runs CMD inside the namespace. Recorded with the
+# namespace stripped and the command marked, so a suite can assert that a
+# firewall call was SCOPED rather than issued against the host.
+if [[ "$1" == "netns" && "$2" == "exec" ]]; then
+  shift 3
+  # Shift THREE, not two: the argv is `netns exec <NS> <cmd> <args...>`, so
+  # shifting only "netns exec" leaves the namespace name as the command and the
+  # command as its first argument — which is exactly what an earlier version
+  # did, recording `NSEXEC medtns /nix/store/…/iptables` and matching nothing.
+  #
+  # The command NAME is recorded, not the stub's store path, because the
+  # assertions anchor on "NSEXEC iptables -w -A OUTPUT -j DROP".
+  printf 'NSEXEC %s %s\n' "${1##*/}" "${*:2}" >>"$FAKE_LOG"
+  exit 0
+fi
 exit 0
 EOF
 
   for tool in iptables ip6tables sysctl; do
-    cat >"$dir/$tool" <<EOF
-#!/usr/bin/env bash
+    cat >"$dir/$tool" <<'EOF'
+@@BASH@@
 printf '%s %s\n' "$tool" "\$*" >>"\$FAKE_LOG"
 exit 0
 EOF
   done
 
+  # Shebang written last, from a placeholder. It cannot be interpolated into a
+  # quoted heredoc (that is the whole point of the quoted heredoc: the stub body
+  # contains $1, $2 and $*, which must survive verbatim), and it cannot be
+  # interpolated by switching the heredoc to unquoted, because then the BODY is
+  # what gets expanded. So the stub is written with @@BASH@@ and patched.
+  for stub in ip iptables ip6tables sysctl; do
+    sed -i "1s|@@BASH@@|$TEST_BASH|" "$dir/$stub"
+  done
   chmod +x "$dir"/ip "$dir"/iptables "$dir"/ip6tables "$dir"/sysctl
   # Deliberately prints nothing: the caller passes in $dir, because this
   # function's one real side effect (exporting FAKE_LOG) cannot survive a
@@ -118,6 +153,11 @@ log_has() { grep -qF -- "$1" "$FAKE_LOG"; }
 
 # count_log <pattern> — how many recorded calls contain this?
 count_log() { grep -cF -- "$1" "$FAKE_LOG" || true; }
+
+# ns_has <pattern> — did a command recorded as running INSIDE the namespace
+# contain this? A firewall rule that exists but ran in the host namespace is a
+# host-wide DROP policy, which on an unattended box is a lockout.
+ns_has() { grep -F "NSEXEC" "$FAKE_LOG" | grep -qF -- "$1"; }
 
 
 # Resolved here rather than by each suite: the media scripts ARE what these

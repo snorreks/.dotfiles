@@ -95,7 +95,11 @@ printf '\n%s item(s), %s total\n' \
 
 # ── Space check, before copying ─────────────────────────────────────────────
 avail_kb="$(df -Pk -- "$CACHE_ROOT" | awk 'NR==2 {print $4}')"
-need_kb=$(((total_bytes + 1024 * 1024 - 1) / 1024 / 1024))
+# Bytes -> KiB, matching `df -Pk` and the headroom compared against it. This
+# divided by 1024 twice, producing MiB and comparing it to a KiB figure: a
+# 100 GiB selection passed with ~100 MiB free, which is exactly the "disk fills
+# mid-copy" outcome this check exists to prevent.
+need_kb=$(((total_bytes + 1023) / 1024))
 if ((avail_kb < need_kb + MIN_FREE_MB * 1024)); then
   die "not enough room in $CACHE_ROOT.
   need ${need_kb} MiB + ${MIN_FREE_MB} MiB headroom, have $((avail_kb / 1024)) MiB free.
