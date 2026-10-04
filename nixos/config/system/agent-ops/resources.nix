@@ -53,6 +53,53 @@
   ...
 }: let
   cfg = config.agentOps.resources;
+
+  # ── The weight-class generators ────────────────────────────────────────────
+  #
+  # Generated from one table so the four classes cannot drift apart: a per-class
+  # copy of these bodies is how `build` ends up idle-classed and `download`
+  # best-effort.
+  #
+  # 🔴 THE WEIGHTS GO ON THE SLICE, NOT ON A PLACEHOLDER SERVICE.
+  #
+  # systemd applies a unit's resource settings to that unit's own cgroup. A
+  # placeholder service that runs `true` and exits is weighted and then gone; a
+  # real workload placed in `agentOpsBuild.slice` inherits the SLICE's settings
+  # and nothing else. Weights on the service therefore bounded nothing while
+  # looking as though they bounded something.
+  mkClassSlice =
+    name: description: policy: {
+      systemd.user.slices.${name} = {
+        inherit description;
+        sliceConfig = {
+          Slice = "agent-workload.slice";
+          CPUWeight = policy.cpuWeight;
+          IOWeight = policy.ioWeight;
+          IOAccounting = true;
+          TasksAccounting = true;
+          MemoryAccounting = true;
+        };
+      };
+    };
+
+  mkClassSample =
+    name: policy: {
+      systemd.user.services.${name} = {
+        description = "Sample unit proving ${name}.slice exists and is joinable";
+        serviceConfig = {
+          # `Slice=` is a [Service] directive for a SERVICE unit — unlike a slice
+          # unit, which takes it from sliceConfig. Putting it in either the top
+          # level or a non-existent `sliceConfig` fails evaluation.
+          Slice = "${name}.slice";
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.coreutils}/bin/true";
+          # [Slice] has no IOSchedulingClass; that is a [Service] directive, so
+          # it is applied by the class's sample unit rather than the slice.
+          IOSchedulingClass = if policy.ioWeight <= 32 then "idle" else "best-effort";
+        };
+      };
+    };
 in {
   options.agentOps.resources = {
     enable = lib.mkOption {
@@ -113,198 +160,177 @@ in {
     admission = lib.mkOption {
       type = lib.types.attrs;
       default = {
-        # How many heavy classes may run at once. This is the admission control:
-        # a fourth concurrent model load or a third transcode is refused with a
-        # clear message rather than being allowed to thrash.
+        # How many heavy classes MAY run at once. See the description: this is
+        # recorded, not enforced.
         maxConcurrentInference = 1;
         maxConcurrentTranscode = 1;
         maxConcurrentDownloads = 2;
       };
       description = ''
-        How many members of each heavy class may be resident at once. Enforced by
-        a per-class slot directory: a workload must hold a slot file to start, so
-        the limit is observable (`ls /run/agent-ops/slots`) and not just an
-        internal counter nobody can query.
+        How many members of each heavy class MAY be resident at once.
+
+        🔴 CONFIGURED, NOT ENFORCED. This module creates `%t/agent-ops/slots/`
+        so the numbers are visible and a future wrapper has somewhere to put a
+        slot file, but nothing here acquires a slot or refuses a workload. A
+        fourth concurrent inference will run.
+
+        Enforcing it needs an interceptor in each workload's start path — a
+        systemd wrapper, or an ExecStartPre that takes a slot before exec — and
+        those units belong to the media/travel lane and to whatever runs the
+        models. Claiming a limit that does not exist is worse than recording one
+        that does, so it is recorded and labelled as not enforced.
       '';
     };
 
     slice = lib.mkOption {
       type = lib.types.str;
-      default = "agent-io";
+      default = "agent-workload";
       description = ''
-        Name of the parent IO class. NOT "system.slice" and NOT "init.scope":
-        management must not compete with the workloads it is measuring, and a
-        dedicated slice is how that is expressed without touching nixos/system.nix.
+        Name of the parent slice, WITHOUT the `.slice` suffix: NixOS appends it.
+        NOT "system.slice" and NOT "init.scope" — management must not compete
+        with the workloads it is measuring, and a dedicated slice is how that is
+        expressed without touching nixos/system.nix.
       '';
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    # A dedicated slice. The management slice is separate and explicitly
-    # higher-weighted, so a saturated build cannot make `systemctl --user status`
-    # or an SSH keystroke slow.
-    systemd.user.slices."agent-workload.slice" = {
-      description = "Bounded workloads: builds, inference, transcoding, downloads";
-      Slice = "user.slice";
-      # Weight for IO scheduling only; CPU accounting stays on the default
-      # hierarchy so `systemd-cgtop` numbers remain comparable.
-      IOWeight = cfg.policy.build.ioWeight;
-      IOAccounting = true;
-      TasksAccounting = true;
-      MemoryAccounting = true;
-    };
-
-    systemd.user.slices."agentOpsManagement.slice" = {
-      description = "Management: the things that must stay responsive";
-      Slice = "agent-workload.slice";
-      IOWeight = cfg.policy.management.ioWeight;
-      # Protect the cgroup itself from being OOM-killed by a workload next to it.
-      ManagedOOMSwap = "kill";
-      ManagedOOMMemoryPressure = "kill";
-      ManagedOOMPreference = "avoid";
-      IOAccounting = true;
-      TasksAccounting = true;
-      MemoryAccounting = true;
-    };
-
-    # The agent that is actually being talked to. herdr.service itself is NOT
-    # moved: it is the parent of everything, and re-parenting the parent is a
-    # far more invasive change than bounding the things it spawns. What is
-    # weighted is a small manager unit that agent processes can join.
-    systemd.user.services.agentOpsManager = {
-      description = "Weight class for interactive agent processes";
-      Slice = "agent-workload.slice";
-      IOWeight = cfg.policy.management.ioWeight;
-      IOAccounting = true;
-      TasksAccounting = true;
-      MemoryAccounting = true;
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${pkgs.coreutils}/bin/true";
-      };
-    };
-
-    # Per-class weights, applied as a delegated slice each. One file per class
-    # keeps the policy reviewable as a table instead of being scattered through
-    # unit definitions.
-    systemd.user.services.agentOpsBuild = {
-      description = "Weight class for nix builds";
-      Slice = "agentOpsBuild.slice";
-      CPUWeight = cfg.policy.build.cpuWeight;
-      IOWeight = cfg.policy.build.ioWeight;
-      IOSchedulingClass = "idle";
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${pkgs.coreutils}/bin/true";
-      };
-    };
-    systemd.user.slices."agentOpsBuild.slice" = {
-      Slice = "agent-workload.slice";
-      IOAccounting = true;
-    };
-
-    systemd.user.services.agentOpsInference = {
-      description = "Weight class for model inference";
-      Slice = "agentOpsInference.slice";
-      CPUWeight = cfg.policy.inference.cpuWeight;
-      IOWeight = cfg.policy.inference.ioWeight;
-      IOSchedulingClass = "best-effort";
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${pkgs.coreutils}/bin/true";
-      };
-    };
-    systemd.user.slices."agentOpsInference.slice" = {
-      Slice = "agent-workload.slice";
-      IOAccounting = true;
-    };
-
-    systemd.user.services.agentOpsTranscode = {
-      description = "Weight class for transcoding";
-      Slice = "agentOpsTranscode.slice";
-      CPUWeight = cfg.policy.transcode.cpuWeight;
-      IOWeight = cfg.policy.transcode.ioWeight;
-      IOSchedulingClass = "best-effort";
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${pkgs.coreutils}/bin/true";
-      };
-    };
-    systemd.user.slices."agentOpsTranscode.slice" = {
-      Slice = "agent-workload.slice";
-      IOAccounting = true;
-    };
-
-    systemd.user.services.agentOpsDownload = {
-      description = "Weight class for downloads and sync";
-      Slice = "agentOpsDownload.slice";
-      CPUWeight = cfg.policy.download.cpuWeight;
-      IOWeight = cfg.policy.download.ioWeight;
-      IOSchedulingClass = "idle";
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${pkgs.coreutils}/bin/true";
-      };
-    };
-    systemd.user.slices."agentOpsDownload.slice" = {
-      Slice = "agent-workload.slice";
-      IOAccounting = true;
-    };
-
-    # Admission slots. Observable by construction: `ls /run/agent-ops/slots` is
-    # the truth, not an internal counter.
-    systemd.user.tmpfiles.rules = [
-      "d %t/agent-ops/slots 0755 ${opts.username} ${opts.username} -"
-    ];
-
-    environment.etc."agent-ops/resources.conf".text = ''
-      # Generated by nixos/config/system/agent-ops/resources.nix.
+  config = lib.mkMerge [
+    (lib.mkIf cfg.enable {
+      # ── The slices ─────────────────────────────────────────────────────────
       #
-      # 🔴 THESE ARE DEFAULTS, NOT MEASUREMENTS. They have not been calibrated
-      # against a load test on this hardware. They are chosen so that a mistake
-      # costs throughput rather than availability. See docs/agent-operations.md,
-      # "Calibrating the resource policy", before raising or lowering any of them.
-      slice=${cfg.slice}
-      maxConcurrentInference=${toString cfg.admission.maxConcurrentInference}
-      maxConcurrentTranscode=${toString cfg.admission.maxConcurrentTranscode}
-      maxConcurrentDownloads=${toString cfg.admission.maxConcurrentDownloads}
-      ${lib.concatMapStringsSep "\n" (
-          name: v: ''
-            class.${name}.cpuWeight=${toString v.cpuWeight}
-            class.${name}.ioWeight=${toString v.ioWeight}
-            class.${name}.ioLatencyTargetSec=${v.ioLatencyTargetSec}
-          ''
-        )
-        cfg.policy}
-    '';
+      # 🔴 TWO NIXOS SHAPES IN ONE FILE, and getting them wrong is silent:
+      #
+      #   * `systemd.user.slices."<key>"` generates `<key>.slice`. The option
+      #     APPENDS the suffix, so a key of "agent-workload.slice" produces
+      #     `agent-workload.slice.slice` — a unit nothing references, from a
+      #     configuration that reads correctly in review. Keys below carry no
+      #     suffix.
+      #
+      #   * `systemd.user.services."<name>"` is a NixOS submodule with `after`,
+      #     `wantedBy`, `serviceConfig` and `sliceConfig`. It has no `After`,
+      #     `Install`, `Slice`, `CPUWeight` or `IOWeight` options — those are Home
+      #     Manager spellings, and using them fails EVALUATION. This module is
+      #     off by default, so nothing caught that until it was evaluated with
+      #     `enable = true`; nixos/tests/agent-operations now does exactly that.
+      #
+      # `description` is the one directive that legitimately sits at the top
+      # level; everything else goes in the section it belongs to.
 
-    # Reporting only, on a slow timer. A resource view that is expensive to
-    # produce is a resource view nobody looks at.
-    systemd.timers.agentOpsResources = {
-      description = "Sample the per-class resource accounting";
-      wantedBy = ["timers.target"];
-      timerConfig = {
-        OnBootSec = "5min";
-        OnUnitActiveSec = "1h";
-        AccuracySec = "1min";
-        Persistent = false;
-        Unit = "agentOpsResources.service";
+      # The parent slice for every bounded workload.
+      systemd.user.slices.${cfg.slice} = {
+        description = "Bounded workloads: builds, inference, transcoding, downloads";
+        sliceConfig = {
+          Slice = "user.slice";
+          # Weight for IO scheduling only; CPU accounting stays on the default
+          # hierarchy so `systemd-cgtop` numbers remain comparable.
+          IOWeight = cfg.policy.build.ioWeight;
+          IOAccounting = true;
+          TasksAccounting = true;
+          MemoryAccounting = true;
+        };
       };
-    };
 
-    systemd.user.services.agentOpsResources = {
-      description = "Sample per-slice CPU/IO accounting for the resource policy";
-      Slice = "agentOpsManager.slice";
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = "${pkgs.systemd}/bin/systemd-cgtop" "--batch" "--iterations=1";
-        TimeoutStartSec = 30;
+      # Management: the things that must stay responsive. Never a kill target —
+      # nixos/tests/kill-switch-targets.sh already asserts that management
+      # processes and their descendants are never swept.
+      systemd.user.slices.agentOpsManagement = {
+        description = "Management: the things that must stay responsive";
+        sliceConfig = {
+          Slice = "${cfg.slice}.slice";
+          IOWeight = cfg.policy.management.ioWeight;
+          # Protect the cgroup itself from being OOM-killed by a workload beside it.
+          ManagedOOMSwap = "kill";
+          ManagedOOMMemoryPressure = "kill";
+          ManagedOOMPreference = "avoid";
+          IOAccounting = true;
+          TasksAccounting = true;
+          MemoryAccounting = true;
+        };
       };
-    };
-  };
+
+      # The management class the sampler reports from.
+      systemd.user.services.agentOpsManager = {
+        description = "Weight class for interactive agent processes";
+        serviceConfig = {
+          Slice = "agentOpsManagement.slice";
+          Type = "oneshot";
+          RemainAfterExit = true;
+          ExecStart = "${pkgs.coreutils}/bin/true";
+        };
+      };
+
+      # ── Admission slots ────────────────────────────────────────────────────
+      #
+      # 🔴 NOT ENFORCED — see the `admission` option description.
+      systemd.user.tmpfiles.rules = [
+        "d %t/agent-ops/slots 0755 ${opts.username} ${opts.username} -"
+      ];
+
+      environment.etc."agent-ops/resources.conf".text = ''
+        # Generated by nixos/config/system/agent-ops/resources.nix.
+        #
+        # 🔴 THESE ARE DEFAULTS, NOT MEASUREMENTS. They have not been calibrated
+        # against a load test on this hardware. They are chosen so that a mistake
+        # costs throughput rather than availability. See docs/agent-operations.md,
+        # "Calibrating the resource policy", before raising or lowering any.
+        slice=${cfg.slice}
+        # 🔴 CONFIGURED, NOT ENFORCED. See the `admission` option description.
+        admission.enforced=false
+        maxConcurrentInference=${toString cfg.admission.maxConcurrentInference}
+        maxConcurrentTranscode=${toString cfg.admission.maxConcurrentTranscode}
+        maxConcurrentDownloads=${toString cfg.admission.maxConcurrentDownloads}
+        ${lib.concatStringsSep "\n" (
+          lib.mapAttrsToList (
+            name: v: ''
+              class.${name}.cpuWeight=${toString v.cpuWeight}
+              class.${name}.ioWeight=${toString v.ioWeight}
+              class.${name}.ioLatencyTargetSec=${v.ioLatencyTargetSec}
+            ''
+          )
+          cfg.policy)}
+      '';
+
+      # ── The sampler ────────────────────────────────────────────────────────
+      #
+      # 🔴 A USER TIMER, because the service it starts is a USER service. A
+      # `systemd.timers.*` unit cannot start a user service, so the system timer
+      # fired hourly into nothing.
+      systemd.user.timers.agentOpsResources = {
+        description = "Sample the per-class resource accounting";
+        wantedBy = ["timers.target"];
+        timerConfig = {
+          OnBootSec = "5min";
+          OnUnitActiveSec = "1h";
+          AccuracySec = "1min";
+          Persistent = false;
+          Unit = "agentOpsResources.service";
+        };
+      };
+
+      systemd.user.services.agentOpsResources = {
+        description = "Sample per-slice CPU/IO accounting for the resource policy";
+        serviceConfig = {
+          # `agentOpsManagement.slice` is a real slice: it is what
+          # systemd.user.slices.agentOpsManagement generates.
+          Slice = "agentOpsManagement.slice";
+          Type = "oneshot";
+          # ONE string. `"a" "b"` in Nix is function application, not two
+          # arguments, and it fails evaluation rather than producing a bad unit.
+          ExecStart = "${pkgs.systemd}/bin/systemd-cgtop --batch --iterations=1";
+          TimeoutStartSec = 30;
+        };
+      };
+    })
+
+    # One merge element per class: these are function calls, which cannot be
+    # statements inside an attribute set.
+    (lib.mkIf cfg.enable (mkClassSlice "agentOpsBuild" "Weight class for nix builds" cfg.policy.build))
+    (lib.mkIf cfg.enable (mkClassSample "agentOpsBuild" cfg.policy.build))
+    (lib.mkIf cfg.enable (mkClassSlice "agentOpsInference" "Weight class for model inference" cfg.policy.inference))
+    (lib.mkIf cfg.enable (mkClassSample "agentOpsInference" cfg.policy.inference))
+    (lib.mkIf cfg.enable (mkClassSlice "agentOpsTranscode" "Weight class for transcoding" cfg.policy.transcode))
+    (lib.mkIf cfg.enable (mkClassSample "agentOpsTranscode" cfg.policy.transcode))
+    (lib.mkIf cfg.enable (mkClassSlice "agentOpsDownload" "Weight class for downloads and sync" cfg.policy.download))
+    (lib.mkIf cfg.enable (mkClassSample "agentOpsDownload" cfg.policy.download))
+  ];
 }

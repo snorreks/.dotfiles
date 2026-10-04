@@ -44,6 +44,12 @@
 #   3  not privileged (mutating commands)
 set -o nounset -o pipefail
 
+# 🔴 errexit OFF, DELIBERATELY. writeShellApplication injects errexit, under
+# which `cmd_gc_check`'s `cmd_verify` (which returns 1 to report a dangling root)
+# would abort the script before it prints the retention verdict. The tests run
+# this file with plain `bash`, which has no errexit.
+set +o errexit
+
 PROGRAM_NAME=${0##*/}
 
 # Deliberately the SAME directory ns-maint pins into. That is what makes the
@@ -368,7 +374,7 @@ while [[ $# -gt 0 ]]; do
 		PID_FILE="$2"
 		shift 2
 		;;
-	--pid-file=*) PID_FILE="${1#--pid=}"; shift ;;
+	--pid-file=*) PID_FILE="${1#--pid-file=}"; shift ;;
 	--pid)
 		EXPLICIT_PID="$2"
 		shift 2

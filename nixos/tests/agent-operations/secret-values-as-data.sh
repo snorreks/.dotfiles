@@ -42,12 +42,13 @@ export SECRET_ENV_MANIFEST
 CANARY_CMD="$TMP/CANARY_COMMAND_SUBSTITUTION"
 CANARY_BTICK="$TMP/CANARY_BACKTICK"
 CANARY_RM="$TMP/CANARY_RM"
+CANARY="CANARY-4f2b91ee-DO-NOT-LEAK"
 
 # ── the fixture credentials ────────────────────────────────────────────────
 # Every shape that broke the old `export NAME="value"` template.
 printf 'sk-or-v1-plainvalue' >"$CREDENTIALS_DIRECTORY/PLAIN_KEY"
 printf 'has "double" quotes and $dollar and \\backslash' >"$CREDENTIALS_DIRECTORY/QUOTED_KEY"
-printf '$(touch %s); `touch %s`; rm -rf %s' "$CANARY_CMD" "$CANARY_BTICK" "$CANARY_RM" \
+printf '%s ; $(touch %s); `touch %s`; rm -rf %s' "$CANARY" "$CANARY_CMD" "$CANARY_BTICK" "$CANARY_RM" \
 	>"$CREDENTIALS_DIRECTORY/INJECT_KEY"
 printf 'line one\nline two\nline three\n' >"$CREDENTIALS_DIRECTORY/MULTILINE_KEY"
 printf 'unicode: æøå 日本語 🙂\n' >"$CREDENTIALS_DIRECTORY/UNICODE_KEY"
@@ -70,6 +71,9 @@ NUL_KEY||true
 PEM_KEY||true
 ANTHROPIC_API_KEY||false
 MISSING_KEY||true
+# A credential that is session-visible, used to prove an ambient copy of it is
+# stripped from a child that did not ask for it.
+OPENROUTER_API_KEY||true
 EOF
 # ANTHROPIC_API_KEY is sessionVariable=false, which does NOT mean "decryption
 # failed" — it means "never put it in a session". To prove it is still reachable
@@ -116,6 +120,7 @@ assert_contains "$out" 'æøå 日本語 🙂' 'non-ASCII bytes are preserved'
 _t_start "NO CODE EXECUTION: a value cannot become code"
 out="$(env_of INJECT_KEY | grep -a '^INJECT_KEY=')"
 assert_contains "$out" "\$(touch $CANARY_CMD)" 'the \$(...) payload arrived as literal text'
+assert_contains "$out" "$CANARY" 'and the canary prefix is part of the literal value'
 assert_contains "$out" "\`touch $CANARY_BTICK\`" 'the backtick payload arrived as literal text'
 assert_no_file "$CANARY_CMD" 'command substitution did NOT run'
 assert_no_file "$CANARY_BTICK" 'backtick substitution did NOT run'
@@ -196,6 +201,51 @@ assert_contains "$out" 'expected 3' 'and names the shape it expected'
 printf 'NAME||maybe\n' >"$TMP/bad2.manifest"
 out="$(bash "$SECRET_ENV" --manifest "$TMP/bad2.manifest" --check 2>&1)"
 assert_contains "$out" "SESSION must be" 'a non-boolean session flag is a hard error'
+
+# ═══════════════════════════════════════════════════════════════════════════
+_t_start "secrets never appear in a process argument list"
+# `env -i NAME=VALUE` puts every secret in the argv of the `env` process, which
+# any other local user can read from /proc/<pid>/cmdline or ps. The header
+# claimed otherwise; this is the test that makes it true.
+_argv_capture() {
+	# `exec -a` is not needed: /proc/self/cmdline of the child is what leaks, so
+	# read the child's own view of its argv.
+	printf '%s\0' "$@" | tr '\0' ' '
+}
+ARGV_PROBE="$TMP/bin/argv-probe"
+{
+	printf '#!%s\n' "$(command -v bash)"
+	printf 'for a in "$@"; do printf "%%s\\n" "$a"; done\n'
+	printf 'printf -- "---CMDLINE---\\n"\n'
+	printf 'tr "\\0" "\\n" < /proc/self/cmdline\n'
+} >"$ARGV_PROBE"
+chmod +x "$ARGV_PROBE"
+
+out="$(bash "$SECRET_ENV" --name INJECT_KEY --exec "$ARGV_PROBE" "arg-one" "arg-two" 2>/dev/null)"
+assert_not_contains "$out" 'CANARY' 'no secret value appears in the child argv'
+assert_contains "$out" 'arg-one' 'and the child did receive its real arguments'
+assert_contains "$out" '---CMDLINE---' 'the /proc/self/cmdline view was captured'
+cmdline_part="$(sed -n '/---CMDLINE---/,$p' <<<"$out")"
+assert_not_contains "$cmdline_part" 'CANARY' 'nor in /proc/self/cmdline'
+
+# ═══════════════════════════════════════════════════════════════════════════
+_t_start "the caller's environment survives; only credentials are scoped"
+# `env -i` also cleared TERM, LANG, USER, SSH_AUTH_SOCK and XDG_RUNTIME_DIR, so
+# `ns-secrets run pi` started a terminal program with no terminal and git over
+# SSH with no agent. Scoping means "these credentials", not "no environment".
+out="$(TERM=xterm-256color LANG=en_US.UTF-8 SSH_AUTH_SOCK=/tmp/agent.sock \
+	bash "$SECRET_ENV" --name PLAIN_KEY --exec "$TMP/bin/showenv" 2>/dev/null)"
+assert_contains "$out" 'TERM=xterm-256color' 'TERM survives (a terminal program still has a terminal)'
+assert_contains "$out" 'LANG=en_US.UTF-8' 'LANG survives'
+assert_contains "$out" 'SSH_AUTH_SOCK=/tmp/agent.sock' 'SSH_AUTH_SOCK survives'
+assert_contains "$out" 'PLAIN_KEY=sk-or-v1-plainvalue' 'and the requested credential is present'
+
+# ...while a DIFFERENT credential already in the environment is NOT inherited.
+out="$(OPENROUTER_API_KEY=inherited-secret \
+	bash "$SECRET_ENV" --name PLAIN_KEY --exec "$TMP/bin/showenv" 2>/dev/null)"
+assert_not_contains "$out" 'inherited-secret' \
+	'a credential that was not requested is removed from the environment'
+assert_contains "$out" 'PLAIN_KEY=sk-or-v1-plainvalue' 'and the requested one is still there'
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "the readiness report carries names and booleans, never values"

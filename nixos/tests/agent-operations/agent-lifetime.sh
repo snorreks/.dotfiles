@@ -188,7 +188,17 @@ for k, v in d.items():
 ' >"$out" || return 1
 		printf '%s' "$out"
 	}
-	HOST_FACTS="$(mk_facts)" || HOST_FACTS=""
+	# 🔴 DO NOT CLOBBER A WORKING PATH ON FAILURE.
+	#
+	# `HOST_FACTS="$(mk_facts)" || HOST_FACTS=""` replaced a perfectly good
+	# flake-provided path with the empty string whenever the fallback could not
+	# run, and then reported "the facts are missing" for a file that was sitting
+	# right there. Inside the sandboxed check the fallback CANNOT run — a nested
+	# `nix eval` has no network and no host store — so this took the passing path
+	# and turned it into a failure.
+	generated=""
+	generated="$(mk_facts)" || generated=""
+	[[ -n "$generated" ]] && HOST_FACTS="$generated"
 	if [[ -n "$HOST_FACTS" ]]; then
 		printf '    (host facts evaluated from the live configuration)\n'
 	fi
@@ -202,7 +212,7 @@ if [[ ! -r "$HOST_FACTS" ]]; then
 		return 1
 	}
 	TESTS_RUN=$((TESTS_RUN + 1))
-	_fail "the Legion unit facts are available (${HOST_FACTS} is missing)"
+	_fail "the Legion unit facts are available (expected a store path from AGENT_OPS_HOST_FACTS; got '$HOST_FACTS')"
 else
 	# NOT `source`d: bash would strip the double quotes out of
 	# HOST_FACT_herdrWantedBy=["default.target"] while reading it, and the
@@ -210,14 +220,23 @@ else
 	# instead, which keeps the value exactly as Nix wrote it.
 	fact() {
 		local key="$1" v
-		v="$(grep -m1 "^${key}=" "$HOST_FACTS" | cut -d= -f2- | tr -d ' ')"
-		# The value is JSON-encoded, so a string value arrives as "\"…\"" and a
-		# list as "[…]". Strip the outer quotes when they are really wrapping the
-		# whole thing, and unescape the inner ones.
-		if [[ "$v" == '"'*'"' ]]; then
+		v="$(grep -m1 "^${key}=" "$HOST_FACTS" | cut -d= -f2-)"
+		# ONE level of JSON encoding, so ONE decode: strip a wrapping pair of
+		# quotes if present, then unescape the inner quotes.
+		#
+		# Order matters and spaces must not be stripped first: `tr -d ' '` before
+		# the quote test leaves the value starting with an ESCAPED quote, so the
+		# outer-quote test never matches and every comparison runs against the
+		# still-escaped text.
+		if [[ "$v" == \"*\" ]]; then
 			v="${v:1:${#v}-2}"
 		fi
-		printf '%s' "$v" | sed 's/\\"/"/g'
+		# Parameter expansion, not sed: `sed 's/\\\\"/"/g'` in a shell file
+		# goes through two more layers of escaping, and getting it wrong leaves
+		# the backslashes in place with no error at all.
+		v="${v//\\\"/\"}"
+		v="${v//\\\\/\\}"
+		printf '%s' "$v"
 	}
 
 	assert_eq '["default.target"]' "$(fact "HOST_FACT_herdrWantedBy")" \

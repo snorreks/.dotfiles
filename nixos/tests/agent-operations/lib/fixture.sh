@@ -143,6 +143,11 @@ summary() {
 # caller's, for a standalone run) and is removed on exit, so a test cannot
 # accidentally depend on state from a previous one.
 fixture_new() {
+	# Remove any previous fixture FIRST. Reassigning $TMP before the old one is
+	# deleted, and re-pointing the EXIT trap, means fixture_free could only ever
+	# remove the LAST directory — so a suite that builds more than one fixture
+	# leaked every earlier one.
+	fixture_free
 	TMP="$(mktemp -d "${TMPDIR:-/tmp}/agent-ops-test.XXXXXXXX")"
 	mkdir -p "$TMP/bin" "$TMP/creds" "$TMP/log" "$TMP/roots" "$TMP/home"
 	export TMP
@@ -164,7 +169,10 @@ fixture_new() {
 }
 
 fixture_free() {
-	[[ -n "${TMP:-}" && -d "$TMP" ]] && rm -rf -- "$TMP"
+	if [[ -n "${TMP:-}" && -d "${TMP:-}" ]]; then
+		rm -rf -- "$TMP"
+	fi
+	TMP=""
 	return 0
 }
 

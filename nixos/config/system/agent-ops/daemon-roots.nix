@@ -81,6 +81,20 @@ in {
       '';
     };
 
+    repinInterval = lib.mkOption {
+      type = lib.types.str;
+      default = "15min";
+      description = ''
+        How often to re-pin while running.
+
+        The pin is idempotent and cheap, and it exists to close the window where
+        the daemon has been restarted onto a store path that no generation
+        references. Fifteen minutes bounds that window without a user-visible
+        re-pin storm: nothing about a daemon restart changes its lifetime, only
+        which closure it is executing.
+      '';
+    };
+
     units = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = ["herdr.service"];
@@ -105,7 +119,7 @@ in {
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${tool} pin --unit ${lib.head cfg.units}";
+        ExecStart = "${lib.getExe tool} pin --unit ${lib.head cfg.units}";
         # 1 means "a pin failed, or a root is dangling". Reported through the
         # unit's state and through ns-agent-health; never silently treated as
         # fine.
@@ -115,30 +129,56 @@ in {
       environment.NM_GCROOTS = cfg.gcrootsDir;
     };
 
-    # Re-pin on every herdr start. WantedBy=herdr.service is a wants-symlink
-    # INTO the herdr unit, so it is pulled in whenever herdr starts (including
-    # a restart); After= puts it behind the process, so /proc/PID/exe is there by
-    # the time it runs.
+    # ── Re-pinning after a daemon restart ────────────────────────────────────
     #
-    # This is deliberately NOT an ExecStartPost drop-in: a drop-in that appended
-    # ExecStartPost would change the effective unit, and the whole design point
-    # of herdr.service is that its text stays byte-identical across version
-    # bumps so home-manager never restarts it.
-    systemd.user.services.agent-ops-daemon-roots = {
-      description = "Pin the running herdr server's Nix closure against collection";
-      After = ["herdr.service"];
+    # 🔴 THIS IS A SYSTEM TIMER, AND IT USED TO BE A USER UNIT. Two separate
+    # reasons, both of which made the user unit a unit that could never succeed:
+    #
+    #   1. `systemd.user.services.<name>` in NixOS is a submodule with `after`,
+    #      `wantedBy`, `serviceConfig` and `sliceConfig`. It has no `After` or
+    #      `Install` option — those are Home Manager spellings, and using them
+    #      fails EVALUATION the moment this module is enabled. It was not caught
+    #      because the module is off by default.
+    #
+    #   2. Even with the right option names it could not have worked: `pin`
+    #      writes into the root-owned `$NM_GCROOTS`, and a user unit cannot.
+    #      `require_privileged` returns 3 for a non-root caller, so the unit
+    #      would have failed on every single start while looking configured.
+    #
+    # A system timer every few minutes is what actually closes the gap: a
+    # `nix flake update herdr` plus a herdr restart moves the daemon onto a new
+    # store path that no generation references, and this re-pins it. `pin` is
+    # idempotent and cheap (one readlink, one `nix-store --query`, one
+    # --add-root against an existing root).
+    systemd.timers.agent-ops-daemon-roots-pin = {
+      description = "Re-pin the running agent daemons' Nix closures";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnBootSec = "10min";
+        OnUnitActiveSec = cfg.repinInterval;
+        AccuracySec = "1min";
+        # NOT Persistent: a missed re-pin must not become a thundering herd on a
+        # machine that has just been off for a week. The boot-time service
+        # covers that case instead.
+        Persistent = false;
+        RandomizedDelaySec = "60s";
+        Unit = "agent-ops-daemon-roots-pin.service";
+      };
+    };
+
+    systemd.services.agent-ops-daemon-roots-pin = {
+      description = "Re-pin the running agent daemons' Nix closures against collection";
+      after = ["local-fs.target"];
       serviceConfig = {
         Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${tool} pin --unit ${lib.head cfg.units}";
+        ExecStart = "${lib.getExe tool} pin --unit ${lib.head cfg.units}";
+        # 1 means "a pin failed, or a root is dangling". Reported through the
+        # unit's state and through ns-agent-health; never silently treated as
+        # fine.
         SuccessExitStatus = "0 1";
         TimeoutStartSec = 300;
       };
       environment.NM_GCROOTS = cfg.gcrootsDir;
-    };
-
-    systemd.user.services.agent-ops-daemon-roots.Install = {
-      wantedBy = ["herdr.service"];
     };
 
     # A cheap daily proof that the pin still resolves. Without it, a root that
@@ -163,7 +203,7 @@ in {
       wantedBy = ["timers.target"];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${tool} verify";
+        ExecStart = "${lib.getExe tool} verify";
         TimeoutStartSec = 120;
       };
       environment.NM_GCROOTS = cfg.gcrootsDir;

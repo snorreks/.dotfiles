@@ -35,15 +35,20 @@ export HERDR_BIN="$TMP/bin/herdr"
 mkdir -p "$TMP/project" "$TMP/other"
 
 # ── a fake herdr client ─────────────────────────────────────────────────────
-# FAKE_HERDR_STATUS drives what `herdr status server` answers.
-fake herdr <<'FAKE'
-#!/bin/bash
+# A FUNCTION, not a bare `fake herdr` call, so a block that installs
+# single-purpose behaviour can put the shared one back. Without that, one
+# block's fake makes every later block exit 5 ("server not running") for a
+# reason that has nothing to do with what it is testing.
+write_herdr_fake() {
+	fake herdr <<'FAKE'
 if [[ "$1" == "status" && "$2" == "server" ]]; then
 	printf 'status: %s\n' "${FAKE_HERDR_STATUS:-running}"
 	exit 0
 fi
 printf 'herdr %s\n' "$*"
 FAKE
+}
+write_herdr_fake
 
 # ── a runner that touches a heartbeat, and one that exits immediately ───────
 mk_runner() {
@@ -342,6 +347,159 @@ out="$(START_TIMEOUT=2 resume)"
 assert_eq '1' "$?" 'missing heartbeat fails'
 assert_contains "$(cat "$TMP/unit.stops")" '--user stop herdr-task-' 'stops the entire task unit'
 cleanup_runs
+
+# ═══════════════════════════════════════════════════════════════════════════
+_t_start "a STARTING server is waited for, not reported as absent"
+# herdr.service is Type=simple: systemd calls it started the moment it forks, so
+# `After=herdr.service` does NOT mean the socket is listening. This unit is
+# WantedBy=herdr.service and fires in exactly that window. A single `herdr
+# status` there read "stopped", exited 5, and SuccessExitStatus=0 marked the
+# unit failed — so on a cold boot the opted-in tasks were never resumed and
+# nothing retried.
+rm -f "$TMP/herdr-status-calls"
+# `$(command -v bash)`, not /usr/bin/env: a nix build sandbox has no
+# /usr/bin/env, and a fake that cannot exec fails for a reason that has nothing
+# to do with what it is testing.
+# The shebang is written separately from the body: an UNQUOTED heredoc expands
+# "$1"/"${TMP}" while the fixture is being written, and a quoted one cannot
+# expand "$(command -v bash)". Two writes is the only way to get both.
+printf '#!%s\n' "$(command -v bash)" >"$TMP/bin/herdr"
+cat >>"$TMP/bin/herdr" <<'FAKE'
+if [ "$1" = "status" ] && [ "$2" = "server" ]; then
+	# Count our own polls, so the assertion can see that the script actually
+	# waited rather than deciding on the first answer.
+	printf 'n\n' >>"${TMP}/herdr-status-calls"
+	n=$(grep -c . "${TMP}/herdr-status-calls" 2>/dev/null || echo 0)
+	# "starting" twice, then "running".
+	if [ "$n" -ge 3 ]; then s=running; else s=starting; fi
+	printf 'status: %s\n' "$s"
+	exit 0
+fi
+FAKE
+chmod +x "$TMP/bin/herdr"
+rm -f "$TMP/herdr-status-calls"
+cat >"$TMP/project/.agent-ops-resume" <<EOF
+race|$TMP/project/good.sh|$TMP/project/hb
+EOF
+rm -f "$TMP/project/hb"
+out="$(SERVER_WAIT=10 START_TIMEOUT=8 bash "$RESUME" --root "$TMP/project" 2>&1)"
+rc=$?
+assert_eq '0' "$rc" 'a server that becomes ready is not reported as exit 5'
+assert_not_contains "$out" 'not running' 'and no "not running" refusal was printed'
+calls="$(wc -l <"$TMP/herdr-status-calls" 2>/dev/null || echo 0)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$calls" -ge 3 ]]; then
+	_ok "the server was polled until it was ready ($calls polls)"
+else
+	_fail "the server was polled until it was ready (only $calls polls)"
+fi
+
+# And a server that NEVER comes up must still fail visibly, not hang.
+printf '#!%s\n' "$(command -v bash)" >"$TMP/bin/herdr"
+cat >>"$TMP/bin/herdr" <<'FAKE'
+if [ "$1" = "status" ] && [ "$2" = "server" ]; then printf 'status: starting\n'; exit 0; fi
+FAKE
+chmod +x "$TMP/bin/herdr"
+start="$(date +%s)"
+out="$(SERVER_WAIT=4 bash "$RESUME" --root "$TMP/project" 2>&1)"
+rc=$?
+elapsed=$(( $(date +%s) - start ))
+assert_eq '5' "$rc" 'a server that never starts still exits 5'
+assert_contains "$out" 'not running' 'with the documented refusal'
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$elapsed" -le 20 ]]; then
+	_ok "and the wait is BOUNDED, not a hang (${elapsed}s)"
+else
+	_fail "and the wait is BOUNDED, not a hang (${elapsed}s)"
+fi
+cleanup_runs
+write_herdr_fake
+
+# ═══════════════════════════════════════════════════════════════════════════
+_t_start "the lock is held BEFORE the record and heartbeat are read"
+# 🔴 THE DUPLICATE LAUNCH THE LOCK EXISTS TO PREVENT.
+#
+# The lock used to be taken AFTER the record and heartbeat were read. Two
+# resumes — a manual `systemctl --user start` racing the WantedBy=herdr.service
+# trigger — could both read "no live pid, stale heartbeat". The first took the
+# lock, launched the task, wrote the record and released it; the second then
+# took the lock and launched the SAME task again, because its decision was made
+# from state it had read before it held the lock.
+#
+# Reproduced deterministically: the runner NEVER writes a heartbeat, so the first
+# resume stays inside its START_TIMEOUT wait — holding the lock for the whole of
+# it. That is the window in which the second resume used to decide "dead, go
+# ahead", then block on the lock, then launch a duplicate after the first
+# released it.
+mk_runner "$TMP/project/slow.sh" "sleep 25"
+cat >"$TMP/project/.agent-ops-resume" <<EOF
+dup|$TMP/project/slow.sh|$TMP/project/hb
+EOF
+rm -f "$TMP/project/hb"
+cleanup_runs
+
+lockfile="$AGENT_OPS_STATE_DIR/locks/$(printf '%s' "$TMP/project/dup" | tr -c 'A-Za-z0-9_.-' '_').lock"
+
+START_TIMEOUT=10 bash "$RESUME" --root "$TMP/project" >"$TMP/first.out" 2>&1 &
+FIRST=$!
+
+# Wait until the lock is ACTUALLY held, rather than guessing with sleep. Polling
+# the lock itself is the only thing that makes the race reproducible.
+held=no
+for _ in $(seq 1 60); do
+	mkdir -p "$(dirname "$lockfile")"
+	if [[ -f "$lockfile" ]] && ! flock -n 9 9>>"$lockfile" 2>/dev/null; then
+		held=yes
+		break
+	fi
+	sleep 0.25
+done
+assert_eq 'yes' "$held" 'the first resume is holding the lock'
+
+out="$(START_TIMEOUT=10 bash "$RESUME" --root "$TMP/project" 2>&1)"
+rc=$?
+assert_eq '4' "$rc" 'the second resume, arriving while the first holds the lock, exits 4'
+assert_contains "$out" 'another resume holds' 'and says the lock is held'
+# The refusal text itself contains the word "launching" ("not launching a
+# duplicate"), so assert on the launch line specifically.
+assert_not_contains "$out" "launching '$TMP/project/slow.sh'" \
+	'and does NOT launch a second copy'
+
+wait "$FIRST" 2>/dev/null || true
+runs="$(grep -c "launching '$TMP/project/slow.sh'" "$TMP/first.out" 2>/dev/null || true)"
+assert_eq '1' "$runs" 'and the task was launched exactly once, not twice'
+cleanup_runs
+
+# 🔴 STRUCTURAL GUARD for the ORDERING FIX, and stated honestly.
+#
+# The test above cannot distinguish the two orderings: `flock -n` is
+# NON-BLOCKING, so a second resume that arrives while the first still holds the
+# lock gets exit 4 under EITHER ordering. The bug the ordering fix removes is
+# narrower — the first resume FINISHING between the second's read of the record
+# and its acquisition of the lock — and that window is too small to hit
+# reliably.
+#
+# So this asserts the ORDER itself rather than pretending to reproduce the race:
+# the non-blocking flock must be taken before the record and heartbeat are read.
+# A structural check, clearly labelled as one, beats a behavioural test that
+# passes against the old code.
+src="$(cat "$RESUME")"
+lock_line="$(grep -n 'flock -n' <<<"$src" | head -1 | cut -d: -f1)"
+read_line="$(grep -n 'identity of the previously recorded run' <<<"$src" | head -1 | cut -d: -f1)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ -n "$lock_line" && -n "$read_line" ]] && ((lock_line < read_line)); then
+	_ok "the lock is taken before the record is read (line $lock_line < $read_line)"
+else
+	_fail "the lock is taken before the record is read (lock at ${lock_line:-?}, read at ${read_line:-?})"
+fi
+
+
+# 🔴 RESTORE the shared herdr fake. The blocks above overwrote $TMP/bin/herdr
+# with single-purpose versions, and leaving one in place makes every later
+# block exit 5 ("server not running") for a reason that has nothing to do with
+# what it is testing.
+write_herdr_fake
+
 
 assert_no_reboot "$TMP/reboots"
 summary

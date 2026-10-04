@@ -8,6 +8,11 @@
 # D's repo-contracts work is what consolidates discovery afterwards; this lane
 # does not wait for it.
 #
+# errexit.sh exists because every production script below is built by
+# writeShellApplication, which injects `set -o errexit -o nounset -o pipefail`.
+# Running them with plain `bash` — as every other suite here does — cannot see
+# that at all, so the errexit contract is asserted once, directly.
+#
 # The backup suite needs real restic and sqlite3. They are in the flake check's
 # closure, so `nix build .#checks.…agent-operations` runs it for real; a
 # developer running this script by hand without them gets a clear SKIP rather
@@ -19,6 +24,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
 SUITES=(
+	"errexit.sh"
 	"secret-values-as-data.sh"
 	"agent-lifetime.sh"
 	"daemon-roots.sh"

@@ -65,7 +65,8 @@
       2. SYSTEMD CREDENTIALS
          \$CREDENTIALS_DIRECTORY/<name>, readable only by the service that was
          given the credential. Used by restic (repository + password) and,
-         when agentOps.credentials.deliverToHerdr is set, by herdr.service.
+         when the Home Manager option herdr.agentCredentials.enable is set,
+         by herdr.service.
 
       3. EXPLICIT SESSION SCOPE
            ns-secrets                 # current interactive shell only

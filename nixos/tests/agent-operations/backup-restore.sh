@@ -235,6 +235,22 @@ RESTORED_DB="$(find "$QSCRATCH" -name 'collie.db' | head -1)"
 assert_file "$RESTORED_DB" 'the restored tree contains the quiesced database'
 assert_eq 'ok' "$("$SQLITE_BIN" "$RESTORED_DB" "PRAGMA integrity_check;" 2>/dev/null)" \
 	'the restored database passes integrity_check'
+# 🔴 THE LIVE DATABASE MUST NOT BE IN THE SNAPSHOT AT ALL.
+#
+# `staging="$(quiesce_all)"` ran quiesce_all in a command-substitution subshell,
+# so the STAGING array it filled was discarded and the caller added no
+# --exclude for the live path. The snapshot then contained BOTH the export AND
+# the raw database being written to — the one file it must never contain. The
+# earlier assertion (`find … -name collie.db | head -1`) matched either copy and
+# so passed. Count them instead.
+TESTS_RUN=$((TESTS_RUN + 1))
+copies="$(find "$QSCRATCH" -name 'collie.db' | wc -l)"
+if [[ "$copies" == "1" ]]; then
+	_ok 'exactly ONE collie.db is in the restore (the export, not the live file)'
+else
+	_fail "exactly ONE collie.db is in the restore (found $copies — the live database is being backed up)"
+fi
+
 rows="$("$SQLITE_BIN" "$RESTORED_DB" "SELECT count(*) FROM t WHERE v LIKE 'row-%';")"
 assert_eq '20000' "$rows" 'the export contains every row that existed before the concurrent writes'
 live_rows="$("$SQLITE_BIN" "$RESTORED_DB" "SELECT count(*) FROM t WHERE v LIKE 'live-%';")"
@@ -381,6 +397,107 @@ assert_contains "$out" 'verify it before you need it' 'and tells the operator wh
 assert_file "$TMP/scratch2$SOURCE/docs/blob.bin" 'a binary file came back too'
 assert_eq 'replaceable-not-there' "$( [[ -e "$TMP/scratch2$SOURCE/.cache" ]] && echo present || echo replaceable-not-there)" \
 	'an excluded path is still excluded in a restore'
+
+# Count snapshots that carry the agent-ops tag, by occurrence.
+count_tagged() {
+	local n
+	n="$("$RESTIC_BIN" --repo "$RESTIC_REPO" snapshots --json 2>/dev/null |
+		grep -o '"tags":\[[^]]*agent-ops-backup' | wc -l)"
+	printf '%s' "${n:-0}"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+_t_start "retention actually matches the snapshots it took"
+# `forget --tag agent-ops-backup` filtered on a tag that `backup` never added,
+# so `forget` removed nothing while reporting success. A retention policy that
+# silently does nothing is a false assurance, so the tag is asserted on both
+# sides: the snapshot must carry it, and forget must actually reduce the count.
+snapshots_json="$("$RESTIC_BIN" --repo "$RESTIC_REPO" snapshots --json 2>/dev/null || true)"
+assert_contains "$snapshots_json" 'agent-ops-backup' 'snapshots carry the agent-ops-backup tag'
+TESTS_RUN=$((TESTS_RUN + 1))
+tagged="$(count_tagged)"
+if [[ "$tagged" -ge 1 ]]; then
+	_ok "at least one snapshot is tagged for retention ($tagged)"
+else
+	_fail "at least one snapshot is tagged for retention (found $tagged)"
+fi
+
+# COUNT OCCURRENCES, not matching lines: restic emits compact JSON, so one
+# line holds every snapshot and `grep -c` reports 1 for any non-empty
+# repository — which reads as "forget removed nothing" no matter what it did.
+snapshot_count() {
+	local n
+	n="$("$RESTIC_BIN" --repo "$RESTIC_REPO" snapshots --json 2>/dev/null |
+		grep -o '"short_id"' | wc -l)"
+	printf '%s' "${n:-0}"
+}
+
+# An aggressive retention config, used only to make the forget contract
+# observable. Written here rather than by the module, because the point is to
+# drive the SCRIPT, not the generated config.
+# ALL THREE keep values go to zero. Zeroing only keep-daily is not enough: a
+# snapshot taken today is also within "this week" and "this month", so
+# keep-weekly/keep-monthly keep it and forget legitimately removes nothing —
+# which is indistinguishable from the tag filter matching nothing.
+sed -e 's/^keepDaily=.*/keepDaily=0/' -e 's/^keepWeekly=.*/keepWeekly=0/' -e 's/^keepMonthly=.*/keepMonthly=0/' \
+	"$CONFIG" >"$TMP/aggressive.conf"
+
+# Take one more snapshot so there is something to forget.
+printf 'more state\n' >"$SOURCE/docs/more.txt"
+backup backup >/dev/null 2>&1
+
+before_count="$(snapshot_count)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$before_count" -ge 1 ]]; then
+	_ok "the repository holds $before_count snapshot(s) to apply retention to"
+else
+	_fail "the repository holds snapshots to apply retention to (found $before_count)"
+fi
+
+# 🔴 `--unsafe-allow-remove-all` IS THE POINT, not a shortcut.
+#
+# With a normal keep-daily/keep-weekly/keep-monthly policy, snapshots taken
+# minutes apart are all "today", so `forget` legitimately keeps them and the
+# assertion could not tell "the tag matched" from "the tag matched nothing".
+# Removing ALL snapshots matching the tag is the only policy that distinguishes
+# the two: if the tag on the `backup` side and the tag on the `forget` side
+# disagree, nothing is removed and the count does not move.
+out="$(bash "$BACKUP" --config "$TMP/aggressive.conf" prune --forget-all 2>&1)"
+rc=$?
+assert_eq '0' "$rc" 'prune --forget-all succeeds'
+assert_contains "$out" 'retention applied' 'and reports that retention was applied'
+after_count="$(snapshot_count)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$after_count" -lt "$before_count" ]]; then
+	_ok "and snapshots matching the tag were ACTUALLY forgotten ($before_count -> $after_count)"
+else
+	_fail "snapshots matching the tag were ACTUALLY forgotten ($before_count -> $after_count — the tag filter matched nothing)"
+fi
+
+# Take a snapshot with the WRONG tag, plus a fresh tagged one, and prove the
+# filter is doing the work: the untagged snapshot must survive a forget that
+# only targets the agent-ops tag, and the tagged one must not.
+printf 'untagged state\n' >"$SOURCE/docs/untagged.txt"
+"$RESTIC_BIN" --repo "$RESTIC_REPO" backup "$SOURCE/docs/untagged.txt" >/dev/null 2>&1
+printf 'more tagged state\n' >"$SOURCE/docs/more2.txt"
+backup backup >/dev/null 2>&1
+tagged_before="$(count_tagged)"
+bash "$BACKUP" --config "$TMP/aggressive.conf" prune --forget-all >/dev/null 2>&1
+tagged_after="$(count_tagged)"
+TESTS_RUN=$((TESTS_RUN + 1))
+if [[ "$tagged_after" -lt "$tagged_before" ]]; then
+	_ok "forget removes only the snapshots it was told to ($tagged_before -> $tagged_after tagged)"
+else
+	_fail "forget removes only the snapshots it was told to ($tagged_before -> $tagged_after)"
+fi
+
+# --prune is a separate, explicit decision: forget must not reclaim on its own.
+out="$(bash "$BACKUP" --config "$TMP/aggressive.conf" prune 2>&1)"
+assert_not_contains "$out" 'pruning' 'plain prune does NOT reclaim'
+out="$(bash "$BACKUP" --config "$CONFIG" prune --prune 2>&1)"
+rc=$?
+assert_eq '0' "$rc" 'prune --prune succeeds under the normal retention policy'
+assert_contains "$out" 'pruning' 'and --prune reclaims explicitly'
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "no path in this suite rebooted anything"

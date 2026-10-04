@@ -224,7 +224,7 @@ The manifest is the corrected list that decision should be made against later.
 ## 6. Backup
 
 ```console
-sudo agent-ops-backup.service       # or: sudo ns-agent-backup backup
+sudo systemctl start agent-ops-backup.service   # or: sudo ns-agent-backup backup
 ns-agent-backup check                # repository integrity + snapshot age
 ns-agent-backup status               # last run, and whether it counts as healthy
 sudo ns-agent-backup restore --to /var/tmp/restore-test

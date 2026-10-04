@@ -122,7 +122,11 @@
 in {
   options.agentOps.state = {
     manifest = lib.mkOption {
-      type = lib.types.attrs;
+      # A LIST, because `entries` is a list of per-path records. Declaring
+      # `lib.types.attrs` here fails the type check the moment anything reads
+      # `config.agentOps.state.manifest` — which backup.nix does — so enabling
+      # backup could never have evaluated.
+      type = lib.types.listOf lib.types.attrs;
       readOnly = true;
       default = entries;
       description = "The reviewed inventory of state worth backing up. Read by backup.nix and health.nix.";

@@ -46,6 +46,27 @@
   quiesceTable = pkgs.writeText "agent-ops-quiesce.conf"
     (lib.concatMapStrings (e: "${e.path}|${e.method}|${e.arg}\n") cfg.quiesce);
 
+  # The monthly proof that the repository can be read back. A separate
+  # derivation rather than an inline `sh -c`, so that every path inside it is
+  # interpolated by Nix at BUILD time.
+  #
+  # 🔴 The previous inline version used `''${…}` inside a `''…''` script, which
+  # escapes the interpolation — the shell got the literal text `${tool}` and
+  # `${pkgs.coreutils}`, and the unit could never have run. It also invoked
+  # `${pkgs.coreutils}/bin/sh`, which does not exist.
+  verifyScript = pkgs.writeShellScript "agent-ops-backup-verify" ''
+    set -euo pipefail
+    scratch="$(mktemp -d /var/tmp/agent-ops-restore.XXXXXX)"
+    echo "restoring into $scratch (scratch only; this never writes live data)"
+    # NOT exec: the restore's own output is the evidence an operator reads in
+    # the journal, and `exec` would replace this shell and lose the listing
+    # below it.
+    ${lib.getExe tool} --config /etc/agent-ops/backup.conf restore --to "$scratch"
+    echo "--- what came back ---"
+    find "$scratch" -maxdepth 3 -type f | head -50
+    echo "--- inspect $scratch, then remove it ---"
+  '';
+
   tool = pkgs.writeShellApplication {
     name = "ns-agent-backup";
     runtimeInputs = [
@@ -331,18 +352,14 @@ in {
         description = "Prove the newest snapshot restores into scratch";
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = lib.escapeShellArgs [
-            "${pkgs.coreutils}/bin/sh"
-            "-c"
-            ''
-              set -e
-              scratch="$(''${pkgs.coreutils}/bin/mktemp -d /var/tmp/agent-ops-restore.XXXXXX)"
-              echo "restoring into $scratch (scratch only; this never writes live data)"
-              ''${tool} --config /etc/agent-ops/backup.conf restore --to "$scratch"
-              ''${pkgs.findutils}/bin/find "$scratch" -maxdepth 3 -type f | ''${pkgs.coreutils}/bin/head -50
-              echo "--- inspect $scratch, then remove it ---"
-            ''
-          ];
+          # A separate derivation rather than an inline `sh -c`, so every path in
+          # it is interpolated by NIX at build time.
+          #
+          # 🔴 The previous version used `''${…}` inside the `''…''` script, which
+          # ESCAPES the interpolation: the shell received the literal text
+          # `${pkgs.coreutils}` and `${tool}`, i.e. bad substitution, and the
+          # unit could never have run. It also ran under `/bin/sh`.
+          ExecStart = "${verifyScript} --config /etc/agent-ops/backup.conf";
           LoadCredential = [
             "RESTIC_REPOSITORY:${config.sops.secrets.RESTIC_REPOSITORY.path}"
             "RESTIC_PASSWORD:${config.sops.secrets.RESTIC_PASSWORD.path}"

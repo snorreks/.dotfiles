@@ -51,14 +51,22 @@ export SECRET_ENV_MANIFEST="$MANIFEST"
 
 # ── a loader that reports readiness, as secret-env.sh does ──────────────────
 LOADER="$TMP/secret-env"
-{
-	printf '#!/usr/bin/env bash\n'
-	printf 'if [ "$1" = "--format=json" ] || [ "$2" = "--format=json" ]; then\n'
-	printf '  printf %s\n' "'{\"manifest\":\"/etc/agent-ops/secrets.manifest\",\"credentials\":{\"LEAKY_KEY\":{\"ready\":true,\"session\":true,\"aliases\":[]},\"OPENROUTER_API_KEY\":{\"ready\":false,\"session\":true,\"aliases\":[]}},\"ready\":false}'"
-	printf '  exit 0\n'
-	printf 'fi\n'
-	printf 'exit 0\n'
-} >"$LOADER"
+# Written with a quoted heredoc, NOT with `printf 'printf %s\\n' …`: that
+# pattern makes printf's own %s conversion eat the script text and turns the
+# generated newline into a stray "n", which is how a stray character ended up
+# inside the JSON this suite is supposed to be validating.
+#
+# The shebang is `$BASH` (the resolved interpreter), not `/usr/bin/env bash`:
+# a nix build sandbox has no /usr/bin/env, and a fake that cannot find its
+# interpreter exits 127 — which reads as "the heartbeat never fired".
+printf '#!%s\n' "$(command -v bash)" >"$LOADER"
+cat >>"$LOADER" <<'LOADEREOF'
+if [ "$1" = "--format=json" ] || [ "$2" = "--format=json" ]; then
+  printf '%s\n' '{"manifest":"/etc/agent-ops/secrets.manifest","credentials":{"LEAKY_KEY":{"ready":true,"session":true,"aliases":[]},"OPENROUTER_API_KEY":{"ready":false,"session":true,"aliases":[]}},"ready":false}'
+  exit 0
+fi
+exit 0
+LOADEREOF
 chmod +x "$LOADER"
 export AGENT_OPS_SECRET_ENV="$LOADER"
 
@@ -69,18 +77,24 @@ printf 'LAST_STATUS=ok\nLAST_AT=%s\nLAST_DETAIL=fixture\n' "$NOW" >"$AGENT_OPS_B
 
 # ── fakes ──────────────────────────────────────────────────────────────────
 export AGENT_OPS_DAEMON_CHECK="$TMP/herdr-daemon-check"
-{
-	printf '#!/usr/bin/env bash\n'
-	printf 'printf %s\\n' "'{\"unit\":\"herdr.service\",\"daemonOwnership\":\"systemd\",\"compatibility\":\"compatible\",\"unitState\":\"ok\",\"pid\":1,\"exe\":\"/nix/store/deadbeef-herdr/bin/herdr\",\"conflicts\":[],\"healthy\":true}'"
-} >"$AGENT_OPS_DAEMON_CHECK"
+cat >"$AGENT_OPS_DAEMON_CHECK" <<'CHECKEOF'
+#!INTERPRETED_BY_THE_FIXTURE
+printf '%s\n' '{"unit":"herdr.service","daemonOwnership":"systemd","compatibility":"compatible","unitState":"ok","pid":1,"exe":"/nix/store/deadbeef-herdr/bin/herdr","conflicts":[],"healthy":true}'
+CHECKEOF
 chmod +x "$AGENT_OPS_DAEMON_CHECK"
+# /usr/bin/env does not exist in a nix build sandbox, so a fake
+# written with that shebang cannot exec and silently returns 127.
+sed -i "1s|#!INTERPRETED_BY_THE_FIXTURE|#!$(command -v bash)|" "$AGENT_OPS_DAEMON_CHECK"
 
 # A curl that can be made to hang or fail.
 CURL_CALLS="$TMP/curl-calls"
 : >"$CURL_CALLS"
 fake curl <<'FAKE'
 #!/bin/bash
-printf 'curl %s\n' "$*" >>"${TMP}/curl-calls"
+# ONE line per INVOCATION: the --data payload is multi-line pretty-printed JSON,
+# so logging "$*" verbatim makes `grep -c` count payload LINES and turns a
+# 3-attempt retry into a bogus "15 attempts".
+printf 'curl %s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >>"${TMP}/curl-calls"
 # Record ONLY the JSON body. The URL and the Authorization header are supposed
 # to be sent — that is how authentication works — so asserting that the whole
 # curl invocation is canary-free would be asserting that the endpoint cannot be
@@ -97,6 +111,13 @@ exit "${FAKE_CURL_EXIT:-0}"
 FAKE
 
 health() { timeout "${HEALTH_WALL_CLOCK:-60}" bash "$HEALTH" "$@" 2>&1; }
+
+# health_json — STDOUT ONLY.
+#
+# `health()` merges stderr into stdout so that diagnostics are assertable, which
+# is right for a substring check and wrong for a parse check: one stray warning
+# on stderr and `jq` rejects the lot. Parsing therefore gets its own call.
+health_json() { timeout "${HEALTH_WALL_CLOCK:-60}" bash "$HEALTH" "$@" 2>/dev/null; }
 
 _t_start "failed-unit counts expand to JSON numbers"
 fake systemctl <<'FAKE'
@@ -149,6 +170,73 @@ assert_contains "$out" 'PROBLEM' 'a failed backup is a problem even if it is rec
 printf 'LAST_STATUS=ok\nLAST_AT=%s\n' "$NOW" >"$AGENT_OPS_BACKUP_RECORD"
 
 # ═══════════════════════════════════════════════════════════════════════════
+_t_start "the --json output is actually JSON"
+# Every other assertion here is a substring match, which cannot tell valid JSON
+# from invalid JSON. It did not, and the document was invalid in almost every
+# field: the escaping helper escaped `"` but never added the surrounding
+# quotes. These assertions parse instead.
+if ! command -v jq >/dev/null 2>&1; then
+	printf '    SKIP jq is not on PATH (it is in the flake check closure)\n'
+else
+	out="$(health_json --json)"
+	TESTS_RUN=$((TESTS_RUN + 1))
+	if printf '%s' "$out" | jq -e . >/dev/null 2>&1; then
+		_ok 'ns-agent-health --json parses as a JSON document'
+	else
+		_fail 'ns-agent-health --json parses as a JSON document'
+	fi
+	assert_eq 'object' "$(printf '%s' "$out" | jq -r 'type' 2>/dev/null)" \
+		'and the top level is an object'
+	assert_ne 'null' "$(printf '%s' "$out" | jq -r '.backup.state' 2>/dev/null)" \
+		'and backup.state is a real value'
+	assert_eq 'array' "$(printf '%s' "$out" | jq -r '.problems | type' 2>/dev/null)" \
+		'and problems is an ARRAY, not the empty string an unquoted field produces'
+	assert_eq 'array' "$(printf '%s' "$out" | jq -r '.services | type' 2>/dev/null)" \
+		'and services is an array'
+	assert_eq 'array' "$(printf '%s' "$out" | jq -r '.disk | type' 2>/dev/null)" \
+		'and disk is an array'
+	assert_eq 'array' "$(printf '%s' "$out" | jq -r '.warnings | type' 2>/dev/null)" \
+		'and warnings is an array'
+	# A string containing a quote, a backslash and a newline must survive as a
+	# VALUE rather than breaking the document — the failure mode that the old
+	# sed-built heartbeat payload had.
+	assert_eq 'yes' "$(printf '%s' "$out" | jq -e 'has("overall") and has("at") and has("hostname")' >/dev/null 2>&1 && echo yes || echo no)" \
+		'the documented top-level keys are all present'
+
+	# The heartbeat payload must parse too, INCLUDING when a problem string
+	# contains a quote.
+	printf 'quote " backslash \\ and newline test\n' >"$CRED_DIR/AGENT_OPS_HEARTBEAT_URL"
+	printf 'bearer-%s' "$CANARY" >"$TMP/creds/HEARTBEAT_TOKEN"
+	: >"$TMP/payloads"
+	: >"$CURL_CALLS"
+	health >/dev/null 2>&1
+	TESTS_RUN=$((TESTS_RUN + 1))
+	payload_ok=yes
+	while IFS= read -r line; do
+		[[ -z "$line" ]] && continue
+		printf '%s' "$line" | jq -e . >/dev/null 2>&1 || payload_ok=no
+	done <"$TMP/payloads"
+	assert_eq 'yes' "$payload_ok" 'every heartbeat payload is a JSON document'
+
+	# Restore a usable endpoint: the blocks after this one exercise the
+	# no-recipient / insecure-endpoint / token-missing paths and depend on the
+	# credential files being in the state they set up themselves.
+	printf '%s' "https://heartbeat.invalid/$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_URL"
+	printf 'bearer-%s' "$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_TOKEN"
+	: >"$TMP/payloads"
+fi
+
+# The herdr daemon check is consumed by this script as JSON, so it has to parse.
+if command -v jq >/dev/null 2>&1 && [[ -x "$AGENT_OPS_DAEMON_CHECK" ]]; then
+	TESTS_RUN=$((TESTS_RUN + 1))
+	if "$AGENT_OPS_DAEMON_CHECK" --json 2>/dev/null | jq -e . >/dev/null 2>&1; then
+		_ok 'herdr-daemon-check --json parses as a JSON document'
+	else
+		_fail 'herdr-daemon-check --json parses as a JSON document'
+	fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 _t_start "REDACTION: no credential value appears in any output"
 # Every store the script reads from, and every field it reports.
 out="$(
@@ -176,9 +264,24 @@ for leak in "$CANARY" 'bearer-'; do
 	assert_not_contains "$sent" "$leak" "the heartbeat PAYLOAD carries no '$leak'"
 	assert_not_contains "$out" "$leak" "no health output contains '$leak'"
 done
-assert_contains "$sent" '"status":"' 'the heartbeat payload does carry a status field'
-assert_contains "$sent" '"problems":' 'and a problems field (empty here, which is why status is ok)'
-assert_contains "$sent" 'at' 'including a timestamp'
+assert_contains "$sent" '"status"' 'the heartbeat payload does carry a status field'
+assert_contains "$sent" '"problems"' 'and a problems field'
+assert_contains "$sent" '"at"' 'and a timestamp'
+TESTS_RUN=$((TESTS_RUN + 1))
+if printf '%s' "$sent" | jq -e '.status and (.problems | type == "array") and .at' >/dev/null 2>&1; then
+	_ok 'and the payload parses with a status, an array of problems and a timestamp'
+else
+	_fail 'the payload parses with a status, an array of problems and a timestamp'
+fi
+# 🔴 THE HUMAN REPORT MUST CARRY A DENOMINATOR.
+#
+# CRED_TOTAL and CRED_READY both used to count `"ready":true` occurrences, and
+# CRED_READY was a copy of CRED_TOTAL — so the line read "N ready" and a
+# machine with 1 of 14 credentials decrypted looked exactly like one with 14 of
+# 14. The fixture loader reports exactly one ready and one not-ready.
+out="$(health)"
+assert_contains "$out" 'credentials   1 of 2 ready' \
+	'credential readiness is reported as "ready OF total", with both counted correctly'
 
 # The report DOES carry the credential NAMES and readiness booleans, which is
 # the whole point of reporting readiness at all.
@@ -217,6 +320,10 @@ printf '%s' "https://heartbeat.invalid/$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "retries are BOUNDED"
+# Reset first: earlier blocks exercised the heartbeat too, and this assertion is
+# about how many calls ONE dead endpoint produces.
+printf '%s' "https://heartbeat.invalid/$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_URL"
+printf 'bearer-%s' "$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_TOKEN"
 : >"$CURL_CALLS"
 out="$(FAKE_CURL_EXIT=1 health)"
 calls="$(grep -c . "$CURL_CALLS")"
@@ -248,7 +355,10 @@ printf 'active\n'
 FAKE
 fake curl <<'FAKE'
 #!/bin/bash
-printf 'curl %s\n' "$*" >>"${TMP}/curl-calls"
+# ONE line per INVOCATION: the --data payload is multi-line pretty-printed JSON,
+# so logging "$*" verbatim makes `grep -c` count payload LINES and turns a
+# 3-attempt retry into a bogus "15 attempts".
+printf 'curl %s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >>"${TMP}/curl-calls"
 if [ "${FAKE_CURL_HANG:-0}" = 1 ]; then sleep 3600; fi
 exit "${FAKE_CURL_EXIT:-0}"
 FAKE
@@ -286,10 +396,13 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "herdr daemon conflicts surface as problems"
 cat >"$AGENT_OPS_DAEMON_CHECK" <<'FAKE'
-#!/usr/bin/env bash
+#!INTERPRETED_BY_THE_FIXTURE
 printf '%s\n' '{"unit":"herdr.service","daemonOwnership":"manual","compatibility":"cli-newer","unitState":"ok","pid":1,"exe":"/nix/store/x-herdr/bin/herdr","conflicts":["daemon-owned-by-manual","client-server-cli-newer"],"healthy":false}'
 FAKE
 chmod +x "$AGENT_OPS_DAEMON_CHECK"
+# /usr/bin/env does not exist in a nix build sandbox, so a fake
+# written with that shebang cannot exec and silently returns 127.
+sed -i "1s|#!INTERPRETED_BY_THE_FIXTURE|#!$(command -v bash)|" "$AGENT_OPS_DAEMON_CHECK"
 out="$(health)"
 assert_contains "$out" 'herdr daemon conflicts' 'a manual daemon is raised as a problem'
 assert_contains "$out" 'daemon-owned-by-manual' 'and the specific conflict is named'

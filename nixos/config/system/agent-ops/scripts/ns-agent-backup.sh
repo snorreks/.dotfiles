@@ -52,6 +52,17 @@
 #   6  the repository did not answer (network outage / wrong URL)
 set -o nounset -o pipefail
 
+# 🔴 errexit OFF, DELIBERATELY.
+#
+# writeShellApplication — which builds this script in production — injects
+# `set -o errexit -o nounset -o pipefail` at the top. Under errexit a failing
+# `restic` call ends the script at the call, BEFORE `rc=$?` runs, so there is
+# no retry, no `partial`/`failed` record and no staging cleanup — and the health
+# module then reads a STALE `ok` record. The tests invoke this file with plain
+# `bash`, which has no errexit, so without this line the suites cannot see the
+# difference at all.
+set +o errexit
+
 PROGRAM_NAME=${0##*/}
 
 RESTIC=${RESTIC:-restic}
@@ -79,7 +90,9 @@ usage: $PROGRAM_NAME [--config FILE] <command>
   backup                    export quiesced sources, then back up
   check                     repository integrity + newest snapshot age
   restore --to DIR [PATH…]  restore into a scratch directory (never live data)
-  prune                     forget --keep-* then prune, as configured
+  prune [--prune|--forget-all]
+                             forget --keep-* then prune; --prune reclaims too,
+                             --forget-all drops every tagged snapshot (test aid)
   status                    print the last run record
   config                    print the effective, secret-free configuration
 
@@ -288,16 +301,29 @@ restic_opts() {
 # the locks it needs, copies consistently and releases them. `cp` cannot do
 # this, and neither can `dd`.
 declare -a STAGING=()
+# 🔴 SET BY quiesce_all, IN THE CURRENT SHELL.
+#
+# `staging="$(quiesce_all)"` ran the function inside a command-substitution
+# subshell, so every `STAGING+=(…)` was discarded when it exited. The caller
+# then added NO --exclude for the live path, and the snapshot contained BOTH the
+# app-consistent export AND the raw live database — the one file it must not
+# contain. It looked like it worked: the backup succeeded and the export was
+# present.
+STAGING_DIR=""
+
 quiesce_all() {
 	local staging
 	staging="$(mktemp -d "$STATE_DIR/quiesce.XXXXXX")" || return 1
+	local qf
 
 	# The config value is the PATH of the quiesce table; the table itself is
 	# read from that file. Reading the config value as though it were a task
 	# line — which an earlier version did — gives a one-field line and the
 	# confusing "unknown method '' for /var/lib/agent-ops/backup/quiesce.conf".
-	local qf
 	qf="$(cfg quiesceFile /dev/null)"
+	# Cleared FIRST, so an early return can never leave a stale path behind for
+	# the caller to back up.
+	STAGING_DIR=""
 	if [[ ! -s "$qf" ]]; then
 		rmdir "$staging" 2>/dev/null || true
 		return 0
@@ -369,7 +395,8 @@ quiesce_all() {
 		STAGING+=("$path=$dest")
 	done <"$qf"
 
-	printf '%s' "$staging"
+	STAGING_DIR="$staging"
+	return 0
 }
 
 # ── record ──────────────────────────────────────────────────────────────────
@@ -394,11 +421,13 @@ cmd_backup() {
 	local start end
 	start="$(date +%s)"
 
-	local staging=""
-	staging="$(quiesce_all)" || {
+	# In the CURRENT shell, not a command substitution: STAGING is an array and
+	# arrays do not survive a subshell.
+	quiesce_all || {
 		write_record failed "quiesce"
 		exit 3
 	}
+	local staging="$STAGING_DIR"
 
 	local -a sources=()
 	local p
@@ -442,7 +471,14 @@ cmd_backup() {
 	say "  bounded to $(cfg limitUpload '8000000') B/s up, $(cfg limitDownload '20000000') B/s down,"
 
 	# read -r so a path with a space is one path. No eval, no word splitting.
-	local -a argv=(backup "${exclude_args[@]}")
+	# 🔴 THE TAG IS ADDED HERE, because `forget` filters on it.
+	#
+	# `cmd_prune` passed `--tag agent-ops-backup` to `forget` while `cmd_backup`
+	# never passed it to `backup`. No snapshot matched the filter, so `forget`
+	# silently removed NOTHING, the weekly retention timer succeeded, and the
+	# repository grew without limit. A retention policy that silently does
+	# nothing is worse than no policy: it is a false assurance.
+	local -a argv=(backup --tag agent-ops-backup "${exclude_args[@]}")
 	local s
 	for s in "${sources[@]}"; do argv+=("$s"); done
 
@@ -596,11 +632,23 @@ cmd_prune() {
 	# for explicitly: forgetting and pruning are the two operations that make a
 	# backup unrecoverable, and they should be two decisions.
 	# shellcheck disable=SC2046 # restic_opts is a generated flag list
-	if ! bounded_restic "$RESTIC_TIMEOUT" forget \
-		--keep-daily "$(cfg keepDaily 7)" \
-		--keep-weekly "$(cfg keepWeekly 4)" \
-		--keep-monthly "$(cfg keepMonthly 6)" \
-		--tag agent-ops-backup $(restic_opts forget); then
+	# --forget-all removes EVERY snapshot matching the tag, which is the only
+	# policy that can distinguish "the tag matched" from "the tag matched
+	# nothing": snapshots taken minutes apart are all "today", so a normal
+	# keep-daily policy legitimately keeps them all. It exists so the retention
+	# contract is TESTABLE, and it is refused unless asked for by name.
+	local -a forget_args=(
+		--tag agent-ops-backup
+		--keep-daily "$(cfg keepDaily 7)"
+		--keep-weekly "$(cfg keepWeekly 4)"
+		--keep-monthly "$(cfg keepMonthly 6)"
+	)
+	if [[ "${1:-}" == "--forget-all" ]]; then
+		say "WARNING: --forget-all removes EVERY snapshot matching the tag."
+		forget_args+=(--unsafe-allow-remove-all)
+	fi
+	# shellcheck disable=SC2046 # restic_opts is a generated flag list
+	if ! bounded_restic "$RESTIC_TIMEOUT" forget "${forget_args[@]}" $(restic_opts forget); then
 		sayf "forget failed; nothing was pruned."
 		exit 3
 	fi

@@ -172,6 +172,13 @@ in {
       # which put all of them into all of them.
       set -gx SECRET_ENV "$HOME/.config/agent-ops/secret-env"
       set -gx SECRET_ENV_MANIFEST "$HOME/.config/agent-ops/secrets.manifest"
+      # The SAME search order secret-env.sh uses, so the convenience path and
+      # the real path do not disagree about where a decrypted credential is.
+      set -gx SECRET_ENV_DIR (string collect -N \
+          (test -n "$CREDENTIALS_DIRECTORY"; and echo "$CREDENTIALS_DIRECTORY") \
+          (test -n "$XDG_RUNTIME_DIR"; and echo "$XDG_RUNTIME_DIR/sops-nix/secrets") \
+          (test -n "$XDG_STATE_HOME"; and echo "$XDG_STATE_HOME/sops-nix/secrets") \
+          (test -n "$HOME"; and echo "$HOME/.local/state/sops-nix/secrets"))
 
       function ns-secrets --description 'load SOPS credentials as data, or check/scope them'
           if test (count $argv) -eq 0
@@ -179,7 +186,20 @@ in {
               # variable — fish variables hold bytes, they are never re-parsed,
               # so a value containing quotes, $(...) or newlines is data.
               for name in (command $SECRET_ENV --list 2>/dev/null)
-                  if set -l value (command cat "$XDG_RUNTIME_DIR/sops-nix/secrets/$name" 2>/dev/null)
+                  # `string collect -N` KEEPS EMBEDDED NEWLINES. A bare
+                  # command substitution splits on newlines and builds a LIST;
+                  # then "$value" joins that list back with SPACES, so a
+                  # three-line PEM key arrived with its newlines replaced by
+                  # spaces — which is exactly the opposite of what the comment
+                  # above this function claims.
+                  #
+                  # The at-most-one-trailing-newline rule is NOT applied here:
+                  # fish has no way to strip exactly one trailing newline from a
+                  # collected string without also affecting a value that
+                  # legitimately ends in one. secret-env.sh already applies that
+                  # rule, and `ns-secrets run` (the path that matters) goes
+                  # through it; this is the convenience path for a shell.
+                  if set -l value (command cat "$SECRET_ENV_DIR/$name" 2>/dev/null | string collect -N)
                       set -gx "$name" "$value"
                   end
               end

@@ -46,25 +46,49 @@
   cfg = config.agentOps.health;
   script = ./scripts/ns-agent-health.sh;
 
+  # sopsFileHasKey FILE KEY — does the sops YAML have a top-level KEY?
+  #
+  # A build-time existence check, not a decryption: the file is in the store and
+  # readable. Used instead of `config.sops.secrets ? KEY`, which only ever asks
+  # whether the OPTION was declared — and the module that wants the check declares
+  # it itself, so that assertion compared the option to itself and could not
+  # fail.
+  #
+  # 🔴 STRING OPERATIONS, NOT `builtins.match`. In nixpkgs' Nix (2.34) `match`
+  # requires the regex to match the WHOLE string: `match "^OPEN" "OPENROUTER"`
+  # returns null, so a `^KEY:` pattern silently found nothing and the assertion
+  # failed for every key including the ones that exist. Comparing the text before
+  # the first colon is exact, needs no escaping, and cannot depend on the
+  # engine's anchoring rules.
+  sopsFileHasKey =
+    file: key:
+    let
+      lines = lib.splitString "\n" (builtins.readFile file);
+      nameOf = line: lib.head (lib.splitString ":" line);
+    in
+    builtins.any (line: nameOf line == key) lines;
   tool = pkgs.writeShellApplication {
     name = "ns-agent-health";
     runtimeInputs = [
       pkgs.bash
       pkgs.coreutils
       pkgs.findutils
+      # gawk, not awk: the NixOS minimal PATH has no /usr/bin/awk, and a
+      # silently-missing awk leaves disk metrics empty and reports ZERO failed
+      # units — which is the worst possible failure for a health check.
+      pkgs.gawk
       pkgs.gnugrep
       pkgs.systemd
       pkgs.util-linux
       pkgs.curl
       pkgs.hostname
+      # jq builds the JSON document. Hand-escaped JSON was wrong in every field
+      # and nothing detected it, because the tests were substring matches.
+      pkgs.jq
     ];
     text = builtins.readFile script;
   };
 
-  # The stateful services worth reporting on. Deliberately a list and not
-  # "everything with a .service": the health answer has to be short enough to
-  # read on a phone, and the failed-unit collector already covers the rest.
-  watchedUserUnits = ["herdr.service" "collie.service" "moshi-hook.service"];
 in {
   options.agentOps.health = {
     enable = lib.mkOption {
@@ -127,9 +151,12 @@ in {
 
       systemd.tmpfiles.rules = [
         "d /var/lib/agent-ops 0700 root root -"
-        "d /var/lib/agent-ops/health 0700 root root -"
-        # Retention on the snapshots themselves, so a hourly timer cannot slowly
-        # fill the disk of the machine it is monitoring.
+        # Retention on the snapshots themselves, so an hourly timer cannot
+        # slowly fill the disk of the machine it is monitoring.
+        #
+        # ONE line for this path, not two: systemd-tmpfiles ignores a second
+        # rule for the same path and logs a warning, so the retention age was
+        # silently never applied.
         "d /var/lib/agent-ops/health 0700 root root ${toString cfg.retentionHours}h"
       ];
 
@@ -201,18 +228,35 @@ in {
       };
     })
 
-    # The credential inventory is useful whether or not the health collector is
-    # enabled: `ns-maint`-style operations and the backup module both need to
-    # know which credential paths exist on this host.
+    # ── Do the heartbeat secrets actually EXIST? ────────────────────────────
+    #
+    # 🔴 The previous check was `config.sops.secrets ? <name>` — and this very
+    # module DECLARES those secrets two hundred lines up, so the assertion was
+    # comparing the option to itself and could never fail. Enabling the heartbeat
+    # without adding the keys to secrets.yaml therefore failed at ACTIVATION (or
+    # at sops decryption), not at build time, which is the opposite of what the
+    # option description promised.
+    #
+    # The real question is whether the key is present in the secrets FILE, so that
+    # is what is read: the sops file is a YAML mapping and this is a build-time
+    # existence check, not a decryption.
     (lib.mkIf (cfg.enable && cfg.heartbeat.enable) {
       assertions = [
         {
-          assertion = config.sops.secrets ? ${cfg.heartbeat.urlSecretName};
-          message = "agentOps.health.heartbeat.enable requires ${cfg.heartbeat.urlSecretName} in nixos/secrets.yaml";
+          assertion = sopsFileHasKey config.sops.defaultSopsFile cfg.heartbeat.urlSecretName;
+          message = ''
+            agentOps.health.heartbeat.enable requires the key
+            ${cfg.heartbeat.urlSecretName} in ${config.sops.defaultSopsFile}.
+            Add it with:  sops secrets set ${cfg.heartbeat.urlSecretName} --name ${config.sops.defaultSopsFile}
+          '';
         }
         {
-          assertion = config.sops.secrets ? ${cfg.heartbeat.tokenSecretName};
-          message = "agentOps.health.heartbeat.enable requires ${cfg.heartbeat.tokenSecretName} in nixos/secrets.yaml";
+          assertion = sopsFileHasKey config.sops.defaultSopsFile cfg.heartbeat.tokenSecretName;
+          message = ''
+            agentOps.health.heartbeat.enable requires the key
+            ${cfg.heartbeat.tokenSecretName} in ${config.sops.defaultSopsFile}.
+            Add it with:  sops secrets set ${cfg.heartbeat.tokenSecretName} --name ${config.sops.defaultSopsFile}
+          '';
         }
       ];
     })

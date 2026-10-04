@@ -35,6 +35,14 @@
 #   0  healthy     1  not healthy     2  usage     4  not configured
 set -o nounset -o pipefail
 
+# 🔴 errexit OFF, DELIBERATELY. writeShellApplication injects
+# `set -o errexit -o nounset -o pipefail`; under errexit the `bounded()` helper —
+# which is designed to swallow a failed subcommand and substitute a fallback —
+# would instead abort the whole report on the first hung collector. The tests
+# run this file with plain `bash`, which has no errexit, so without this line
+# the suites cannot see the difference.
+set +o errexit
+
 PROGRAM_NAME=${0##*/}
 
 # Bound per external command. `timeout` is coreutils; without it a single hung
@@ -93,7 +101,24 @@ bounded() {
 	return 0
 }
 
-JSON_SAFE() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/ /g'; }
+# 🔴 BUILD JSON WITH jq, NOT BY HAND.
+#
+# The previous `JSON_SAFE` only ESCAPED: it turned `"` into `\"` but never
+# added the surrounding quotes, so `"unit":$(JSON_SAFE "$u")` emitted
+# `"unit":herdr.service` and the whole document was invalid JSON. Several call
+# sites added their own quotes and the rest did not, so the output was wrong in
+# most fields and right in a few. Control characters were passed through raw.
+#
+# Nothing detected it because every assertion in health-redaction.sh was a
+# substring match. The suite now parses the document with `jq -e`.
+#
+# `jqs` is the string-escaping primitive: it produces a COMPLETE JSON string
+# literal, quotes included, with control characters escaped.
+jqs() { jq -Rn --arg v "$1" '$v'; }
+
+# JSON_SAFE is kept as an ALIAS, not a second implementation: two escaping
+# rules in one file is how they drift.
+JSON_SAFE() { jqs "$1"; }
 
 # ── collectors ──────────────────────────────────────────────────────────────
 # Each appends JSON fragments to the arrays below.
@@ -181,8 +206,15 @@ check_credentials() {
 	# through; there is no value in it to redact, and re-parsing it here would
 	# only create a second place for a value to leak.
 	CRED_JSON="$out"
-	CRED_TOTAL="$(printf '%s' "$out" | grep -o '"ready":true' | grep -c . || true)"
-	CRED_READY="$CRED_TOTAL"
+	# 🔴 TOTAL COUNTS EVERY CREDENTIAL, READY COUNTS ONLY THE READY ONES.
+	#
+	# Both used to count `"ready":true` occurrences and CRED_READY was a copy of
+	# CRED_TOTAL, so the human report printed "N ready" with no denominator: a
+	# machine with 1 of 14 credentials decrypted and a machine with 14 of 14
+	# produced the SAME line.
+	CRED_TOTAL="$(printf '%s' "$out" | jq -r '(.credentials // {}) | length' 2>/dev/null || printf 0)"
+	CRED_READY="$(printf '%s' "$out" |
+		jq -r '[((.credentials // {})[]) | select(.ready == true)] | length' 2>/dev/null || printf 0)"
 	# Names of the not-ready credentials. The loader's JSON has no values in
 	# it at all, so this only ever moves NAMES into the report.
 	local n
@@ -290,7 +322,7 @@ check_maintenance() {
 		;;
 	esac
 	MAINT_JSON="{\"phase\":$(JSON_SAFE "$phase"),\"txid\":$(
-		[[ -n "$txid" ]] && printf '"%s"' "$(JSON_SAFE "$txid")" || echo null
+		[[ -n "$txid" ]] && printf '%s' "$(JSON_SAFE "$txid")" || echo null
 	)}"
 }
 
@@ -370,21 +402,49 @@ send_heartbeat() {
 		note_warning "heartbeat endpoint is not https; refusing to send credentials to it"
 		return 0
 	}
-	local payload status
-	payload="$(printf '{"status":"%s","problems":%s,"at":"%s"}' \
-		"$( (( ${#PROBLEMS[@]} == 0 )) && echo ok || echo degraded )" \
-		"$(printf '%s\n' ${PROBLEMS[@]+"${PROBLEMS[@]}"} | sed 's/.*/"&"/' | paste -sd, - 2>/dev/null || echo)" \
-		"$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+	# 🔴 THE PAYLOAD IS BUILT BY jq.
+	#
+	# It used to be `printf '{"status":"%s","problems":%s,...}'` fed by
+	# `sed 's/.*/"&"/' | paste -sd, -`, which produced invalid JSON whenever a
+	# problem string contained a quote or a backslash (`unrecognised status
+	# '...'` does), and produced `"problems":""` — a STRING, not an array — when
+	# there were none, because `printf '%s\n' ` with no arguments still emits
+	# one empty line.
+	payload="$(printf '%s\0' ${PROBLEMS[@]+"${PROBLEMS[@]}"} |
+		jq -Rs --arg status "$(
+			(( ${#PROBLEMS[@]} == 0 )) && printf ok || printf degraded
+		)" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+			split("\u0000")
+			| map(select(length > 0))
+			| {status: $status, problems: ., at: $at}
+		')"
+
+	# 🔴 THE TOKEN GOES IN A HEADER FILE, NOT IN curl's ARGV.
+	#
+	# `-H "Authorization: Bearer $(cat …)"` put the token in the process argument
+	# list, where any local user can read it from /proc/<pid>/cmdline for as
+	# long as curl runs — up to 15s across three attempts. That defeats the
+	# confidentiality LoadCredential provides. `curl -H @file` reads the header
+	# from a file instead, and curl redacts it from its own /proc/self/cmdline
+	# view as well.
+	local hdr
+	hdr="$(mktemp)"
+	chmod 0600 "$hdr"
+	trap 'rm -f "$hdr"' RETURN
+	printf 'Authorization: Bearer %s\n' "$(cat -- "$tok_file")" >"$hdr"
 
 	# Bounded retries with backoff. Bounded, because an outage is exactly when
 	# this runs and an unbounded retry loop against a dead endpoint is how a
 	# health check becomes the outage.
+	#
+	# The attempt count comes from the unit, and there is NO sleep after the last
+	# attempt: worst case that was 3x10s of curl plus 5+10+15s of sleeping, which
+	# is longer than the unit's TimeoutStartSec.
+	local max="${AGENT_OPS_HEARTBEAT_MAX_ATTEMPTS:-3}"
 	local attempt=0 rc=1
-	while ((attempt < 3)); do
+	while ((attempt < max)); do
 		attempt=$((attempt + 1))
-		bounded '' curl -fsS --retry 0 \
-			-H "Authorization: Bearer $(cat -- "$tok_file")" \
-			-H 'Content-Type: application/json' \
+		bounded '' curl -fsS --retry 0 			-H "@$hdr" 			-H 'Content-Type: application/json' \
 			--data "$payload" "$url" >/dev/null 2>&1
 		rc=$BOUNDED_STATUS
 		if ((rc == 0)); then
@@ -392,10 +452,12 @@ send_heartbeat() {
 			HEARTBEAT_SENT="yes"
 			return 0
 		fi
-		sleep $((attempt * 5))
+		((attempt < max)) && sleep $((attempt * 5))
 	done
+	rm -f "$hdr"
+	trap - RETURN
 	HEARTBEAT_STATE="unreachable"
-	note_warning "heartbeat endpoint did not answer after 3 bounded attempts"
+	note_warning "heartbeat endpoint did not answer after ${max} bounded attempts"
 	return 0
 }
 
@@ -424,7 +486,7 @@ problems_json() {
 	for p in ${PROBLEMS[@]+"${PROBLEMS[@]}"}; do
 		((first)) || printf ','
 		first=0
-		printf '"%s"' "$(JSON_SAFE "$p")"
+		printf '%s' "$(JSON_SAFE "$p")"
 	done
 	printf ']'
 }
@@ -434,20 +496,20 @@ warnings_json() {
 	for p in ${WARNINGS[@]+"${WARNINGS[@]}"}; do
 		((first)) || printf ','
 		first=0
-		printf '"%s"' "$(JSON_SAFE "$p")"
+		printf '%s' "$(JSON_SAFE "$p")"
 	done
 	printf ']'
 }
 
 if [[ "$FORMAT" == "json" ]]; then
 	printf '{'
-	printf '"overall":"%s",' "$OVERALL"
-	printf '"at":"%s",' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-	printf '"hostname":"%s",' "$(JSON_SAFE "$(hostname 2>/dev/null || echo unknown)")"
-	printf '"backup":{"state":"%s","ageSeconds":%s,"detail":%s},' \
-		"$BACKUP_STATE" \
+	printf '"overall":%s,' "$(jqs "$OVERALL")"
+	printf '"at":%s,' "$(jqs "$(date -u +%Y-%m-%dT%H:%M:%SZ)")"
+	printf '"hostname":%s,' "$(JSON_SAFE "$(hostname 2>/dev/null || echo unknown)")"
+	printf '"backup":{"state":%s,"ageSeconds":%s,"detail":%s},' \
+		"$(jqs "$BACKUP_STATE")" \
 		"$([[ -n "$BACKUP_AGE_S" ]] && printf '%s' "$BACKUP_AGE_S" || echo null)" \
-		"$( [[ -n "$BACKUP_DETAIL" ]] && printf '"%s"' "$(JSON_SAFE "$BACKUP_DETAIL")" || echo null )"
+		"$( [[ -n "$BACKUP_DETAIL" ]] && printf '%s' "$(JSON_SAFE "$BACKUP_DETAIL")" || echo null )"
 	printf '"credentials":%s,' "$CRED_JSON"
 	printf '"services":%s,' "$SERVICES_JSON"
 	printf '"disk":%s,' "$DISK_JSON"
@@ -455,7 +517,7 @@ if [[ "$FORMAT" == "json" ]]; then
 	printf '"maintenance":%s,' "$MAINT_JSON"
 	printf '"failedUnits":%s,' "$FAILED_JSON"
 	printf '"herdrDaemon":%s,' "$DAEMON_JSON"
-	printf '"heartbeat":{"state":"%s","sent":"%s"},' "$HEARTBEAT_STATE" "$HEARTBEAT_SENT"
+	printf '"heartbeat":{"state":%s,"sent":%s},' "$(jqs "$HEARTBEAT_STATE")" "$(jqs "$HEARTBEAT_SENT")"
 	printf '"problems":%s,' "$(problems_json)"
 	printf '"warnings":%s' "$(warnings_json)"
 	printf '}\n'
@@ -463,7 +525,7 @@ else
 	printf 'health: %s  (%s)\n' "$OVERALL" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	printf '  backup        %s%s\n' "$BACKUP_STATE" \
 		"$( [[ -n "$BACKUP_AGE_S" ]] && printf ' (%ss old)' "$BACKUP_AGE_S" )"
-	printf '  credentials   %s ready\n' "$CRED_READY"
+	printf '  credentials   %s of %s ready\n' "$CRED_READY" "$CRED_TOTAL"
 	printf '  services      %s\n' "$SERVICES_JSON"
 	printf '  disk          %s\n' "$DISK_JSON"
 	printf '  thermal       %s\n' "$THERMAL_JSON"

@@ -81,6 +81,13 @@
 #   4  malformed value (embedded NUL)       5  --exec target failed
 set -o nounset -o pipefail
 
+# errexit is deliberately NOT enabled. This script reports a credential's state
+# through its EXIT CODE (0 ready, 3 absent, 4 malformed), and `cmd_or_die`-style
+# helpers depend on evaluating a command that is expected to fail. Turning on
+# errexit anywhere upstream of that would make "absent" exit the script at the
+# first read instead of producing a readiness report.
+set +o errexit
+
 PROGRAM_NAME=${0##*/}
 
 DEFAULT_MANIFEST=${SECRET_ENV_MANIFEST:-$HOME/.config/agent-ops/secrets.manifest}
@@ -425,6 +432,19 @@ emit_lines() {
 # The only mode that puts a value into a real process environment, and it does
 # so with execve: the bytes are never concatenated into a command line, never
 # parsed, and never visible in ps output.
+# all_credential_names — every credential name and alias in the manifest.
+#
+# Used to REMOVE credentials that were not requested from the environment we are
+# about to hand on, so that an ambient `OPENAI_API_KEY` left over from a parent
+# process is not silently inherited by a command that only asked for one
+# credential. Names only, never values.
+all_credential_names() {
+	local n a
+	for n in "${SECRET_ORDER[@]}"; do
+		var_names "$n"
+	done
+}
+
 do_exec() {
 	local -a pairs=()
 	local n rc v a
@@ -452,7 +472,36 @@ do_exec() {
 		sayf "--exec needs a command."
 		return 2
 	}
-	env -i "${pairs[@]}" HOME="${HOME:-/}" PATH="$PATH" "${COMMAND[@]}"
+
+	# 🔴 SET THE ENVIRONMENT DIRECTLY, NEVER `env -i KEY=VALUE`.
+	#
+	# `env -i "$@" ...` puts every secret in the ARGUMENT LIST of the `env`
+	# process, where any other local user can read it from
+	# /proc/<pid>/cmdline or `ps` unless /proc is mounted with hidepid. The
+	# header's claim that values are "never visible in ps output" was false for
+	# exactly this line.
+	#
+	# The caller's environment is also PRESERVED, deliberately: `env -i` also
+	# cleared TERM, LANG, USER, SSH_AUTH_SOCK and XDG_RUNTIME_DIR, so
+	# `ns-secrets run pi` started a terminal program with no terminal and git
+	# over SSH with no agent. The scoping guarantee is "only the REQUESTED
+	# credentials are added, and no OTHER credential is inherited" — so every
+	# credential in the manifest that was NOT requested is unset first, and
+	# everything unrelated to credentials is left alone.
+	local m
+	while IFS= read -r m; do
+		unset "$m"
+	done < <(all_credential_names)
+
+	local kv
+	for kv in "${pairs[@]}"; do
+		# Values are assigned, never expanded: `export "$kv"` would re-split a
+		# multiline value. Assignment through `export` is a single operation and
+		# cannot word-split.
+		export "${kv?}"
+	done
+
+	exec "${COMMAND[@]}"
 }
 
 # ── dispatch ────────────────────────────────────────────────────────────────

@@ -273,7 +273,27 @@ if [[ "$UNIT_STATE" != "ok" ]]; then
 	CONFLICTS+=("unit-${UNIT_STATE}")
 fi
 
-json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+# 🔴 QUOTE, not just escape.
+#
+# `json_escape` used to escape `"` and `\` but never added the surrounding
+# quotes, so `"unit":$(json_escape "$HERDR_UNIT")` emitted
+# `"unit":herdr.service` and the document was invalid JSON. An EMPTY version
+# produced `"clientVersion":,` — a syntax error, not an empty string.
+#
+# The `exe` field on the line below added its own quotes and was therefore the
+# only correct one, which is exactly the inconsistency that made this read as a
+# formatting nit rather than a parser error.
+#
+# `--arg` also means no value is ever passed through a shell that could expand
+# it, and the protocol numbers are validated as numeric because they are emitted
+# UNQUOTED (they are JSON numbers, not strings).
+json_escape() { jq -Rn --arg v "$1" '$v'; }
+
+# json_number VALUE — a JSON number, or null when VALUE is not one. Used for the
+# protocol fields, which are emitted bare.
+json_number() {
+	if [[ "$1" =~ ^[0-9]+$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
 
 if [[ "$FORMAT" == "json" ]]; then
 	printf '{'
@@ -284,24 +304,20 @@ if [[ "$FORMAT" == "json" ]]; then
 	printf '"pid":%s,' "${RUNNING_PID:-null}"
 	printf '"exe":%s,' "$(
 		if [[ -n "$RUNNING_EXE" ]]; then
-			printf '"%s"' "$(json_escape "$RUNNING_EXE")"
+			json_escape "$RUNNING_EXE"
 		else
 			printf 'null'
 		fi
 	)"
 	printf '"clientVersion":%s,' "$(json_escape "$CLIENT_VERSION")"
 	printf '"serverVersion":%s,' "$(json_escape "$SERVER_VERSION")"
-	printf '"endpointProtocol":%s,' "$(
-		if [[ -n "$ENDPOINT_PROTOCOL" ]]; then printf '%s' "$ENDPOINT_PROTOCOL"; else printf 'null'; fi
-	)"
-	printf '"privateProtocol":%s,' "$(
-		if [[ -n "$PRIVATE_PROTOCOL" ]]; then printf '%s' "$PRIVATE_PROTOCOL"; else printf 'null'; fi
-	)"
+	printf '"endpointProtocol":%s,' "$(json_number "$ENDPOINT_PROTOCOL")"
+	printf '"privateProtocol":%s,' "$(json_number "$PRIVATE_PROTOCOL")"
 	printf '"pidCount":%s,' "${#PIDS[@]}"
 	printf '"conflicts":['
 	for i in "${!CONFLICTS[@]}"; do
 		((i > 0)) && printf ','
-		printf '"%s"' "$(json_escape "${CONFLICTS[$i]}")"
+		json_escape "${CONFLICTS[$i]}"
 	done
 	printf '],'
 	if ((${#CONFLICTS[@]} == 0)); then

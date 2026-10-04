@@ -60,6 +60,9 @@ PROGRAM_NAME=${0##*/}
 
 HERDR_BIN=${HERDR_BIN:-herdr}
 STATE_DIR=${AGENT_OPS_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-ops/resume}
+# How long to wait for the herdr server to start listening. Bounded: a server
+# that never comes up must leave the unit visibly failed, not hanging.
+SERVER_WAIT=${SERVER_WAIT:-60}
 # How stale a heartbeat may be before the run counts as dead. Generous enough
 # for a long tool call, tight enough that a two-day-old file is obviously not a
 # live orchestrator.
@@ -162,7 +165,23 @@ if ! command -v "$HERDR_BIN" >/dev/null 2>&1 && [[ ! -x "$HERDR_BIN" ]]; then
 	sayf "herdr CLI '$HERDR_BIN' not found; cannot check the server."
 	exit 3
 fi
-server_status="$("$HERDR_BIN" status server 2>/dev/null | awk '/^status:/ {print $2; exit}' || true)"
+# 🔴 WAIT FOR THE SERVER, BOUNDEDLY.
+#
+# `herdr.service` is Type=simple: systemd considers it started the moment it
+# forks, so `After=herdr.service` does NOT mean the socket is listening. This
+# script is WantedBy=herdr.service and therefore fires in exactly that window.
+# A single `herdr status` there reads "stopped", the script exits 5, and
+# SuccessExitStatus=0 marks the unit failed — so on a cold boot the opted-in
+# tasks are never resumed and nothing retries. herdr.nix's comment claiming this
+# script "waits for the server" was simply wrong.
+server_status=""
+waited=0
+while ((waited < SERVER_WAIT)); do
+	server_status="$("$HERDR_BIN" status server 2>/dev/null | awk '/^status:/ {print $2; exit}' || true)"
+	[[ "$server_status" == "running" ]] && break
+	sleep 2
+	waited=$((waited + 2))
+done
 case "$server_status" in
 running) ;;
 *)
@@ -188,6 +207,16 @@ proc_start_time() {
 }
 
 record_path() { printf '%s/records/%s' "$STATE_DIR" "$(slugify "$1")"; }
+
+# release_lock — drop the per-task lock. Idempotent: every early return between
+# acquiring and launching goes through it, so there is exactly one place that
+# knows how to release, and a `return` added later cannot forget to.
+release_lock() {
+	[[ -n "${lockfd:-}" ]] || return 0
+	flock -u "$lockfd" 2>/dev/null || true
+	exec {lockfd}>&-
+	lockfd=""
+}
 lock_path() { printf '%s/locks/%s.lock' "$STATE_DIR" "$(slugify "$1")"; }
 
 # ── per-task run ────────────────────────────────────────────────────────────
@@ -229,6 +258,34 @@ run_task() {
 		esac
 	fi
 
+	# ---- LOCK FIRST, THEN LOOK.
+	#
+	# 🔴 The lock used to be taken AFTER the record and heartbeat were read.
+	# Two resume processes — a manual `systemctl --user start` racing the
+	# WantedBy=herdr.service trigger — could both read "no live pid, stale
+	# heartbeat". The first took the lock, launched the task, wrote the record and
+	# released it; the second then took the lock and launched the SAME task again,
+	# because its decision was made from state it had read before the lock was
+	# held. That is the duplicate launch the lock exists to prevent, and it is
+	# exactly what header item 3 promised against.
+	#
+	# Non-blocking, so the loser REFUSES (exit 4) rather than queueing and then
+	# launching everything a second time when it eventually gets the lock.
+	local lockfd lockfile
+	lockfile="$(lock_path "$root/$name")"
+	exec {lockfd}>"$lockfile" || {
+		sayf "cannot open lock $lockfile"
+		RC=2
+		return
+	}
+	if ! flock -n "$lockfd"; then
+		exec {lockfd}>&-
+		sayf "task '$name': another resume holds $lockfile — not launching a duplicate."
+		LOCKED_TASKS+=("$name")
+		RC=4
+		return
+	fi
+
 	# ---- identity of the previously recorded run
 	local rec pid pid_start alive=0
 	rec="$(record_path "$root/$name")"
@@ -265,35 +322,20 @@ run_task() {
 		say "task '$name': already running (pid $pid, heartbeat ${beat_age}s old) — not relaunching."
 		say "              This is herdr's own restored pane doing the work; relaunching"
 		say "              would duplicate it. Use --force to override deliberately."
+		release_lock
 		return
 	fi
 	if ((beat_age <= MAX_HEARTBEAT_AGE)) && ((FORCE == 0)) && ((alive == 0)) && [[ -n "$heartbeat" ]]; then
 		say "task '$name': heartbeat is ${beat_age}s old (limit ${MAX_HEARTBEAT_AGE}s) and no pid is recorded."
 		say "              Assuming another launcher owns it. Use --force to override."
+		release_lock
 		return
 	fi
 
 	if ((DRY_RUN == 1)); then
 		say "DRY-RUN task '$name': would launch '$runner' in '$root' (heartbeat ${heartbeat:-none}, last seen ${beat_age}s ago)."
 		LAUNCHED+=("$name")
-		return
-	fi
-
-	# ---- lock. flock on a per-root-task file, non-blocking: a second resume
-	# must fail loudly rather than queue behind the first and then launch
-	# everything a second time when it gets the lock.
-	local lockfd lockfile
-	lockfile="$(lock_path "$root/$name")"
-	exec {lockfd}>"$lockfile" || {
-		sayf "cannot open lock $lockfile"
-		RC=2
-		return
-	}
-	if ! flock -n "$lockfd"; then
-		exec {lockfd}>&-
-		sayf "task '$name': another resume holds $lockfile — not launching a duplicate."
-		LOCKED_TASKS+=("$name")
-		RC=4
+		release_lock
 		return
 	fi
 
@@ -312,8 +354,7 @@ run_task() {
 			--property="StandardError=append:$out/$name.log" -- "$runner"; then
 			sayf "task '$name': could not start user service $task_unit."
 			RC=1
-			flock -u "$lockfd" 2>/dev/null || true
-			exec {lockfd}>&-
+			release_lock
 			return
 		fi
 		new_pid="$(systemctl --user show "$task_unit" --property=MainPID --value 2>/dev/null || true)"
@@ -321,16 +362,14 @@ run_task() {
 			sayf "task '$name': user service exited before recording its pid."
 			systemctl --user stop "$task_unit" 2>/dev/null || true
 			RC=1
-			flock -u "$lockfd" 2>/dev/null || true
-			exec {lockfd}>&-
+			release_lock
 			return
 		fi
 		printf '%s\n' "$new_pid" >"$out/$name.pid"
 	elif [[ -n "${INVOCATION_ID:-}" ]]; then
 		sayf "task '$name': user systemd is unavailable; cannot detach from this unit."
 		RC=1
-		flock -u "$lockfd" 2>/dev/null || true
-		exec {lockfd}>&-
+		release_lock
 		return
 	else
 		(
@@ -358,8 +397,7 @@ run_task() {
 			sayf "task '$name': process $new_pid exited before writing a heartbeat."
 			sayf "  see $out/$name.log"
 			RC=1
-			flock -u "$lockfd" 2>/dev/null || true
-			exec {lockfd}>&-
+			release_lock
 			return
 		fi
 		sleep 2
@@ -376,8 +414,7 @@ run_task() {
 			kill "$new_pid" 2>/dev/null || true
 		fi
 		RC=1
-		flock -u "$lockfd" 2>/dev/null || true
-		exec {lockfd}>&-
+		release_lock
 		return
 	fi
 
@@ -394,8 +431,7 @@ run_task() {
 
 	say "task '$name': running as pid $new_pid (identity start-time ${start_time:-unknown})."
 	LAUNCHED+=("$name")
-	flock -u "$lockfd" 2>/dev/null || true
-	exec {lockfd}>&-
+	release_lock
 }
 
 # ── main ────────────────────────────────────────────────────────────────────
