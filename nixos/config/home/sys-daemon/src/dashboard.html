@@ -58,6 +58,11 @@
   </div>
 </div>
 <script>
+// The per-run mutation token, substituted by the server when it serves this
+// page (src/http.rs `dashboard_response`). Hex only, so it needs no escaping.
+// If the placeholder was not substituted the daemon refuses mutations and
+// this reads as an empty token, which fails closed rather than open.
+const TOKEN = '__SYS_DAEMON_TOKEN__';
 const $ = (s) => document.querySelector(s);
 
 function render(s) {
@@ -96,12 +101,32 @@ document.addEventListener('click', async (e) => {
   try {
     const r = await fetch('/api/kill', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      // Two things make this request acceptable to the daemon, and both are
+      // required — see src/httpcore.rs:
+      //   * `Content-Type: application/json` makes this a non-simple request,
+      //     so a cross-origin caller would have to survive a CORS preflight.
+      //     We serve no CORS headers, so the preflight fails.
+      //   * TOKEN_HEADER carries the per-run token that the server injected
+      //     into this page at __SYS_DAEMON_TOKEN__. It is only ever delivered
+      //     over a request that already passed the Host check, so a page that
+      //     reached us by DNS rebinding never learns it.
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Sys-Daemon-Token': TOKEN,
+      },
       body: JSON.stringify({ port: Number(btn.dataset.port) }),
     });
     const d = await r.json();
+    if (!r.ok && d.error) {
+      // 403 from the guard, 413/431 from the size limits: say which, rather
+      // than reporting every refusal as "request failed".
+      toast(false, `${r.status} ${d.error}: ${d.message}`);
+      btn.disabled = false;
+      return;
+    }
     toast(d.success, d.message);
     if (d.success) setTimeout(() => render(lastSnap), 900);
+    else btn.disabled = false;
   } catch {
     toast(false, 'request failed');
     btn.disabled = false;

@@ -1,0 +1,101 @@
+# Fast checks — the lane that runs on every push and pull request.
+#
+# Why this file exists at all, given nixos/tests/run.sh's old header said there
+# was no CI because "a workflow that never runs is worse than none": Actions is
+# enabled on this repository, so a workflow added here does run, and a
+# repository whose checks only run when a human remembers to run them is a
+# repository whose checks drift. That was the actual problem.
+#
+# ── what this runs, and what it deliberately does not ───────────────────────
+#
+# This is the FAST lane only: the shell suites, repo-wide lint, and the Rust
+# tests for the dev-ports dashboard. Everything it needs is pinned — the
+# actions below are pinned to commit SHAs, and the tools come from the flake's
+# own locked nixpkgs via `nix build`, so a run today and a run in six months
+# use the same shellcheck, the same fish, and the same cargo.
+#
+# NOT run here, on purpose:
+#
+#   * Host evaluation (tests/server-foundation/host-eval.sh). It evaluates real
+#     flake configurations and currently FAILS on master — `networking.
+#     networkmanager.wifi.macAddress` and `nix.settings.trusted-users` do not
+#     evaluate on this nixpkgs revision. Wiring a known-failing suite into CI
+#     would mean a permanently red badge, which gets ignored, which is worse
+#     than a documented exclusion. It is declared in tests/registry.tsv and
+#     fails loudly when run locally, so it cannot be forgotten.
+#   * `nix flake check` in full, for the same reason plus the KVM test.
+#   * The NixOS VM test (nixos/tests/maintenance-vm.nix). Needs /dev/kvm and
+#     builds a whole system; it is a `nix build` a human asks for.
+#   * Manual hardware drills — kernel bump, GPU hang recovery. Not automatable.
+#     They are listed in nixos/tests/README.md.
+#
+# No secrets are used or needed. `permissions: contents: read` is the whole
+# permission set this workflow asks for.
+
+name: fast checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only, and nothing else. A lint-and-test workflow has no reason to be
+# able to write to the repository.
+permissions:
+  contents: read
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: fast-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast:
+    name: shell, lint and sys-daemon tests
+    runs-on: ubuntu-latest
+    steps:
+      # actions/checkout v4.2.2
+      - name: Check out the repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # The flake reads its own tree; a shallow clone would leave `git grep`
+          # (the secret-shape check) with nothing to search.
+          fetch-depth: 0
+          # Do not leave the job's token in .git/config. Nothing here needs to
+          # push, and a credential left in the working directory is available
+          # to every subsequent step — including the Nix build, which runs
+          # code from this repository.
+          persist-credentials: false
+
+      # cachix/install-nix-action v31.9.1
+      #
+      # Not v9. v9 is a node12 action and exports PATH via the `::add-path::`
+      # workflow command, which GitHub disabled — the run failed with
+      # "The `add-path` command is disabled". v31 is a composite action and
+      # uses $GITHUB_PATH. Pinned to the SHA below.
+      - name: Install Nix
+        uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd
+
+      # DeterminateSystems/magic-nix-cache-action v9
+      - name: Cache Nix store
+        uses: DeterminateSystems/magic-nix-cache-action@6221693898146dc97e38ad0e013488a16477a4c4
+
+      - name: Shell suites, registry tests, repo-wide lint
+        # `./nixos#…` — the flake is in the nixos/ SUBDIRECTORY, not at the
+        # repository root. `nix build .#…` from here fails with "path … is not
+        # part of a flake". This is the same form tests/README.md documents.
+        run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.repo-contracts-shells
+
+      - name: sys-daemon HTTP admission and process-kill tests
+        run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.repo-contracts
+
+      # Deliberately not `nix flake check`: it would pull in host evaluation
+      # and the VM test. The exclusion is documented at the top of this file
+      # and in nixos/tests/README.md rather than left implicit.
+      - name: Report what was not run
+        run: |
+          echo "not run here (see the header of this workflow):"
+          echo "  - server-foundation/host-eval.sh  (host evaluation; failing on master)"
+          echo "  - maintenance-vm.nix              (needs KVM; nix build .#maintenance-vm)"
+          echo "  - manual hardware drills          (not automatable)"

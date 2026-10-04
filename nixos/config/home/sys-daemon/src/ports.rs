@@ -6,8 +6,13 @@
 //! state without root, so this is the lightest correct approach — far
 //! cheaper than the old Bun server (23 TCP connect attempts every 5s) or
 //! any `ss`/`lsof` spawn.
+//!
+//! `/proc` discovery lives here; the decision to actually signal anything
+//! lives in [`crate::killsafe`]. This module finds candidates, that module
+//! decides whether they may be killed.
 
 use crate::config::Config;
+use crate::killsafe::{self, Refusal, SignalOutcome, Target};
 use crate::waybar::emit;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -137,7 +142,7 @@ fn process_name_for_port(port: u16) -> Option<String> {
     let mut names: Vec<String> = Vec::new();
     for inode in inodes {
         for pid in pids_for_inode(inode) {
-            if let Some(name) = process_name(pid) {
+            if let Some(name) = killsafe::process_name(pid) {
                 if !names.contains(&name) {
                     names.push(name);
                 }
@@ -145,36 +150,6 @@ fn process_name_for_port(port: u16) -> Option<String> {
         }
     }
     names.first().cloned()
-}
-
-fn process_name(pid: u32) -> Option<String> {
-    // Prefer the executable basename from cmdline ("steam", "spotify",
-    // "bun", "ollama" ...), falling back to the comm field.
-    let from_cmdline = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-        .ok()
-        .and_then(|s| {
-            let first = s.split('\0').next().unwrap_or("");
-            let base = std::path::Path::new(first)
-                .file_name()?
-                .to_string_lossy()
-                .to_string();
-            let base = base.trim_start_matches('.').to_string();
-            if base.is_empty() {
-                None
-            } else {
-                Some(base)
-            }
-        });
-    if let Some(name) = from_cmdline {
-        return Some(name.chars().take(16).collect());
-    }
-    let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
-    let comm = comm.trim().trim_start_matches('.').to_string();
-    if comm.is_empty() {
-        None
-    } else {
-        Some(comm.chars().take(16).collect())
-    }
 }
 
 // ── waybar streaming module ────────────────────────────────────────────────
@@ -253,6 +228,42 @@ pub async fn waybar_stream() -> anyhow::Result<()> {
 pub struct KillResult {
     pub success: bool,
     pub message: String,
+    /// Set when the kill was refused. Distinguishes "nothing there" from
+    /// "something there that I will not touch", which an operator needs to
+    /// tell apart before concluding the dashboard is broken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<String>,
+    /// How each signal was delivered: `PidFd` where the kernel supported it,
+    /// `StartTimeVerified` on the fallback path. Surfaced because the
+    /// fallback narrows the PID-reuse race rather than removing it, and that
+    /// is not something to hide from whoever reads the result.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub delivery: Vec<String>,
+}
+
+impl KillResult {
+    fn refused(message: String, refusal: Refusal) -> Self {
+        KillResult {
+            success: false,
+            message,
+            refusal: Some(refusal_tag(&refusal)),
+            delivery: Vec::new(),
+        }
+    }
+}
+
+fn refusal_tag(r: &Refusal) -> String {
+    match r {
+        Refusal::SelfPort { port } => format!("self_port:{port}"),
+        Refusal::ManagementPort { port, service } => format!("management_port:{port}:{service}"),
+        Refusal::ForeignUid {
+            pid,
+            expected,
+            found,
+        } => format!("foreign_uid:{pid}:expected={expected}:found={found}"),
+        Refusal::NotTheSameProcess { pid } => format!("not_same_process:{pid}"),
+        Refusal::Gone => "gone".to_string(),
+    }
 }
 
 /// Inodes of LISTEN sockets bound to `port`.
@@ -276,6 +287,18 @@ fn inodes_for_port(port: u16) -> Vec<u64> {
         }
     }
     out
+}
+
+/// PIDs holding an fd pointing at any of `inodes`.
+///
+/// Takes the whole set rather than one inode so a caller can re-check several
+/// targets against one walk.
+fn pids_for_inode_set(inodes: &[u64]) -> std::collections::HashSet<u32> {
+    let mut set = std::collections::HashSet::new();
+    for inode in inodes {
+        set.extend(pids_for_inode(*inode));
+    }
+    set
 }
 
 /// PIDs holding an fd pointing at `socket:[inode]`.
@@ -307,7 +330,25 @@ fn pids_for_inode(inode: u64) -> Vec<u32> {
 
 /// TERM then KILL every process listening on `port`. Pure /proc walking, no
 /// `fuser`/`ss`/`find` subprocesses like the old Bun implementation.
-pub async fn kill_port(port: u16) -> KillResult {
+///
+/// `self_port` is the dashboard's own port. It is passed in rather than read
+/// from the listener so the self-protection rule is a parameter the tests can
+/// exercise directly.
+///
+/// Every signal goes through [`killsafe::signal_target`], which pins the
+/// process with a pidfd where the kernel supports one. The previous
+/// implementation called `libc::kill(pid, …)` on a pid it had found by
+/// walking `/proc` some milliseconds earlier; if that process exited in the
+/// gap and the number was reused, the signal landed on an unrelated process.
+pub async fn kill_port(port: u16, self_port: u16) -> KillResult {
+    // Port-level protection, checked before any /proc walking at all.
+    if let Some(service) = killsafe::is_management_port(port, self_port) {
+        return KillResult::refused(
+            format!("Refusing to kill port {port}: it belongs to {service}"),
+            Refusal::ManagementPort { port, service },
+        );
+    }
+
     let mut inodes = inodes_for_port(port);
     inodes.sort_unstable();
     inodes.dedup();
@@ -315,6 +356,8 @@ pub async fn kill_port(port: u16) -> KillResult {
         return KillResult {
             success: false,
             message: format!("Nothing listening on port {port}"),
+            refusal: None,
+            delivery: Vec::new(),
         };
     }
 
@@ -328,26 +371,97 @@ pub async fn kill_port(port: u16) -> KillResult {
         return KillResult {
             success: false,
             message: format!("Nothing listening on port {port}"),
+            refusal: None,
+            delivery: Vec::new(),
         };
     }
 
+    // Describe every candidate *before* signalling any of them, so a refusal
+    // on one process (wrong UID, protected name) cannot leave the port
+    // half-killed.
+    let mut targets: Vec<Target> = Vec::new();
     for pid in &pids {
-        unsafe {
-            libc::kill(*pid as i32, libc::SIGTERM);
-        }
-    }
-    sleep(Duration::from_millis(600)).await;
-    for pid in &pids {
-        let alive = unsafe { libc::kill(*pid as i32, 0) } == 0;
-        if alive {
-            unsafe {
-                libc::kill(*pid as i32, libc::SIGKILL);
-            }
+        match killsafe::describe(*pid, port, self_port) {
+            Ok(t) => targets.push(t),
+            Err(Refusal::Gone) => continue,
+            Err(other) => return KillResult::refused(format!("Refusing to kill on {port}"), other),
         }
     }
 
+    if let Err(refusal) = killsafe::check_targets(&targets) {
+        return KillResult::refused(
+            match &refusal {
+                Refusal::ManagementPort { port, service } => {
+                    format!("Refusing to kill port {port}: it belongs to {service}")
+                }
+                Refusal::ForeignUid { pid, .. } => {
+                    format!("Refusing to kill pid {pid} on port {port}: not owned by this user")
+                }
+                Refusal::SelfPort { port } => {
+                    format!("Refusing to kill port {port}: it is this dashboard")
+                }
+                Refusal::NotTheSameProcess { pid } => {
+                    format!("Refusing to kill pid {pid} on port {port}: process changed")
+                }
+                Refusal::Gone => format!("Nothing left listening on port {port}"),
+            },
+            refusal,
+        );
+    }
+
+    if targets.is_empty() {
+        return KillResult {
+            success: false,
+            message: format!("Nothing listening on port {port}"),
+            refusal: None,
+            delivery: Vec::new(),
+        };
+    }
+
+    // Re-confirm the link between each pid and the socket we found it through,
+    // AFTER pinning. The discovery walk is not atomic: between reading
+    // /proc/<pid>/fd and approving the target, the process can exit, drop the
+    // listening socket, and a different process can take the port. Re-walking
+    // the inode closes that window for everything except a full recycle within
+    // one pidfd-pinned lifetime.
+    for t in &targets {
+        if !pids_for_inode_set(&inodes).contains(&t.pid) {
+            return KillResult::refused(
+                format!("Refusing to kill pid {} on port {port}: it no longer holds the socket", t.pid),
+                Refusal::NotTheSameProcess { pid: t.pid },
+            );
+        }
+    }
+
+    // TERM, give the process a moment, then KILL whatever is still running.
+    // Liveness is checked with the zombie-aware helper: after a successful
+    // SIGTERM the process is usually a zombie by now, and signalling a zombie
+    // is a no-op that reports misleadingly.
+    let mut delivery = Vec::new();
+    for t in &targets {
+        delivery.push(describe_delivery(killsafe::signal_target(t, killsafe::SIGTERM)));
+    }
+    sleep(Duration::from_millis(600)).await;
+    for t in &targets {
+        if killsafe::process_is_running(t.pid) {
+            delivery.push(describe_delivery(killsafe::signal_target(t, killsafe::SIGKILL)));
+        }
+    }
+
+    let signalled = targets.len();
     KillResult {
         success: true,
-        message: format!("Killed {} process(es) on port {port}", pids.len()),
+        message: format!("Killed {signalled} process(es) on port {port}"),
+        refusal: None,
+        delivery,
+    }
+}
+
+fn describe_delivery(outcome: SignalOutcome) -> String {
+    match outcome {
+        SignalOutcome::PidFd => "pidfd".to_string(),
+        SignalOutcome::StartTimeVerified => "start_time".to_string(),
+        SignalOutcome::Reused(r) => format!("refused:{}", refusal_tag(&r)),
+        SignalOutcome::Failed(e) => format!("failed:{e}"),
     }
 }

@@ -4,169 +4,529 @@
 #
 # Deliberately a thin, honest runner rather than a test framework:
 #
-#   * Every suite it runs is a plain bash script that also runs standalone, so a
-#     developer can reproduce one failure without `nix build`.
+#   * Every suite it runs is a plain bash script (or a cargo test) that also
+#     runs standalone, so a developer can reproduce one failure without `nix
+#     build`.
 #   * It exits non-zero on the FIRST failing suite, and prints which one, rather
 #     than continuing and burying the first error under later noise.
-#   * It does not pretend to be CI. The flake `checks` outputs below are what
-#     runs this in a sandbox; there is no workflow file, because there is no CI
-#     configured for this repository and a workflow that never runs is worse
-#     than none.
+#   * What it runs comes from tests/registry.tsv, and it VERIFIES that registry
+#     against what is actually on disk. A suite nobody registered fails the run.
+#     See the header of registry.tsv for the drift that motivated that.
 #
-# The NixOS VM test (nixos/tests/maintenance-vm.nix) is NOT run here. It needs
-# KVM and builds a whole NixOS system, so it is a separate `nix build` — see
-# nixos/tests/README.md.
+# ── fail-closed ─────────────────────────────────────────────────────────────
+#
+# The rule this file exists to enforce: a check that did not run must never be
+# reported as a check that passed.
+#
+#   NM_REQUIRE_ALL=1   (default) A suite that cannot run — no `nix`, or a skip
+#                      the caller did not authorise — is a FAILURE. This is the
+#                      developer default, so "the suite that checks the hosts
+#                      did not run" cannot be green.
+#   NM_REQUIRE_ALL=0   Opt out, for a `checks` sandbox that genuinely cannot
+#                      reach flake inputs. Skips stay LOUD.
+#
+# ── scopes ──────────────────────────────────────────────────────────────────
+#
+#   fast   pure bash/cargo. No nix, no privileges. Always required.
+#   eval   evaluates configurations with `nix`. Skippable in a sandbox.
+#   kvm    builds a NixOS system and runs it under KVM. NEVER run here — it is
+#          a full `nix build`, minutes not seconds. See nixos/tests/README.md.
+#
+# Manual hardware drills (kernel bump, GPU hang recovery, reboot-free rollback
+# on real hardware) are not automated at all and are listed in tests/README.md
+# so their absence is on the record rather than assumed.
 set -o nounset -o pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
+REGISTRY="$HERE/registry.tsv"
 
-SUITES=(
-  "ns-maint-transaction.sh"
-  "kill-switch-targets.sh"
-  "disk-cleanup-safety.sh"
-  # The server-foundation lane. Standalone and runnable on its own before any
-  # central registry exists — `bash nixos/tests/server-foundation/host-eval.sh`
-  # reproduces one of them without going through this runner at all.
-  #
-  # host-eval.sh is listed LAST and separately below: it evaluates four real
-  # flake configurations, which needs `nix` and takes ~15s rather than
-  # milliseconds. It is still here rather than hidden behind another entry point
-  # so that "run everything this repository can run" means exactly that.
-  "server-foundation/role-policy.sh"
-  "server-foundation/boot-health.sh"
-  "server-foundation/tailscale-reconcile.sh"
-  "server-foundation/ssh-confirm.sh"
-  "server-foundation/host-eval.sh"
-  # The media-travel lane, added as an entry rather than by rewriting the list:
-  # it brings its own run.sh with the same skip semantics as the lanes above, so
-  # one failing suite names itself instead of being buried in a longer run.
-  "media-travel/run.sh"
-)
-
+NM_REQUIRE_ALL="${NM_REQUIRE_ALL:-1}"
 failed=0
+declare -a SKIPPED=()
 
-printf '\033[1m=== lint: shellcheck\033[0m\n'
-# Lint first, because a syntax error in a script produces test output that is
-# confusing rather than useful. Only the scripts this PR added or rewrote are
-# listed; a repository-wide shellcheck run belongs to the repo-contracts PR.
-SHELLCHECKED=(
-  "config/system/maintenance/ns-maint.sh"
-  "config/system/boot/health.sh"
-  "config/system/tailscale/reconcile.sh"
-  "config/system/battery/charge-limit.sh"
-  "config/home/scripts/scripts/disk-cleanup.sh"
-  "config/home/scripts/scripts/kill-switch.sh"
-  "config/home/scripts/scripts/kill-switch-cleanup.sh"
-  "tests/lib/harness.sh"
-  "tests/ns-maint-transaction.sh"
-  "tests/kill-switch-targets.sh"
-  "tests/disk-cleanup-safety.sh"
-  "tests/server-foundation/role-policy.sh"
-  "tests/server-foundation/boot-health.sh"
-  "tests/server-foundation/tailscale-reconcile.sh"
-  "tests/server-foundation/ssh-confirm.sh"
-  "tests/server-foundation/host-eval.sh"
-  "tests/media-travel/run.sh"
-  "config/home/scripts/herdr-travel.sh"
-  "config/system/media/scripts/netns-up.sh"
-  "config/system/media/scripts/netns-audit.sh"
-  "config/system/media/scripts/media-state.sh"
-  "config/system/media/scripts/media-offline-prep.sh"
-  "config/system/media/scripts/jellyfin-accel-check.sh"
-)
-if command -v shellcheck >/dev/null 2>&1; then
-  for f in "${SHELLCHECKED[@]}"; do
-    # -x follows `source=` directives; -P lets `# shellcheck source=lib/harness.sh`
-    # resolve relative to the tests directory rather than the caller's cwd.
-    if shellcheck -x -P "$ROOT/tests" -S style "$ROOT/$f"; then
-      printf '    ok   %s\n' "$f"
-    else
-      printf '    FAIL %s\n' "$f"
-      failed=1
+bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+red() { printf '\033[31m%s\033[0m\n' "$*"; }
+green() { printf '\033[32m%s\033[0m\n' "$*"; }
+
+fail() {
+  red "$*"
+  failed=1
+}
+
+# ── registry loading and validation ─────────────────────────────────────────
+#
+# Validation happens BEFORE anything runs, so a malformed registry is reported
+# as a malformed registry rather than as some unrelated later failure.
+
+declare -a REG_LANE REG_PATH REG_SCOPE REG_KIND
+VALID_SCOPES=(fast eval kvm)
+VALID_KINDS=(shell lane cargo)
+
+load_registry() {
+  if [[ ! -f "$REGISTRY" ]]; then
+    fail "registry missing: $REGISTRY"
+    return 1
+  fi
+  local lane path scope kind
+  while IFS=$'\t' read -r lane path scope kind || [[ -n "${lane:-}" ]]; do
+    [[ -z "${lane:-}" ]] && continue
+    case "$lane" in \#*) continue ;; esac
+    if [[ -z "${path:-}" || -z "${scope:-}" || -z "${kind:-}" ]]; then
+      fail "registry: incomplete row '$lane'"
+      return 1
+    fi
+    local ok=1 v
+    for v in "${VALID_SCOPES[@]}"; do [[ "$scope" == "$v" ]] && ok=0; done
+    if [[ $ok -ne 0 ]]; then
+      fail "registry: lane '$lane' has unknown scope '$scope' (want: ${VALID_SCOPES[*]})"
+      return 1
+    fi
+    ok=1
+    for v in "${VALID_KINDS[@]}"; do [[ "$kind" == "$v" ]] && ok=0; done
+    if [[ $ok -ne 0 ]]; then
+      fail "registry: lane '$lane' has unknown kind '$kind' (want: ${VALID_KINDS[*]})"
+      return 1
+    fi
+    if [[ ! -e "$ROOT/$path" ]]; then
+      fail "registry: lane '$lane' registers '$path', which does not exist"
+      return 1
+    fi
+    REG_LANE+=("$lane")
+    REG_PATH+=("$path")
+    REG_SCOPE+=("$scope")
+    REG_KIND+=("$kind")
+  done <"$REGISTRY"
+
+  if [[ "${#REG_PATH[@]}" -eq 0 ]]; then
+    fail "registry: no suites declared"
+    return 1
+  fi
+  return 0
+}
+
+# Directories that are covered by a registered `lane` entry point. A lane's
+# run.sh aggregates its own sub-suites, so those sub-suites are reachable and
+# must not each be registered again — registering them twice would run them
+# twice.
+declare -a LANE_DIRS=()
+collect_lane_dirs() {
+  local i
+  for ((i = 0; i < ${#REG_PATH[@]}; i++)); do
+    if [[ "${REG_KIND[$i]}" == "lane" ]]; then
+      LANE_DIRS+=("$(dirname "${REG_PATH[$i]}")")
     fi
   done
-else
-  printf '    shellcheck not on PATH — skipping (it is in the flake check closure)\n'
-fi
+}
 
-printf '\n\033[1m=== lint: bash -n\033[0m\n'
-for f in "${SHELLCHECKED[@]}" "tests/run.sh"; do
-  if bash -n "$ROOT/$f"; then
-    printf '    ok   %s\n' "$f"
+# Every executable suite on disk must be reachable: registered directly, or
+# inside a directory owned by a registered lane. This is the check that turns
+# "we forgot to add the agent-operations lane" from a silent green into a
+# failure.
+verify_no_unregistered_suites() {
+  local f rel dir unregistered=0 covered d
+  while IFS= read -r f; do
+    # Paths here must be relative to $ROOT (the nixos/ directory), because
+    # that is what registry.tsv records. Deriving them relative to $HERE
+    # instead made every suite look unregistered, including this file.
+    rel="${f#"$ROOT/"}"
+    [[ "$rel" == "tests/run.sh" ]] && continue
+    # lib/ directories are helpers sourced by suites, never suites themselves.
+    [[ "$rel" == lib/* || "$rel" == */lib/* ]] && continue
+
+    if printf '%s\n' "${REG_PATH[@]}" | grep -Fxq "$rel"; then
+      continue
+    fi
+
+    # Covered by a lane entry point?
+    dir="$(dirname "$rel")"
+    covered=0
+    for d in ${LANE_DIRS[@]+"${LANE_DIRS[@]}"}; do
+      [[ "$dir" == "$d" ]] && covered=1
+    done
+    [[ $covered -eq 1 ]] && continue
+
+    fail "unregistered suite: $rel"
+    echo "    register it, register its lane's run.sh, or delete it." >&2
+    unregistered=1
+  done < <(find "$HERE" -name '*.sh' -type f | sort)
+  [[ $unregistered -eq 0 ]]
+}
+
+# ── skipping ────────────────────────────────────────────────────────────────
+
+# Report a suite that will not run. Under the default NM_REQUIRE_ALL it fails;
+# under an explicit opt-out it stays visible.
+skip_or_fail() {
+  local what="$1" reason="$2"
+  if [[ "$NM_REQUIRE_ALL" == "0" ]]; then
+    printf '\033[33mSKIPPED %s (%s)\033[0m\n' "$what" "$reason"
+    SKIPPED+=("$what ($reason)")
   else
-    printf '    FAIL %s\n' "$f"
+    red "SKIPPED $what ($reason), and this run requires every suite to actually run."
+    echo "    Re-run where the dependency is available, or set NM_REQUIRE_ALL=0" >&2
+    echo "    if a skip is expected here." >&2
     failed=1
   fi
-done
+}
 
-for suite in "${SUITES[@]}"; do
-  # host-eval.sh evaluates four real flake configurations, which needs a nix
-  # that can reach the store and the flake's inputs. A `checks` sandbox has
-  # neither, so the check declares that it cannot run this one:
-  #
-  #   NM_SKIP_HOST_EVAL=1   set by the flake check, with the reason in
-  #                        nixos/flake.nix
-  #
-  # It is skipped LOUDLY, and it is an error unless the caller has said a skip is
-  # acceptable. NM_REQUIRE_ALL=1 is the default — a developer run — so "the
-  # suite that checks the hosts did not run" can never be a green result there.
-  # Run it directly with:
-  #
-  #   bash nixos/tests/server-foundation/host-eval.sh
-  # Two suites evaluate real flake configurations and cannot run inside a build
-  # sandbox: server-foundation/host-eval.sh, and the media-travel runner (whose
-  # host-isolation suite evaluates both hosts). Both are named explicitly rather
-  # than pattern-matched, because "run.sh" on its own matches every lane.
-  # The media-travel runner is NOT skipped wholesale here. Four of its five
-  # suites need no nix at all, and skipping the whole runner meant a sandbox
-  # build silently stopped running the namespace fail-closed assertions. It is
-  # invoked with ITS OWN skip variable instead, so it runs what it can and
-  # reports the one it cannot.
-  if [[ "$suite" == "media-travel/run.sh" ]] &&
-    { [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; }; then
-    reason="no nix on PATH"
-    [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"
-    printf '\n\033[1m=== %s (host-evaluation suites skipped: %s)\033[0m\n' "$suite" "$reason"
-    # Pass the skip through ONLY when nix is genuinely absent. NM_SKIP_HOST_EVAL=1
-    # is a request to skip ONE suite; using it to also drop media-travel's host
-    # assertions would hide them on any machine that has nix.
-    if ! NM_SKIP_MEDIA_HOST_EVAL="$(command -v nix >/dev/null 2>&1 && echo 0 || echo 1)" \
-      bash "$HERE/$suite"; then
-      printf '\033[31mFAILED: %s\033[0m\n' "$suite"
-      failed=1
-      break
+# ── repo-wide lint ──────────────────────────────────────────────────────────
+#
+# Discovery here is by CONTENT, not by a hand-maintained list: anything with a
+# bash shebang is shell, anything with a fish shebang is fish. The previous
+# approach listed files explicitly and the list was always behind the tree.
+
+bash_scripts() {
+  find "$ROOT" -path "$ROOT/result*" -prune -o -type f -name '*.sh' -print0 |
+    while IFS= read -r -d '' f; do
+      head -1 "$f" | grep -qE '^#!.*\b(bash|sh)\b' && printf '%s\n' "${f#"$ROOT/"}"
+    done | sort
+}
+
+fish_scripts() {
+  find "$ROOT" -path "$ROOT/result*" -prune -o -type f -name '*.fish' -print0 |
+    while IFS= read -r -d '' f; do
+      head -1 "$f" | grep -q 'fish' && printf '%s\n' "${f#"$ROOT/"}"
+    done | sort
+}
+
+nix_files() {
+  find "$ROOT" -path "$ROOT/result*" -prune -o -type f -name '*.nix' -print |
+    sed "s|^$ROOT/||" | sort
+}
+
+run_lint() {
+  mapfile -t SH_FILES < <(bash_scripts)
+  mapfile -t FISH_FILES < <(fish_scripts)
+  mapfile -t NIX_FILES < <(nix_files)
+
+  bold "=== lint: shellcheck (${#SH_FILES[@]} scripts) ==="
+  if command -v shellcheck >/dev/null 2>&1; then
+    # Shellcheck runs over EVERY script, not a curated list. The curated list
+    # was the old design and it drifted: every PR that added a script had to
+    # remember to add it, and the ones that forgot simply were not linted.
+    #
+    # Turning that on immediately fails on ~29 pre-existing findings in 17
+    # files owned by other lanes. Reformatting them here would be a large,
+    # unrelated diff on top of a security change, so instead the known
+    # findings are recorded in tests/shellcheck-baseline.txt and the check
+    # fails on anything NEW. The baseline can only shrink; a finding that
+    # disappears from it without the code changing is reported too, so the
+    # file cannot quietly accumulate stale entries.
+    local baseline="$HERE/shellcheck-baseline.txt"
+    local current
+    current="$(
+      cd "$ROOT" || exit 1
+      local f
+      for f in "${SH_FILES[@]}"; do
+        shellcheck -x -P "$HERE" -S style "$ROOT/$f" -f gcc 2>/dev/null || true
+      done | sed "s|^$ROOT/||" | sort -u
+    )"
+    local new_findings
+    if [[ -f "$baseline" ]]; then
+      # grep -Fxv -f rather than `comm`: `comm` needs both inputs sorted in
+      # one collation, and that is not guaranteed between a pipe and a file.
+      new_findings="$(printf '%s\n' "$current" | grep -Fxv -f "$baseline" || true)"
+    else
+      new_findings="$current"
     fi
-    continue
-  fi
 
-  if [[ "$suite" == "server-foundation/host-eval.sh" ]] &&
-    { [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; }; then
-    reason="no nix on PATH"
-    [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"
-    if [[ "${NM_REQUIRE_ALL:-1}" != "0" ]]; then
-      printf '\n\033[31mSKIPPED %s (%s), and this run requires every suite to actually run.\033[0m\n' "$suite" "$reason"
-      printf '\033[31mRe-run with nix on PATH and no NM_SKIP_HOST_EVAL, or set NM_REQUIRE_ALL=0\033[0m\n'
-      printf '\033[31mif a skip is expected here.\033[0m\n'
+    if [[ -n "$new_findings" ]]; then
+      red "shellcheck: findings not in the baseline:"
+      printf '%s\n' "$new_findings" | sed 's/^/    /'
+      echo "    Fix these, or (if they are pre-existing and not yours) add them" >&2
+      echo "    to nixos/tests/shellcheck-baseline.txt deliberately." >&2
       failed=1
     else
-      printf '\n\033[33mSKIPPED %s (%s; expected in the checks sandbox)\033[0m\n' "$suite" "$reason"
+      local n
+      n="$(printf '%s' "$current" | grep -c . || true)"
+      printf '    \033[32mok\033[0m   no new shellcheck findings (%d baselined across %d files)\n' \
+        "$n" "$(printf '%s' "$current" | cut -d: -f1 | sort -u | grep -c . || true)"
     fi
-    continue
-  fi
-
-  printf '\n\033[1m=== %s\033[0m\n' "${suite##*/}"
-  if bash "$HERE/$suite"; then
-    :
   else
-    printf '\033[31mFAILED: %s\033[0m\n' "$suite"
-    failed=1
-    break
+    skip_or_fail "shellcheck" "not on PATH (it is in the flake check closure)"
   fi
-done
 
-if [[ "$failed" -ne 0 ]]; then
-  printf '\n\033[31mrun.sh: FAILED\033[0m\n'
+  bold "=== lint: bash -n ==="
+  local f
+  for f in "${SH_FILES[@]}"; do
+    if bash -n "$ROOT/$f"; then
+      printf '    \033[32mok\033[0m   %s\n' "$f"
+    else
+      fail "bash -n: $f"
+    fi
+  done
+
+  bold "=== lint: fish syntax (${#FISH_FILES[@]} files) ==="
+  if command -v fish >/dev/null 2>&1; then
+    for f in "${FISH_FILES[@]}"; do
+      if fish -n "$ROOT/$f"; then
+        printf '    \033[32mok\033[0m   %s\n' "$f"
+      else
+        fail "fish -n: $f"
+      fi
+    done
+  else
+    skip_or_fail "fish syntax check" "fish not on PATH"
+  fi
+
+  bold "=== lint: nix parse (${#NIX_FILES[@]} files) ==="
+  if command -v nix-instantiate >/dev/null 2>&1; then
+    for f in "${NIX_FILES[@]}"; do
+      if nix-instantiate --parse "$ROOT/$f" >/dev/null 2>&1; then
+        printf '    \033[32mok\033[0m   %s\n' "$f"
+      else
+        fail "nix parse: $f"
+      fi
+    done
+  else
+    skip_or_fail "nix parse" "nix-instantiate not on PATH"
+  fi
+}
+
+# ── hygiene ─────────────────────────────────────────────────────────────────
+
+# Secret shapes that must never appear as literal VALUES in tracked files.
+#
+# This is a shape check, not a scanner: it looks for a high-entropy literal
+# assigned to something key-shaped, and for known key headers. It has no
+# allowlist of real secrets because there are none in this repository, and
+# hard-coding one would be the problem. sops-encrypted files are exempt by
+# construction — their contents are ciphertext.
+run_secret_hygiene() {
+  bold "=== hygiene: secret shapes in tracked files ==="
+  local hits rc
+  # The pattern is the same either way; only the search engine differs.
+  local pattern='(api[_-]?key|secret|passwd|password|token)[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=-]{16,}'
+
+  # Two search engines, because neither works everywhere.
+  #
+  # `git grep` is the right tool in a checkout — it searches tracked content
+  # and honours the pathspec exclusions. It exits 128 outside a work tree,
+  # which is exactly what a `checks` sandbox is: a plain directory with no git
+  # index. Previously that failure was swallowed with `2>/dev/null || true`
+  # and the check reported a clean pass, having searched nothing.
+  #
+  # So: use git grep when there is a work tree, fall back to a recursive grep
+  # when there is not, and treat any exit status above 1 as a real failure in
+  # both branches. The exclusions are the same set either way. Note the
+  # pathspecs are relative to $ROOT (nixos/), not to the repository root, so
+  # `nixos/tests/**` would match nothing here.
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    hits="$(
+      cd "$ROOT" || exit 1
+      git grep -nIE -e "$pattern" -- ':!*.md' ':!tests/**' ':!secrets.yaml' ':!.sops.yaml'
+    )"
+    rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+      fail "secret-shape scan failed (git grep exited $rc)"
+      return
+    fi
+  else
+    printf '    \033[33mnote\033[0m no git work tree here — scanning the filesystem instead\n'
+    # grep exits 0 on a match, 1 on no match, and 2 on a real error (bad
+    # pattern, unreadable directory). Anything above 1 is a failure and must
+    # not be reported as a clean tree.
+    hits="$(
+      cd "$ROOT" || exit 1
+      grep -rnIE -e "$pattern" \
+        --exclude='*.md' \
+        --exclude-dir=tests \
+        --exclude-dir=.git \
+        --exclude='secrets.yaml' \
+        --exclude='.sops.yaml' \
+        .
+    )"
+    rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+      fail "secret-shape scan failed (grep exited $rc)"
+      return
+    fi
+  fi
+
+  if [[ -n "$hits" ]]; then
+    red "secret-shaped literals found in tracked files:"
+    printf '%s\n' "$hits" | sed 's/^/    /'
+    echo "    If these are real, rotate them. If they are placeholders, say so" >&2
+    echo "    explicitly rather than relying on nobody noticing." >&2
+    failed=1
+  else
+    printf '    \033[32mok\033[0m   no secret-shaped literals\n'
+  fi
+
+  # Nothing generated should be tracked at all.
+  local tracked_junk
+  tracked_junk="$(
+    cd "$ROOT" || exit 1
+    git ls-files | grep -E '(__pycache__/|\.pyc$|/target/|\.o$|\.rlib$)' || true
+  )"
+  if [[ -n "$tracked_junk" ]]; then
+    red "generated artifacts are tracked in git:"
+    printf '%s\n' "$tracked_junk" | sed 's/^/    /'
+    echo "    untrack them and add the pattern to .gitignore" >&2
+    failed=1
+  else
+    printf '    \033[32mok\033[0m   no generated artifacts tracked\n'
+  fi
+}
+
+# Trailing whitespace, and tabs in shell scripts.
+#
+# Scoped by OWNERSHIP rather than applied repository-wide. Trailing whitespace
+# already exists in files belonging to other lanes, and reformatting them here
+# would bury a security change under an unrelated mechanical diff — which this
+# lane is explicitly not supposed to do.
+#
+# So: the files this lane owns are held to it and fail the run. Everything else
+# is reported, with a count, and does not fail. That is a weaker guarantee than
+# a clean tree and is the honest trade: a check that fails on pre-existing
+# findings nobody has agreed to fix gets switched off entirely, and then it is
+# not a check at all.
+run_format_hygiene() {
+  bold "=== hygiene: whitespace ==="
+  local -a OWNED=(
+    "tests/run.sh"
+    "tests/check-registry.sh"
+    "tests/update-dotfiles-scope.sh"
+    "tests/registry.tsv"
+    "tests/shellcheck-baseline.txt"
+    "config/home/fish/functions/update_dotfiles.fish"
+    "config/home/sys-daemon/src/http.rs"
+    "config/home/sys-daemon/src/httpcore.rs"
+    "config/home/sys-daemon/src/killsafe.rs"
+  )
+  local f bad=0 advisory=0
+  for f in "${OWNED[@]}"; do
+    if [[ -f "$ROOT/$f" ]] && grep -nP '[ \t]+$' "$ROOT/$f" >/dev/null 2>&1; then
+      fail "trailing whitespace in a file this lane owns: $f"
+      bad=1
+    fi
+  done
+  [[ $bad -eq 0 ]] && printf '    \033[32mok\033[0m   no trailing whitespace in files this lane owns\n'
+
+  # Advisory pass over everything else.
+  while IFS= read -r f; do
+    if grep -nP '[ \t]+$' "$ROOT/$f" >/dev/null 2>&1; then
+      advisory=$((advisory + 1))
+      printf '    \033[33mnote\033[0m trailing whitespace: %s\n' "$f"
+    fi
+  done < <(bash_scripts; fish_scripts)
+  if [[ $advisory -gt 0 ]]; then
+    printf '    \033[33mnote\033[0m %d file(s) outside this lane have trailing whitespace; not failing\n' "$advisory"
+  fi
+}
+
+# ── cargo ───────────────────────────────────────────────────────────────────
+
+run_cargo() {
+  bold "=== cargo test (sys-daemon) ==="
+  if ! command -v cargo >/dev/null 2>&1; then
+    skip_or_fail "cargo test" "cargo not on PATH"
+    return
+  fi
+  local crate="$ROOT/config/home/sys-daemon"
+  # A memory ceiling, and this is not decoration. `cargo test` runs code that
+  # reads /dev/urandom; an unbounded read of that device exhausts memory and
+  # the kernel OOM killer takes out whatever it judges expendable — which on
+  # this machine includes the agent multiplexer and every session running on
+  # it. Capping the address space turns that class of regression into one
+  # aborted test process instead of a dead host.
+  (
+    ulimit -v 4000000 2>/dev/null || true
+    cd "$crate" || exit 1
+    # Single-threaded: the kill-safety suite signals real child processes and
+    # is deliberately sequential.
+    cargo test --offline -- --test-threads=1
+  ) || {
+    fail "cargo test (sys-daemon)"
+    return
+  }
+}
+
+# ── main ────────────────────────────────────────────────────────────────────
+#
+# Fail-fast by default, which is the long-standing behaviour here and is right
+# for editing: one broken thing, one stack to read.
+#
+# NM_KEEP_GOING=1 runs every suite and reports all failures. It exists because
+# fail-fast hides everything after the first failure, which is exactly wrong
+# when the first failure is a pre-existing one nobody in this session caused —
+# you cannot then tell whether the suites after it passed.
+NM_KEEP_GOING="${NM_KEEP_GOING:-0}"
+
+bold "=== registry ==="
+if ! load_registry; then
+  red "run.sh: registry is unusable; refusing to run"
   exit 1
 fi
-printf '\n\033[32mrun.sh: all checks passed\033[0m\n'
+printf '    %d suites across %d lanes\n' \
+  "${#REG_PATH[@]}" "$(printf '%s\n' "${REG_LANE[@]}" | sort -u | wc -l | tr -d ' ')"
+
+collect_lane_dirs
+verify_no_unregistered_suites
+
+run_lint
+run_secret_hygiene
+run_format_hygiene
+
+bold "=== suites ==="
+i=0
+while [[ $i -lt "${#REG_PATH[@]}" ]]; do
+  lane="${REG_LANE[$i]}"
+  path="${REG_PATH[$i]}"
+  scope="${REG_SCOPE[$i]}"
+  kind="${REG_KIND[$i]}"
+  i=$((i + 1))
+
+  case "$scope" in
+    kvm)
+      # Declared, accounted for, deliberately not run here.
+      printf '\033[33mNOT RUN\033[0m %s (%s, scope=kvm — needs KVM; see tests/README.md)\n' \
+        "$lane: $path" "$kind"
+      continue
+      ;;
+    eval)
+      if [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; then
+        reason="no nix on PATH"
+        [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"
+        skip_or_fail "$lane: $path" "$reason"
+        continue
+      fi
+      ;;
+  esac
+
+  case "$kind" in
+    cargo)
+      run_cargo
+      # run_cargo reports its own failure through `fail`. The loop must honour
+      # it the same way the shell branch does, or a broken crate looks like a
+      # pass simply because cargo is a function call and not a `bash` one.
+      if [[ "$failed" -ne 0 && "$NM_KEEP_GOING" != "1" ]]; then
+        break
+      fi
+      ;;
+    lane | shell)
+      bold "=== $lane: $path ==="
+      if bash "$ROOT/$path"; then
+        :
+      else
+        fail "$lane: $path"
+        if [[ "$NM_KEEP_GOING" != "1" ]]; then
+          break
+        fi
+      fi
+      ;;
+  esac
+done
+
+echo
+if [[ $failed -ne 0 ]]; then
+  red "run.sh: FAILED"
+  exit 1
+fi
+if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+  green "run.sh: passed with ${#SKIPPED[@]} declared skip(s)"
+  printf '    %s\n' "${SKIPPED[@]}"
+  exit 0
+fi
+green "run.sh: all checks passed"

@@ -79,6 +79,8 @@ AI-agent-heavy dev workflow.
 | [`docs/bootstrap.md`](./docs/bootstrap.md)                           | Fresh machine setup, Bitwarden/sops bootstrap, GS65 first install, using **disko** for a from-scratch install |
 | [`docs/impermanence-migration.md`](./docs/impermanence-migration.md) | Converting an existing (already-installed, dual-boot) disk to the impermanence layout in place                |
 | [`docs/headless-server.md`](./docs/headless-server.md)               | Running a host as an always-on, tailnet-only box: `headless = true`, safe remote rebuilds, remote builds      |
+| [`docs/agent-operations.md`](./docs/agent-operations.md)               | Agent continuity: herdr lifetime and resume, credential loading via sops, health reporting with redacted output, and restic backup/restore |
+| [`docs/media-travel.md`](./docs/media-travel.md)                       | Taking the server on a trip: namespace-confined Jellyfin/qBittorrent, selective media sync, state capture and restore |
 | [`docs/mobile-agents.md`](./docs/mobile-agents.md)                   | Reaching the same herdr workspaces and agents from an Android phone (Collie PWA over Tailscale Serve; SSH/Mosh and Termux as fallbacks) |
 | [`docs/forking.md`](./docs/forking.md)                               | Adapting this repo to your own identity, hardware, and accounts                                               |
 
@@ -88,9 +90,23 @@ AI-agent-heavy dev workflow.
 # Rebuild and switch
 nswitchu           # nixos-rebuild switch --flake ~/.dotfiles/nixos#legion
 
-# Update flake inputs
-update_dotfiles    # commit + push dotfiles
-update_dotfiles "message"  # with custom commit message
+# Update flake inputs — SCOPED, and always through a reviewable branch
+#
+# This is no longer "commit + push to master". The old version ran
+# `sudo chown -R`, `git add -A` and `git push origin master` on every call, so
+# running it to fix a file permission could publish an unrelated file to a
+# public repository. It now stages only the paths you name, refuses to work on
+# master, and opens a DRAFT pull request.
+#
+#   update_dotfiles status              what changed, and where we are
+#   update_dotfiles branch topic/x      create/switch to a topic branch
+#   update_dotfiles stage <path>...     stage ONLY those paths
+#   update_dotfiles review              read the staged diff
+#   update_dotfiles commit "message"    commit what is staged
+#   update_dotfiles pr "title"          push + open a DRAFT PR
+#
+# There is no "stage everything". `status` lists untracked files so you can name
+# them. See nixos/tests/README.md for the tests that enforce this.
 
 # Garbage collect
 nix-collect-garbage -d
