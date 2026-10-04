@@ -61,10 +61,19 @@ harness() {
 run_harness() {
   local home="$1"
   shift
-  set +e
-  REG_OUT="$(env "$@" bash "$home/tests/run.sh" 2>&1)"
-  REG_STATUS=$?
-  set -e
+  # Captured without toggling errexit.
+  #
+  # `set +e` / `set -e` around this looked harmless and was not: it rewrote the
+  # caller's shell options, so the state after this function depended on what
+  # the function did internally, and any later code relying on errexit could
+  # behave differently depending on whether this had run. Using `if !` to
+  # capture the status never touches the option at all, and a non-zero exit is
+  # expected here anyway — several cases assert that run.sh fails.
+  if REG_OUT="$(env "$@" bash "$home/tests/run.sh" 2>&1)"; then
+    REG_STATUS=0
+  else
+    REG_STATUS=$?
+  fi
 }
 
 # ── fixtures ────────────────────────────────────────────────────────────────

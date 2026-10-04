@@ -182,17 +182,31 @@ enum Outcome {
 /// the header/body limits enforced by the parser, and a wall-clock deadline so
 /// a connection that sends nothing at all still gets collected.
 async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Outcome> {
+    // The deadline wraps the WHOLE read, not each individual `read`.
+    //
+    // Wrapping the individual call looked equivalent and was not: each read
+    // returns well inside the deadline as long as the peer keeps sending, so
+    // a client dribbling one byte every four seconds never trips it and holds
+    // a task open indefinitely. The budget has to cover the entire operation
+    // for it to bound anything.
+    match timeout(READ_DEADLINE, read_request_inner(stream)).await {
+        // Deadline hit. Reported as a malformed request rather than a silent
+        // close: a caller that waits forever learns nothing from a vanished
+        // socket.
+        Err(_) => Ok(Outcome::Malformed(ParseError::Incomplete)),
+        // Read errors propagate unchanged; only the timeout is translated.
+        Ok(result) => result,
+    }
+}
+
+async fn read_request_inner(stream: &mut TcpStream) -> anyhow::Result<Outcome> {
     let mut buf: Vec<u8> = Vec::with_capacity(2048);
     let mut tmp = [0u8; 1024];
 
     loop {
-        match timeout(READ_DEADLINE, stream.read(&mut tmp)).await {
-            // Deadline hit. Reported as a malformed request rather than a
-            // silent close: a caller that waits forever learns nothing from a
-            // vanished socket.
-            Err(_) => return Ok(Outcome::Malformed(ParseError::Incomplete)),
-            Ok(Err(e)) => return Err(e.into()),
-            Ok(Ok(0)) => {
+        let n = match stream.read(&mut tmp).await {
+            Err(e) => return Err(e.into()),
+            Ok(0) => {
                 return Ok(if buf.is_empty() {
                     Outcome::PeerClosed
                 } else {
@@ -200,8 +214,9 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Outcome> {
                     Outcome::Malformed(ParseError::Incomplete)
                 })
             }
-            Ok(Ok(n)) => buf.extend_from_slice(&tmp[..n]),
-        }
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&tmp[..n]);
 
         // Hard ceiling independent of Content-Length: a client that never
         // sends `\r\n\r\n` cannot make this grow forever.

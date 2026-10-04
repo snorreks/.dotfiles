@@ -18,16 +18,27 @@ use sys_daemon::config::Config;
 use sys_daemon::killsafe::{self, Refusal, Target};
 use sys_daemon::httpcore::{Guard, Rejection, Route, Request};
 
+/// The workload port the fixtures name, as opposed to the dashboard's own.
+const WORKLOAD_PORT: u16 = 4000;
+
 /// A dashboard request that a browser on this machine would legitimately make,
 /// bound to whatever port the configuration under test declares.
 fn request_for(port: u16) -> Request {
     let host = format!("127.0.0.1:{port}");
     let origin = format!("http://127.0.0.1:{port}");
     let token = "c".repeat(64);
+    // Content-Length is DERIVED from the body. It was hard-coded to 12 while
+    // the body `{"port":4000}` is 13 bytes, so the parser sliced off the
+    // closing brace and handed `{"port":4000` to serde, which fails to parse
+    // and silently routes to NotFound. The assertions still passed, because
+    // they only checked `check()` — so the helper was quietly exercising a
+    // truncated body.
+    let body = format!("{{\"port\":{WORKLOAD_PORT}}}");
     let raw = format!(
         "POST /api/kill HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\n\
          Content-Type: application/json\r\nX-Sys-Daemon-Token: {token}\r\n\
-         Content-Length: 12\r\n\r\n{{\"port\":4000}}"
+         Content-Length: {len}\r\n\r\n{body}",
+        len = body.len()
     );
     sys_daemon::httpcore::parse(raw.as_bytes()).expect("the request is well formed")
 }
@@ -245,6 +256,24 @@ fn refusal_is_specific_about_the_protected_port() {
         }
         other => panic!("expected a ManagementPort refusal, got {other:?}"),
     }
+}
+
+/// The helper `request_for` builds must actually route to a kill.
+///
+/// It exists because `request_for` hard-coded `Content-Length: 12` against a
+/// 13-byte body, so the parser dropped the closing brace and every request it
+/// produced routed to NotFound. Nothing caught that, because the other tests
+/// only asserted `check()`. This one asserts the classification, which is what
+/// the truncation broke.
+#[test]
+fn the_fixture_request_actually_routes_to_a_kill() {
+    let req = request_for(3333);
+    assert_eq!(Guard::new(3333, "c".repeat(64)).check(&req), Ok(()));
+    assert_eq!(
+        sys_daemon::httpcore::classify(&req),
+        Route::Kill(WORKLOAD_PORT),
+        "the fixture must carry a complete, parseable body"
+    );
 }
 
 /// A kill request that names no port is not a kill. Confirmed against the

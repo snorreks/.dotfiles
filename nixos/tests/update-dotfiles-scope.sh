@@ -138,6 +138,9 @@ fi
 # checks run before a single test, and abort the suite rather than proceed.
 
 EMPTY_CONFIG_HOME="$(mktemp -d)"
+# Register it with the fixture cleanup so the EXIT trap removes it. It was
+# created outside make_repo, so nothing else was going to.
+FIXTURE_REPOS+=("$EMPTY_CONFIG_HOME")
 export EMPTY_CONFIG_HOME
 
 # Ignore the operator's global/system git config entirely. It cannot point a
@@ -245,6 +248,48 @@ for path in \
   assert_contains "$UD_OUT" "refusing to stage" "staging '$path' must say why"
 done
 
+# ── path normalisation: the guard must not be defeated by typing ───────────
+#
+# The forbidden-pattern check compared the literal string the caller typed.
+# `./keys.txt` and `nixos/./secrets.nix` are the same files, and both walked
+# straight past it.
+
+for path in \
+  "./keys.txt" \
+  "nixos/./secrets.nix" \
+  "./nixos/local.nix" \
+  "nixos//secrets.nix"; do
+  make_repo
+  d="${FIXTURE_REPOS[-1]}"
+  mkdir -p "$d/$(dirname "$path")"
+  echo "PLAINTEXT" >"$d/$path"
+  run_ud "$d" stage "$path"
+  assert_status 1 "$UD_STATUS" "staging '$path' must be refused after normalisation"
+  assert_contains "$UD_OUT" "refusing to stage" "staging '$path' must say why"
+done
+
+# ── the repository root and directories are refused ─────────────────────────
+#
+# `stage .` is `git add -A` with extra steps — precisely what this function
+# exists to prevent.
+
+make_repo
+d="${FIXTURE_REPOS[-1]}"
+run_ud "$d" stage .
+assert_status 1 "$UD_STATUS" "staging '.' must be refused"
+assert_contains "$UD_OUT" "repository root" "staging '.' must say why"
+
+run_ud "$d" stage "$d"
+assert_status 1 "$UD_STATUS" "staging the repo path must be refused"
+assert_contains "$UD_OUT" "repository root" "staging the repo path must say why"
+
+make_repo
+d="${FIXTURE_REPOS[-1]}"
+mkdir -p "$d/nixos/config"
+run_ud "$d" stage nixos/config
+assert_status 1 "$UD_STATUS" "staging a directory must be refused"
+assert_contains "$UD_OUT" "directory" "staging a directory must say why"
+
 # ── generated artifacts are refused ─────────────────────────────────────────
 
 for path in \
@@ -336,6 +381,22 @@ assert_contains "$UD_OUT" "refusing to chown the repository root" \
 run_ud "$d" fixperms tracked.txt <<< "n"
 assert_contains "$UD_OUT" "about to chown" "a specific path must reach the confirmation"
 assert_contains "$UD_OUT" "cancelled" "answering 'n' must cancel"
+
+# The chown must name the owner explicitly and act on the resolved absolute
+# path. `sudo chown` with no OWNER sets the owner to root, which is the
+# opposite of "fix permissions" — it leaves the file root-owned. And guarding
+# `./x` while chowning `$argv` means guarding one string and operating on
+# another.
+#
+# The owner is matched as "any non-empty value" rather than as `$USER`: the
+# build sandbox has no USER set, and the property worth asserting is that an
+# owner IS passed, not which one.
+run_ud "$d" fixperms ./tracked.txt <<< "n"
+if printf '%s' "$UD_OUT" | grep -qE "about to chown to [^[:space:]]+: $d/tracked\.txt"; then
+  _ok "fixperms chowns the resolved absolute target, with an explicit owner"
+else
+  _fail "fixperms chowns the resolved absolute target, with an explicit owner" "got: $UD_OUT"
+fi
 
 # ── status is read-only ─────────────────────────────────────────────────────
 

@@ -289,6 +289,18 @@ fn inodes_for_port(port: u16) -> Vec<u64> {
     out
 }
 
+/// PIDs holding an fd pointing at any of `inodes`.
+///
+/// Takes the whole set rather than one inode so a caller can re-check several
+/// targets against one walk.
+fn pids_for_inode_set(inodes: &[u64]) -> std::collections::HashSet<u32> {
+    let mut set = std::collections::HashSet::new();
+    for inode in inodes {
+        set.extend(pids_for_inode(*inode));
+    }
+    set
+}
+
 /// PIDs holding an fd pointing at `socket:[inode]`.
 fn pids_for_inode(inode: u64) -> Vec<u32> {
     let want = format!("socket:[{inode}]");
@@ -404,6 +416,21 @@ pub async fn kill_port(port: u16, self_port: u16) -> KillResult {
             refusal: None,
             delivery: Vec::new(),
         };
+    }
+
+    // Re-confirm the link between each pid and the socket we found it through,
+    // AFTER pinning. The discovery walk is not atomic: between reading
+    // /proc/<pid>/fd and approving the target, the process can exit, drop the
+    // listening socket, and a different process can take the port. Re-walking
+    // the inode closes that window for everything except a full recycle within
+    // one pidfd-pinned lifetime.
+    for t in &targets {
+        if !pids_for_inode_set(&inodes).contains(&t.pid) {
+            return KillResult::refused(
+                format!("Refusing to kill pid {} on port {port}: it no longer holds the socket", t.pid),
+                Refusal::NotTheSameProcess { pid: t.pid },
+            );
+        }
     }
 
     // TERM, give the process a moment, then KILL whatever is still running.

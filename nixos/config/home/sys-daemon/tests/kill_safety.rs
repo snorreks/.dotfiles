@@ -206,8 +206,45 @@ fn herdr_is_protected() {
     assert!(killsafe::is_protected_name("./herdr"));
 }
 
-/// Matching is on the executable basename, so a full path or a relative one
-/// cannot smuggle a protected name past the check.
+/// sshd rewrites its argv, and forks a per-connection `sshd-session`.
+///
+/// The proctitle form is what actually appears in /proc: the name check
+/// compared the raw string against the table, matched neither form, and let
+/// both the sshd master and every live SSH session through as kill targets.
+/// On a tailnet-only box that is the process that holds the way in.
+#[test]
+fn sshd_proctitles_are_protected() {
+    for name in [
+        "sshd: root@pts/0 [priv]",
+        "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups",
+        "sshd-session: root@pts/0",
+        "/usr/sbin/sshd: root@pts/0 [priv]",
+        "sshd-session",
+    ] {
+        assert!(killsafe::is_protected_name(name), "{name:?} must be protected");
+    }
+}
+
+/// The kernel shows a leading dot for kernel threads and for binaries not in
+/// $PATH; `comm` is frequently `.sshd`.
+#[test]
+fn leading_dots_are_normalised_away() {
+    assert!(killsafe::is_protected_name(".sshd"));
+    assert!(killsafe::is_protected_name("...herdr"));
+    assert!(killsafe::is_protected_name(".sshd-session: root@pts/0"));
+}
+
+/// A wrapper that re-execs a process under a modified name must not launder
+/// it out of the check.
+#[test]
+fn wrapped_processes_still_match() {
+    assert!(killsafe::is_protected_name("herdr-wrapped"));
+    assert!(killsafe::is_protected_name("/usr/bin/tailscaled-wrapped"));
+    assert!(!killsafe::is_protected_name("bun-wrapped"));
+}
+
+/// A `protected_name_matching_uses_the_basename` test that still asserts
+/// basename behaviour after the normalisation above.
 #[test]
 fn protected_name_matching_uses_the_basename() {
     assert!(killsafe::is_protected_name("/nix/store/abc-sys-daemon/bin/sys-daemon"));

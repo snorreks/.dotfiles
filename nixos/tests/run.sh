@@ -295,13 +295,55 @@ run_lint() {
 # construction — their contents are ciphertext.
 run_secret_hygiene() {
   bold "=== hygiene: secret shapes in tracked files ==="
-  local hits
-  hits="$(
-    cd "$ROOT" || exit 1
-    git grep -nIE \
-      -- '(api[_-]?key|secret|passwd|password|token)[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=-]{16,}' \
-      -- ':!*.md' ':!nixos/tests/**' ':!secrets.yaml' ':!.sops.yaml' 2>/dev/null || true
-  )"
+  local hits rc
+  # The pattern is the same either way; only the search engine differs.
+  local pattern='(api[_-]?key|secret|passwd|password|token)[[:space:]]*[:=][[:space:]]*["'"'"'][A-Za-z0-9_/+=-]{16,}'
+
+  # Two search engines, because neither works everywhere.
+  #
+  # `git grep` is the right tool in a checkout — it searches tracked content
+  # and honours the pathspec exclusions. It exits 128 outside a work tree,
+  # which is exactly what a `checks` sandbox is: a plain directory with no git
+  # index. Previously that failure was swallowed with `2>/dev/null || true`
+  # and the check reported a clean pass, having searched nothing.
+  #
+  # So: use git grep when there is a work tree, fall back to a recursive grep
+  # when there is not, and treat any exit status above 1 as a real failure in
+  # both branches. The exclusions are the same set either way. Note the
+  # pathspecs are relative to $ROOT (nixos/), not to the repository root, so
+  # `nixos/tests/**` would match nothing here.
+  if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    hits="$(
+      cd "$ROOT" || exit 1
+      git grep -nIE -e "$pattern" -- ':!*.md' ':!tests/**' ':!secrets.yaml' ':!.sops.yaml'
+    )"
+    rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+      fail "secret-shape scan failed (git grep exited $rc)"
+      return
+    fi
+  else
+    printf '    \033[33mnote\033[0m no git work tree here — scanning the filesystem instead\n'
+    # grep exits 0 on a match, 1 on no match, and 2 on a real error (bad
+    # pattern, unreadable directory). Anything above 1 is a failure and must
+    # not be reported as a clean tree.
+    hits="$(
+      cd "$ROOT" || exit 1
+      grep -rnIE -e "$pattern" \
+        --exclude='*.md' \
+        --exclude-dir=tests \
+        --exclude-dir=.git \
+        --exclude='secrets.yaml' \
+        --exclude='.sops.yaml' \
+        .
+    )"
+    rc=$?
+    if [[ "$rc" -gt 1 ]]; then
+      fail "secret-shape scan failed (grep exited $rc)"
+      return
+    fi
+  fi
+
   if [[ -n "$hits" ]]; then
     red "secret-shaped literals found in tracked files:"
     printf '%s\n' "$hits" | sed 's/^/    /'
@@ -456,6 +498,12 @@ while [[ $i -lt "${#REG_PATH[@]}" ]]; do
   case "$kind" in
     cargo)
       run_cargo
+      # run_cargo reports its own failure through `fail`. The loop must honour
+      # it the same way the shell branch does, or a broken crate looks like a
+      # pass simply because cargo is a function call and not a `bash` one.
+      if [[ "$failed" -ne 0 && "$NM_KEEP_GOING" != "1" ]]; then
+        break
+      fi
       ;;
     lane | shell)
       bold "=== $lane: $path ==="

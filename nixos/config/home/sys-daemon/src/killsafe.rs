@@ -74,6 +74,10 @@ pub const PROTECTED_NAMES: &[&str] = &[
     "moshi-hook",
     "sys-daemon",
     "sshd",
+    // sshd forks a separate `sshd-session` process per connection, and that is
+    // the one holding the connection socket — not the master. Without this,
+    // every established SSH session on the box was an unprotected kill target.
+    "sshd-session",
     "tailscaled",
     "aged",
     "ns-maint",
@@ -95,13 +99,36 @@ pub fn is_management_port(port: u16, self_port: u16) -> Option<&'static str> {
         .map(|(_, name)| *name)
 }
 
-/// Is a process whose executable basename is `name` protected?
+/// Is a process whose name is `name` protected?
+///
+/// `name` may be a bare name, a full path, or a kernel proctitle, and all
+/// three forms are normalised before the comparison:
+///
+///   * **proctitle** — `sshd` rewrites its argv to `sshd: root@pts/0 [priv]`
+///     and forks `sshd-session: root@pts/0`. Comparing the raw string against
+///     the table matched neither, so both the sshd master and every live SSH
+///     session sailed through the name check. Everything from the first `:` is
+///     dropped before comparing.
+///   * **leading dots** — the kernel shows a leading `.` for kernel threads and
+///     for a binary that is not in `$PATH`; `comm` is often `.sshd`.
+///   * **`-wrapped` suffix** — a wrapper that re-execs a process under a
+///     modified name must not launder it out of the check.
+///
+/// Order matters: proctitle first (the path is then taken from what is left),
+/// then basename, then the cosmetic normalisations.
 pub fn is_protected_name(name: &str) -> bool {
-    let base = std::path::Path::new(name)
+    // 1. Proctitle: everything from the first ':' is the connection banner,
+    //    not part of the name.
+    let stem = name.split(':').next().unwrap_or(name).trim();
+    // 2. Basename, so a full path cannot smuggle a protected name past.
+    let base = std::path::Path::new(stem)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| name.to_string());
-    PROTECTED_NAMES.contains(&base.as_str())
+        .unwrap_or_else(|| stem.to_string());
+    // 3. Cosmetic normalisations.
+    let base = base.trim_start_matches('.');
+    let base = base.strip_suffix("-wrapped").unwrap_or(base);
+    PROTECTED_NAMES.contains(&base)
 }
 
 /// Refuse the whole operation if any discovered process is protected.
@@ -383,18 +410,36 @@ pub fn signal_target(target: &Target, signal: i32) -> SignalOutcome {
 ///
 /// This is the discovery step, and it is where the pidfd is taken: see
 /// [`Target::pidfd`] for why it must not be deferred to signal time.
+///
+/// The pidfd is opened BEFORE the /proc reads, not after. Reading identity
+/// first leaves a window in which the process can exit and its pid be reused:
+/// the reads then describe the old process while the pin describes the new one.
+/// Pinning first means every subsequent read is guaranteed to be about the
+/// process we pinned — if the process is gone the reads simply fail and the
+/// target is refused rather than described from a stale moment.
 pub fn describe(pid: u32, port: u16, self_port: u16) -> Result<Target, Refusal> {
+    // Pin first. A pidfd_open failure is not fatal — kernels before 5.3 have
+    // none, and the start-time fallback covers them — but when it succeeds it
+    // anchors everything below.
+    let pidfd = pidfd_open(pid);
     let uid = process_uid(pid).ok_or(Refusal::Gone)?;
     let start_time = process_start_time(pid).ok_or(Refusal::Gone)?;
+    let name = process_name(pid);
+    // The process was alive when we opened the pin, but it can have exited
+    // while we read it. A target that is already dead would be reported as a
+    // successful kill of something that was never killed.
+    if !process_is_running(pid) {
+        return Err(Refusal::Gone);
+    }
     Ok(Target {
         pid,
         port,
         self_port,
         uid,
         expected_uid: self_uid(),
-        name: process_name(pid),
+        name,
         start_time,
-        pidfd: pidfd_open(pid),
+        pidfd,
     })
 }
 

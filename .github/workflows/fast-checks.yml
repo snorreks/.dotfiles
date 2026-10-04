@@ -62,10 +62,20 @@ jobs:
           # The flake reads its own tree; a shallow clone would leave `git grep`
           # (the secret-shape check) with nothing to search.
           fetch-depth: 0
+          # Do not leave the job's token in .git/config. Nothing here needs to
+          # push, and a credential left in the working directory is available
+          # to every subsequent step — including the Nix build, which runs
+          # code from this repository.
+          persist-credentials: false
 
-      # cachix/install-nix-action v9
+      # cachix/install-nix-action v31.9.1
+      #
+      # Not v9. v9 is a node12 action and exports PATH via the `::add-path::`
+      # workflow command, which GitHub disabled — the run failed with
+      # "The `add-path` command is disabled". v31 is a composite action and
+      # uses $GITHUB_PATH. Pinned to the SHA below.
       - name: Install Nix
-        uses: cachix/install-nix-action@4cbb444a961f7f17a9ce421956b09f42343cf780
+        uses: cachix/install-nix-action@2126ae7fc54c9df00dd18f7f18754393182c73cd
 
       # DeterminateSystems/magic-nix-cache-action v9
       - name: Cache Nix store

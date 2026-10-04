@@ -72,18 +72,63 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
     # repository .gitignore already keeps these out of `git add .`; naming them
     # here means an explicit `stage <path>` is refused too, because a function
     # that only warns is a function people override.
+    #
+    # `$repo` is passed in for the same reason as `_ud_guard_not_master`: a
+    # `set -l` local of update_dotfiles is not visible inside a nested function
+    # here, so referencing `$REPO` in the message produced an empty path.
     function _ud_guard_staging_paths
+        set -l repo $argv[1]
+        set -l files $argv[2..-1]
+
         set -l forbidden '*.age' '*.key' 'id_rsa*' 'keys.txt' \
             'nixos/secrets.nix' 'nixos/local.nix' \
             'nixos/config/home/files/.ssh/*' 'nixos/config/home/files/.aws/*' \
             'nixos/config/home/vpn/configs/*' '*__pycache__*' '*/target/*' 'result*'
 
-        for path in $argv
+        # The root is resolved once, the same way `fixperms` resolves it, so
+        # the two agree on what "the repository" is even when NM_DOTFILES_REPO
+        # is a symlink.
+        set -l root (realpath -m -- $repo)
+
+        for path in $files
+            # Resolve first, match second. The previous version matched the
+            # literal string the caller typed, so `./keys.txt`,
+            # `nixos/./secrets.nix` and `nixos//secrets.nix` all walked past
+            # every glob in the list. `realpath -m` collapses `.` segments,
+            # duplicate slashes and trailing slashes without requiring the file
+            # to exist.
+            set -l target $path
+            if not string match -q '/*' -- $path
+                set target "$root/$path"
+            end
+            set -l abs (realpath -m -- $target 2>/dev/null)
+
+            if test -z "$abs" || test "$abs" = "$root"
+                echo "update_dotfiles: refusing to stage '$path' — it is the repository root." >&2
+                echo "  Name the specific files instead." >&2
+                return 1
+            end
+
+            set -l rel (string replace -- "$root/" '' $abs)
+            if test -z "$rel" || test "$rel" = "$abs"
+                echo "update_dotfiles: refusing to stage '$path' — it is the repository root." >&2
+                return 1
+            end
+
+            # A directory is never something to stage, and `stage .` is
+            # `git add -A` with extra steps — the exact behaviour this
+            # function exists to remove.
+            if test -d "$abs"
+                echo "update_dotfiles: refusing to stage '$path' — it is a directory." >&2
+                echo "  Name the specific files inside it instead." >&2
+                return 1
+            end
+
             for pattern in $forbidden
-                if string match -q -- "$pattern" $path
+                if string match -q -- "$pattern" $rel
                     echo "update_dotfiles: refusing to stage '$path' (matches '$pattern')." >&2
                     echo "  If this really belongs in the repository, add it deliberately" >&2
-                    echo "  with git -C $REPO add -f -- $path" >&2
+                    echo "  with git -C $repo add -f -- $rel" >&2
                     return 1
                 end
             end
@@ -133,7 +178,7 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 echo "  There is no 'stage everything': status lists untracked files." >&2
                 return 1
             end
-            _ud_guard_staging_paths $argv; or return 1
+            _ud_guard_staging_paths "$REPO" $argv; or return 1
             # `--` before the paths so a filename cannot be read as an option.
             command git -C $REPO add -- $argv
             echo "staged: $argv"
@@ -211,35 +256,40 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 echo "  e.g. update_dotfiles fixperms nixos/config/home/scripts/scripts/foo.sh" >&2
                 return 1
             end
-            # Refuse anything that resolves to the repository root. The old
-            # `chown -R ~/` is back the moment someone passes `.`, and that is
-            # the exact failure being removed.
-            #
-            # `realpath -m` rather than `path join`: fish 4.x has no `path
-            # join` subcommand. Relative paths are resolved against the repo;
-            # absolute ones are used as given.
+            # Resolve the repository root ONCE, then resolve every requested
+            # path against it. The guard and the chown must act on the same
+            # absolute targets: guarding `./x` and then chowning `$argv` means
+            # guarding one string and operating on another.
+            set -l root (realpath -m -- $REPO)
+            set -l targets
             for path in $argv
                 set -l target $path
                 if not string match -q '/*' -- $path
-                    set target "$REPO/$path"
+                    set target "$root/$path"
                 end
                 set -l abs (realpath -m -- $target 2>/dev/null)
-                if test "$abs" = "$REPO"
-                    echo "update_dotfiles: refusing to chown the repository root ($REPO)." >&2
+                if test -z "$abs"
+                    echo "update_dotfiles: cannot resolve '$path'." >&2
+                    return 1
+                end
+                if test "$abs" = "$root"
+                    echo "update_dotfiles: refusing to chown the repository root ($root)." >&2
                     echo "  Name the specific file or subdirectory instead." >&2
                     return 1
                 end
+                set -a targets $abs
             end
-            # Not -R. Ownership is corrected for the files you name; if a whole
-            # subtree genuinely needs it, say so by naming the subtree and
-            # accept that this will ask you to confirm.
-            echo "about to chown to $USER: $argv"
+
+            # The owner is passed explicitly. `sudo chown` with no OWNER
+            # changes the owner to ROOT — so this was doing the exact opposite
+            # of "fix permissions" and leaving every named file root-owned.
+            echo "about to chown to $USER: $targets"
             read -l -P 'proceed? [y/N] ' answer
             if not string match -qr '^y' -- "$answer"
                 echo "cancelled."
                 return 1
             end
-            command sudo chown -- $argv
+            command sudo chown "$USER" -- $targets
 
         case '*'
             echo "usage: update_dotfiles <status|stage|unstage|review|commit|branch|push|pr|sync|fixperms>" >&2
