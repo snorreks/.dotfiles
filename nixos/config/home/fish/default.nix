@@ -142,19 +142,98 @@ in {
     };
 
     interactiveShellInit = ''
-      # Source sops-nix decrypted secrets into Fish environment
-      # Parses POSIX "export KEY=value" format (same file used by ~/.profile & systemd)
-      set -l secrets_env "$HOME/.config/sops/secrets-env"
-      if test -f "$secrets_env"
-        while read -l line
-          if string match -q 'export *' -- $line
-            set -l kv (string match -r '^export\s+([^=]+)=(.*)\$' -- $line)
-            if test (count $kv) -eq 3
-              set -l val (string trim -c '"' -- $kv[3])
-              set -gx $kv[2] $val
-            end
+      # ── Credentials: values as data, never as sourced text ────────────────
+      #
+      # 🔴 The parser that used to live here is GONE, along with the template it
+      # read. It was:
+      #
+      #     set -l kv (string match -r '^export\s+([^=]+)=(.*)\$' -- $line)
+      #
+      # `\$` inside fish single quotes is a backslash followed by a dollar, so
+      # the pattern demanded that every secret line END with a literal "$" — it
+      # matched essentially nothing, and nothing noticed because ~/.profile was
+      # sourcing the same broken template. It also could not have worked: the
+      # template was line-oriented (`while read -l line`), so a multiline value
+      # would have been truncated, and `string trim -c '"'` would have eaten a
+      # legitimate quote from the end of a value.
+      #
+      # What replaces it never parses a value at all. `ns-secrets` reads the
+      # decrypted files as bytes and sets them as fish VARIABLES, which is fish's
+      # own representation and cannot be re-parsed as code:
+      #
+      #   ns-secrets                       # load ready credentials into this shell
+      #   ns-secrets check                 # readiness, no values
+      #   ns-secrets run <cmd> [args...]   # run ONE command with them, scoped
+      #   ns-secrets exec <cmd>            # replace this shell with cmd + creds
+      #
+      # Nothing here is automatic. A credential arrives when a process asks for
+      # it by name, which is what "scoped to the intended agent processes"
+      # means in practice — as opposed to `systemctl --user import-environment`,
+      # which put all of them into all of them.
+      set -gx SECRET_ENV "$HOME/.config/agent-ops/secret-env"
+      set -gx SECRET_ENV_MANIFEST "$HOME/.config/agent-ops/secrets.manifest"
+      # The SAME search order secret-env.sh uses, so the convenience path and
+      # the real path do not disagree about where a decrypted credential is.
+      set -gx SECRET_ENV_DIR (string collect -N \
+          (test -n "$CREDENTIALS_DIRECTORY"; and echo "$CREDENTIALS_DIRECTORY") \
+          (test -n "$XDG_RUNTIME_DIR"; and echo "$XDG_RUNTIME_DIR/sops-nix/secrets") \
+          (test -n "$XDG_STATE_HOME"; and echo "$XDG_STATE_HOME/sops-nix/secrets") \
+          (test -n "$HOME"; and echo "$HOME/.local/state/sops-nix/secrets"))
+
+      function ns-secrets --description 'load SOPS credentials as data, or check/scope them'
+          if test (count $argv) -eq 0
+              # Load into THIS shell. Values are read with `cat` into a fish
+              # variable — fish variables hold bytes, they are never re-parsed,
+              # so a value containing quotes, $(...) or newlines is data.
+              for name in (command $SECRET_ENV --list 2>/dev/null)
+                  # `string collect -N` KEEPS EMBEDDED NEWLINES. A bare
+                  # command substitution splits on newlines and builds a LIST;
+                  # then "$value" joins that list back with SPACES, so a
+                  # three-line PEM key arrived with its newlines replaced by
+                  # spaces — which is exactly the opposite of what the comment
+                  # above this function claims.
+                  #
+                  # The at-most-one-trailing-newline rule is NOT applied here:
+                  # fish has no way to strip exactly one trailing newline from a
+                  # collected string without also affecting a value that
+                  # legitimately ends in one. secret-env.sh already applies that
+                  # rule, and `ns-secrets run` (the path that matters) goes
+                  # through it; this is the convenience path for a shell.
+                  if set -l value (command cat "$SECRET_ENV_DIR/$name" 2>/dev/null | string collect -N)
+                      set -gx "$name" "$value"
+                  end
+              end
+              return 0
           end
-        end < "$secrets_env"
+          switch $argv[1]
+              case check
+                  command $SECRET_ENV --check $argv[2..-1]
+                  return $status
+              case run
+                  # Scoped: only this child process sees the values.
+                  if test (count $argv) -lt 2
+                      echo 'ns-secrets run: give me a command' >&2
+                      return 2
+                  end
+                  command $SECRET_ENV --exec $argv[2..-1]
+                  return $status
+              case exec
+                  shift
+                  command $SECRET_ENV --exec $argv
+                  return $status
+              case '*'
+                  echo "ns-secrets: unknown subcommand '$argv[1]' (check|run|exec)" >&2
+                  return 2
+          end
+      end
+
+      # Readiness only, never values, and never fatal: a credential that is not
+      # decrypted yet must not stop an interactive shell from opening. Agents
+      # that need one ask for it by name and get a clear refusal instead.
+      if status is-interactive
+          if not command $SECRET_ENV --check >/dev/null 2>&1
+              set -g __ns_secrets_unready 1
+          end
       end
 
       set fish_greeting # Disable greeting
