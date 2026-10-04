@@ -154,6 +154,36 @@ a test that is about the transaction's logic.
   and assert on the record, the state left behind and the calls made. There is
   no re-implementation of the state machine to drift out of sync with.
 
+## media-travel (this lane)
+
+`bash nixos/tests/media-travel/run.sh` — or
+`nix build .#checks.x86_64-linux.media-travel`.
+
+Five suites, each runnable on its own:
+
+| Suite | Needs | Covers |
+|---|---|---|
+| `netns-failclosed.sh` | nothing | the shipped `netns-up.sh`, via stubbed `ip`/`iptables` |
+| `state-restore.sh` | sqlite3 | export, corrupt-database refusal, restore verification |
+| `selective-sync.sh` | nothing | the shipped ignore rules against a fixture tree |
+| `travel-builder.sh` | nothing | `herdr-travel` against a fake herdr |
+| `host-isolation.sh` | `nix` | both hosts evaluated |
+
+`NM_SKIP_MEDIA_HOST_EVAL=1` skips `host-isolation.sh` (which cannot evaluate
+flake inputs inside a build sandbox) and says so loudly; `NM_REQUIRE_ALL=0`
+allows that skip. Outside a sandbox the skip is an error, so "the suite that
+evaluates the hosts did not run" cannot be a green result.
+
+### Two things worth knowing before extending it
+
+- **`fake_root_bin` must be called, not captured.** It exports `FAKE_LOG`, and
+  `STUBS="$(fake_root_bin …)"` runs in a subshell where the export is lost —
+  which then fails under `set -u` and reads as a broken suite rather than a
+  fixture mistake.
+- **`netns-failclosed.sh` tests the shipped script, not a copy.** It asserts on
+  the netfilter calls `netns-up.sh` actually makes. Grepping the source for
+  `DROP` would prove a word is in a file, not that the rules are right.
+
 ## Notes for anyone extending this
 
 - Fakes are written with a **hardcoded interpreter path**, not

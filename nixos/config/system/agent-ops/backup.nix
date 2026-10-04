@@ -211,10 +211,23 @@ in {
       type = lib.types.bool;
       default = false;
       description = ''
-        Seam for lane C: after a successful backup, run the configured media
-        state hooks. Declared here and not implemented, because C owns the media
-        modules and this lane must not guess at their state layout. Off, so
-        nothing changes until C lands and fills it in.
+        After a successful backup, run the configured media state hook.
+        Requires `mediaStateHook` to be set; leaving it off changes nothing.
+      '';
+    };
+
+    mediaStateHook = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = ''
+        Executable run after a successful backup, owned by the media lane (C)
+        and set by config/system/media/default.nix. It is passed the backup's
+        staging directory, so it can verify that what was actually shipped is
+        restorable rather than merely present.
+
+        Null here and set from the media module, not the other way round: this
+        option is a SEAM, and a seam that pointed at something declared in the
+        module that fills it would be a dependency in the other direction.
       '';
     };
   };
@@ -369,15 +382,55 @@ in {
       };
     })
 
-    (lib.mkIf (cfg.enable && cfg.heartbeatHook) {
+    # ── Media state hook ─────────────────────────────────────────────────────
+    #
+    # Only reachable when BOTH are set. The `cfg.heartbeatHook &&` alone would
+    # be a switch that silently does nothing if the media module were removed,
+    # and the assertion below is what makes that combination an error instead.
+    #
+    # ExecStartPost, not ExecStart: this runs only when the main command
+    # SUCCEEDED. A post-step on a failed backup would be reporting on state the
+    # backup never captured, which is the opposite of useful.
+    #
+    # The paths are absolute and literal rather than derived from this module.
+    # The export directory belongs to the media lane and is created by the
+    # service it also owns; this module is verifying someone else's directory,
+    # and inventing a second copy of that path here is how the two drift.
+    (lib.mkIf (cfg.enable && cfg.heartbeatHook && cfg.mediaStateHook != null) {
+      systemd.services."agent-ops-backup".serviceConfig.ExecStartPost =
+        lib.escapeShellArgs [
+          cfg.mediaStateHook
+          "verify"
+          "--exports"
+          "/var/lib/agent-ops/media-exports"
+          "--health-dir"
+          "/var/lib/agent-ops"
+        ];
+    })
+
+    # The half-configured states, refused at evaluation rather than discovered
+    # as a backup that quietly skipped its media verification forever.
+    (lib.mkIf (cfg.enable && cfg.heartbeatHook && cfg.mediaStateHook == null) {
       assertions = [
         {
           assertion = false;
           message = ''
-            agentOps.backup.heartbeatHook is a seam reserved for the media/travel
-            lane (C). It is intentionally not implemented here: C owns the media
-            state layout and this lane must not guess at it. Enable it from C's
-            branch, not this one.
+            agentOps.backup.heartbeatHook is true but mediaStateHook is null.
+            The media lane (config/system/media/default.nix) is the only thing
+            that sets it; if you have enabled one without the other, the media
+            modules are not imported.
+          '';
+        }
+      ];
+    })
+
+    (lib.mkIf (cfg.enable && cfg.mediaStateHook != null && !cfg.heartbeatHook) {
+      assertions = [
+        {
+          assertion = false;
+          message = ''
+            agentOps.backup.mediaStateHook is set but heartbeatHook is false, so
+            the hook would never run. Enable both, or neither.
           '';
         }
       ];

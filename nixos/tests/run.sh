@@ -38,6 +38,10 @@ SUITES=(
   "server-foundation/tailscale-reconcile.sh"
   "server-foundation/ssh-confirm.sh"
   "server-foundation/host-eval.sh"
+  # The media-travel lane, added as an entry rather than by rewriting the list:
+  # it brings its own run.sh with the same skip semantics as the lanes above, so
+  # one failing suite names itself instead of being buried in a longer run.
+  "media-travel/run.sh"
 )
 
 failed=0
@@ -63,6 +67,13 @@ SHELLCHECKED=(
   "tests/server-foundation/tailscale-reconcile.sh"
   "tests/server-foundation/ssh-confirm.sh"
   "tests/server-foundation/host-eval.sh"
+  "tests/media-travel/run.sh"
+  "config/home/scripts/herdr-travel.sh"
+  "config/system/media/scripts/netns-up.sh"
+  "config/system/media/scripts/netns-audit.sh"
+  "config/system/media/scripts/media-state.sh"
+  "config/system/media/scripts/media-offline-prep.sh"
+  "config/system/media/scripts/jellyfin-accel-check.sh"
 )
 if command -v shellcheck >/dev/null 2>&1; then
   for f in "${SHELLCHECKED[@]}"; do
@@ -103,7 +114,33 @@ for suite in "${SUITES[@]}"; do
   # Run it directly with:
   #
   #   bash nixos/tests/server-foundation/host-eval.sh
-  if [[ "${suite##*/}" == "host-eval.sh" ]] &&
+  # Two suites evaluate real flake configurations and cannot run inside a build
+  # sandbox: server-foundation/host-eval.sh, and the media-travel runner (whose
+  # host-isolation suite evaluates both hosts). Both are named explicitly rather
+  # than pattern-matched, because "run.sh" on its own matches every lane.
+  # The media-travel runner is NOT skipped wholesale here. Four of its five
+  # suites need no nix at all, and skipping the whole runner meant a sandbox
+  # build silently stopped running the namespace fail-closed assertions. It is
+  # invoked with ITS OWN skip variable instead, so it runs what it can and
+  # reports the one it cannot.
+  if [[ "$suite" == "media-travel/run.sh" ]] &&
+    { [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; }; then
+    reason="no nix on PATH"
+    [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"
+    printf '\n\033[1m=== %s (host-evaluation suites skipped: %s)\033[0m\n' "$suite" "$reason"
+    # Pass the skip through ONLY when nix is genuinely absent. NM_SKIP_HOST_EVAL=1
+    # is a request to skip ONE suite; using it to also drop media-travel's host
+    # assertions would hide them on any machine that has nix.
+    if ! NM_SKIP_MEDIA_HOST_EVAL="$(command -v nix >/dev/null 2>&1 && echo 0 || echo 1)" \
+      bash "$HERE/$suite"; then
+      printf '\033[31mFAILED: %s\033[0m\n' "$suite"
+      failed=1
+      break
+    fi
+    continue
+  fi
+
+  if [[ "$suite" == "server-foundation/host-eval.sh" ]] &&
     { [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] || ! command -v nix >/dev/null 2>&1; }; then
     reason="no nix on PATH"
     [[ "${NM_SKIP_HOST_EVAL:-0}" == "1" ]] && reason="NM_SKIP_HOST_EVAL=1"

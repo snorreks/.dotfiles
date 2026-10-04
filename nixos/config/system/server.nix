@@ -237,7 +237,17 @@ in {
     {
       ${opts.username}.openssh.authorizedKeys.keys =
         opts.sshAuthorizedKeys
-        ++ lib.optional (opts.remoteBuilder.enable && opts.remoteBuilder.authorizedKey != null)
+        # The builder's key belongs on the BUILDER side regardless of whether
+        # this machine is also a client.
+        #
+        # This used to read `opts.remoteBuilder.enable` alone, which is the
+        # enable-switch on the *client* — so the server, the one machine that
+        # actually has to accept the key, never added it. A builder configured
+        # on both ends and still unable to log in is a genuinely confusing
+        # failure, and it looks like a key or firewall problem rather than a
+        # condition that was never true on the server.
+        ++ lib.optional
+          ((opts.remoteBuilder.enable || headless) && opts.remoteBuilder.authorizedKey != null)
           opts.remoteBuilder.authorizedKey;
     }
 
@@ -311,15 +321,61 @@ in {
       settings.builders-use-substitutes = true;
       buildMachines = [
         {
-          inherit (opts.remoteBuilder) hostName maxJobs speedFactor sshKey;
-          sshUser = opts.username;
-          protocol = "ssh-ng";
+          sshUser = opts.remoteBuilder.sshUser;
+          inherit (opts.remoteBuilder) maxJobs speedFactor sshKey;
+
+          # 🔴 PORT 2222, PINNED, AND DELIBERATELY EXPLICIT.
+          #
+          # Nix defaults to port 22, and port 22 on this tailnet is Tailscale
+          # SSH (`--ssh=true` in the `services.tailscale` block above). Tailscale
+          # SSH intercepts port 22 BEFORE the OS sshd sees it and authenticates
+          # with a Tailscale identity, bypassing authorized_keys entirely — so a
+          # key-based builder aimed at 22 stalls on a Tailscale handshake, or is
+          # refused by the tailnet ACL, and reports an error from the wrong layer.
+          #
+          # 2222 is ordinary OpenSSH (config/system/mobile-agents.nix owns that
+          # listener), so the key in authorized_keys above is actually checked.
+          # "SSH to the Legion works" is not evidence that the builder works.
+          #
+          # BARE hostname, deliberately.
+          #
+          # nixpkgs writes /etc/nix/machines as
+          #     <hostName> <system> <sshKey> <maxJobs> <speedFactor> ...
+          # and Nix then parses that line by SPLITTING ON WHITESPACE. Putting
+          # "-p 2222" in hostName therefore did not add an ssh option: it made
+          # the system field "-p", the sshKey field "2222", and every field
+          # after it shift by two — so the entry no longer advertised
+          # x86_64-linux and the builder was silently skipped for those builds.
+          #
+          # The port is pinned by NIX_SSHOPTS below, which is Nix's own
+          # mechanism for extra ssh arguments (nixpkgs' rebuild tests use it the
+          # same way), plus the generated `Host legion / Port 2222` ssh_config.
+          hostName = opts.remoteBuilder.hostName;
+
+          # `ssh-ng` is Nix's actual SSH transport. `builtin` speaks no SSH at
+          # all and would silently ignore sshOptions above, which turns a port
+          # mistake into something that looks like a Nix bug.
+          inherit (opts.remoteBuilder) protocol;
           system = "x86_64-linux";
           supportedFeatures = ["nixos-test" "benchmark" "big-parallel" "kvm"];
         }
       ];
     })
   ];
+
+  # ── The port the builder is reached on, for the Nix DAEMON ────────────────
+  #
+  # The machine entry above can only carry a bare hostname, so the port has to
+  # reach Nix another way. NIX_SSHOPTS is that way: Nix prepends it to every ssh
+  # it makes, and it only makes ssh to builders.
+  #
+  # Without it the daemon falls back to port 22, which on this tailnet is
+  # Tailscale SSH — it intercepts before the OS sshd and authenticates with a
+  # Tailscale identity, so a key-based builder stalls or is refused by the ACL,
+  # reporting from the wrong layer entirely.
+  systemd.services.nix-daemon.environment = lib.mkIf (opts.remoteBuilder.enable && opts.headless == false) {
+    NIX_SSHOPTS = "-p ${toString opts.remoteBuilder.port}";
+  };
 
   environment.systemPackages = [
     # A long remote build still wants a multiplexer to live in — not because

@@ -36,6 +36,11 @@
       ./agent-ops/backup.nix
       ./agent-ops/health.nix
       ./agent-ops/resources.nix
+      # Private media and isolated downloads (media-travel PR). Every service
+      # inside is opt-in and defaults to disabled — see opts.media in
+      # nixos/options.nix. This import changes nothing on a machine that has
+      # not asked for it.
+      ./media
       ./services.nix
       ./ssh.nix
       ./sound.nix
