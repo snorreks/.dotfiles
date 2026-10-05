@@ -75,7 +75,7 @@ NM_SSH_UNIT="${NM_SSH_UNIT:-sshd.service}"
 # overridable so tests do not have to wait minutes.
 NM_TICK_SECONDS="${NM_TICK_SECONDS:-30}"
 NM_DEFAULT_TIMEOUT="${NM_DEFAULT_TIMEOUT:-20min}"
-NM_RESTORE_TIMEOUT="${NM_RESTORE_TIMEOUT:-45}"
+NM_RESTORE_TIMEOUT="${NM_RESTORE_TIMEOUT:-10min}"
 # TEST ONLY. Lets the failure-injection suite drive the real state machine as
 # an unprivileged user, because production requires uid 0 for every mutation.
 # It changes nothing about the logic under test; see require_privileged below.
@@ -975,6 +975,13 @@ parse_duration() {
   die "'$v' is not a duration this tool understands (use e.g. 90, 90s, 20m, 1h)"
 }
 
+# Normalize our duration syntax before any GNU timeout invocation. Zero would
+# disable its deadline entirely, including for bootloader restoration.
+NM_RESTORE_TIMEOUT="$(parse_duration "$NM_RESTORE_TIMEOUT")" || exit 1
+if [[ ! "$NM_RESTORE_TIMEOUT" =~ ^[0-9]+$ ]] || ((NM_RESTORE_TIMEOUT <= 0)); then
+  die "NM_RESTORE_TIMEOUT must be a positive duration"
+fi
+
 # self_path — absolute path to this script, so the transient unit runs the same
 # build regardless of PATH or working directory.
 self_path() {
@@ -1501,7 +1508,11 @@ cmd_reconcile() {
     else
       RECORD["phase"]="restore-failed"
       RECORD["restore_result"]="restore-interrupted-by-reboot"
-      RECORD["restore_detail"]="rebooted onto $booted, which is neither the candidate nor the recorded recovery closure ${RECORD[old_running]}"
+      local runtime profile
+      runtime="$(current_closure)"
+      profile="$(profile_closure)"
+      [[ -n "$profile" && -e "$profile" ]] || profile="<unresolved>"
+      RECORD["restore_detail"]="rebooted onto $booted; recovery state not established: current runtime=${runtime:-<unresolved>}, profile=$profile; recorded runtime=${RECORD[old_running]}, profile=${RECORD[old_profile_closure]:-<unresolved>}, profile resolution error=${RECORD[profile_resolution_error]:-none}"
     fi
     RECORD["reconciled_at"]="$now"
     record_save
@@ -1705,6 +1716,9 @@ cmd_gc() {
   done
   lock_acquire
   record_load
+  if is_pending_phase "${RECORD[phase]}"; then
+    die "gc: transaction ${RECORD[txid]} is pending (${RECORD[phase]}); refusing collection"
+  fi
   local label closure
   for label in running booted profile; do
     case "$label" in

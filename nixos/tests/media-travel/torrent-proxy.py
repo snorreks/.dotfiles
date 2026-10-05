@@ -32,6 +32,29 @@ with tempfile.TemporaryDirectory() as directory:
     handler.proxy()
     handler.refuse.assert_called_with(501, 'unsupported framing\n')
     handler.rfile.read.assert_not_called()
+    # Browser authority and CSRF headers survive, while untrusted forwarded
+    # host values are replaced and the backend still gets its own Host.
+    handler.headers = email.message.Message()
+    for name, value in ((proxy.TOKEN_HEADER, 'fixture-token'), ('Host', 'media.example:8443'),
+                        ('Origin', 'https://media.example:8443'), ('Referer', 'https://media.example:8443/ui'),
+                        ('x-forwarded-host', 'forged.example')):
+        handler.headers[name] = value
+    handler.path = '/api/v2/app/version'
+    handler.command = 'GET'
+    handler.send_response = handler.send_header = handler.end_headers = mock.Mock()
+    handler.wfile = mock.Mock()
+    with mock.patch.object(proxy.http.client, 'HTTPConnection') as connect:
+        upstream = connect.return_value.getresponse.return_value
+        upstream.read.return_value = b'ok'
+        upstream.getheader.return_value = ''
+        upstream.getheaders.return_value = []
+        handler.proxy()
+        headers = connect.return_value.request.call_args.kwargs['headers']
+        assert headers['Host'] == '10.77.0.2:18080'
+        assert headers['X-Forwarded-Host'] == 'media.example:8443'
+        assert 'x-forwarded-host' not in headers
+        assert headers['Origin'] == 'https://media.example:8443'
+        assert headers['Referer'] == 'https://media.example:8443/ui'
     # Construct without binding; mock thread creation and check the 17th
     # request is refused rather than spawning another worker.
     with mock.patch.object(proxy.socketserver.ThreadingTCPServer, '__init__'):

@@ -43,7 +43,7 @@ fi
 
 STATE="$FIXTURE_TMP/exports"
 HEALTH="$FIXTURE_TMP/health"
-LIB="$FIXTURE_TMP/library.db"
+LIB="$FIXTURE_TMP/jellyfin.db"
 QBIT="$FIXTURE_TMP/qBittorrent.conf"
 mkdir -p "$STATE" "$HEALTH"
 

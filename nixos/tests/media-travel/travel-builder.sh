@@ -60,8 +60,14 @@ unset MACHINE_MISSING
 : >"$CALLS"
 run_helper local touch "$FIXTURE_TMP/local-ran"
 if [[ -e "$FIXTURE_TMP/local-ran" && ! -s "$CALLS" ]]; then ok 'offline fallback never contacts herdr'; else bad 'offline fallback contacted herdr'; fi
+: >"$CALLS"
 run_helper run legion server stop
-if [[ "$RUN_STATUS" != 0 ]]; then ok 'helper refuses server lifecycle commands'; else bad 'helper stopped the live server'; fi
+if [[ "$RUN_STATUS" != 0 ]] && ! grep -Eq '(^| )server stop($| )' "$CALLS" &&
+  grep -Fq 'server lifecycle commands are refused' "$FIXTURE_TMP/err"; then
+  ok 'helper refuses server lifecycle commands before forwarding'
+else
+  bad 'helper did not refuse server lifecycle commands' "$(cat "$FIXTURE_TMP/err")"
+fi
 run_helper
 if grep -q -- 'explicit --machine' "$FIXTURE_TMP/err"; then ok 'usage describes explicit remote targeting'; else bad 'usage hides remote targeting'; fi
 summary 'travel-builder'

@@ -24,6 +24,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 printf '\n\033[1mns-maint maintenance transaction — failure injection\033[0m\n'
 
 # ─────────────────────────────────────────────────────────────────────────────
+t_start "restore timeout rejects invalid and nonpositive durations"
+fixture_new
+for duration in invalid 0 0min -1; do
+  out="$(NM_RESTORE_TIMEOUT="$duration" ns_maint status 2>&1)" && rc=0 || rc=$?
+  assert_ne 0 "$rc" "restore duration $duration is refused"
+done
+out="$(NM_RESTORE_TIMEOUT=2min ns_maint status 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "parser-format restore duration is accepted"
+t_done
+fixture_free
+
 t_start "a build longer than the timeout causes zero activation and zero rollback"
 fixture_new
 # The build sleeps well past the timeout the operator was told about.
@@ -768,7 +779,7 @@ t_start "restore runtime and boot hangs are bounded"
 fixture_new
 FAKE_SWITCH_CANDIDATE_EXIT=7
 FAKE_SWITCH_OLD_SLEEP=30
-NM_RESTORE_TIMEOUT=1
+NM_RESTORE_TIMEOUT=1sec
 export FAKE_SWITCH_CANDIDATE_EXIT FAKE_SWITCH_OLD_SLEEP NM_RESTORE_TIMEOUT
 start=$(date +%s)
 prepare_and_activate 300
@@ -942,7 +953,8 @@ prepare_and_activate 300
 anchor="$TMP/gcroots/ns-maint-profile-$(txid)"
 ln -sfn "$FAKE_OTHER_CANDIDATE" "${NM_PROFILE}-2-link"
 ln -sfn "$FAKE_RUNNING" "${NM_PROFILE}-3-link"
-ns_maint gc >"$TMP/log/gc.out" 2>&1
+ns_maint gc >"$TMP/log/gc.out" 2>&1 && rc=0 || rc=$?
+assert_ne 0 "$rc" "pending transaction refuses GC"
 assert_file "$anchor" "GC retains transaction anchor"
 for retained_gen in 2 3 7 8; do
   assert_file "${NM_PROFILE}-${retained_gen}-link" "GC retains generation $retained_gen"
@@ -950,6 +962,21 @@ done
 ns_maint gc --keep 1 >"$TMP/log/gc-keep.out" 2>&1 && rc=0 || rc=$?
 assert_ne 0 "$rc" "--keep remains refused"
 assert_file "$anchor" "refused retention preserves anchor"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "GC refuses every pending phase before changing roots or collecting"
+fixture_new
+prepare_and_activate 300
+for pending in staging stage-interrupted armed activating awaiting-confirm restoring; do
+  sed -i "s/^phase=.*/phase=$pending/" "$NM_DIR/record.env"
+  before="$(fake_calls)"
+  out="$(ns_maint gc 2>&1)" && rc=0 || rc=$?
+  assert_ne 0 "$rc" "GC refuses $pending"
+  assert_contains "$out" "pending ($pending)" "refusal identifies $pending"
+  assert_eq "$before" "$(fake_calls)" "no protection or collection calls during $pending"
+done
 assert_no_reboot
 t_done
 fixture_free
@@ -965,6 +992,14 @@ ln -sfn "$FAKE_RUNNING" "$NM_BOOTED_SYSTEM"
 ln -sfn "$FAKE_RUNNING" "$NM_CURRENT_SYSTEM"
 ns_maint reconcile >"$TMP/log/reconcile.out" 2>&1
 assert_eq restore-failed "$(phase)" "booted A alone cannot establish B restoration"
+assert_contains "$(rec_field restore_detail)" "rebooted onto $FAKE_RUNNING" "correctly identifies reboot onto A"
+assert_contains "$(rec_field restore_detail)" "current runtime=$FAKE_RUNNING" "reports observed runtime"
+assert_contains "$(rec_field restore_detail)" "recorded runtime=$FAKE_RUNNING, profile=$distinct_profile" "reports distinct recovery intents"
+assert_not_contains "$(rec_field restore_detail)" "neither" "does not misidentify recovery runtime"
+sed -i 's/^phase=.*/phase=restoring/' "$NM_DIR/record.env"
+rm "$NM_PROFILE"
+ns_maint reconcile >/dev/null 2>&1
+assert_contains "$(rec_field restore_detail)" 'profile=<unresolved>' "reports unresolved current profile"
 assert_no_reboot
 t_done
 fixture_free

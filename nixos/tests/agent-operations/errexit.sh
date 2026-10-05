@@ -120,7 +120,7 @@ fi
 _t_start "ns-agent-daemon-roots: a dangling root must still print its verdict"
 mkdir -p "$TMP/gcroots"
 ln -sfn "$TMP/does-not-exist" "$TMP/gcroots/ns-ops-dangling"
-out="$(NM_GCROOTS="$TMP/gcroots" NS_OPS_TEST_MODE=1 \
+out="$(NM_GCROOTS="$TMP/gcroots" NS_OPS_TEST_MODE=1 NS_OPS_USER="$(id -un)" \
 	run_like_systemd "$DAEMON_ROOTS" verify 2>&1)"
 rc=$?
 assert_contains "$out" 'DANGLING' 'the dangling root was reported'

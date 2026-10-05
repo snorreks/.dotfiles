@@ -155,6 +155,10 @@ ns-agent-daemon-roots pin       # re-pin from the RUNNING /proc/PID/exe
 ns-agent-daemon-roots gc-check  # collector dry run, then verify
 ```
 
+Root CLI calls must select the owner explicitly, for example
+`sudo NS_OPS_USER=sonny ns-agent-daemon-roots pin`. The UID is resolved from
+that user. A pin run fails if it cannot identify a running process.
+
 > **Known gap.** `ns-maint roots` globs `ns-maint-*` and therefore will **not**
 > list these. `ns-agent-daemon-roots.sh list` is the complete answer. Widening
 > that glob is a one-word change in a file lane A owns; this lane does not touch
@@ -185,7 +189,15 @@ NAME|RUNNER|HEARTBEAT_FILE
 ```
 
 `RUNNER` must be an **absolute path** and is executed directly — never through a
-shell. `HEARTBEAT_FILE`'s mtime is the liveness signal.
+shell. During startup, the runner must acknowledge its launch by writing the
+`HERDR_RESUME_TOKEN` environment value into `HEARTBEAT_FILE`, for example:
+
+```sh
+printf '%s\n' "$HERDR_RESUME_TOKEN" > /absolute/path/to/heartbeat
+```
+
+Keep that file's mtime fresh as work progresses. A fresh timestamp without the
+current launch token cannot acknowledge startup.
 
 It will not launch anything when:
 
@@ -193,7 +205,6 @@ It will not launch anything when:
 * the runner is not executable or is relative (exit 3 / 2);
 * another resume holds the lock for that root (exit 4 — refusal, not duplicate);
 * a recorded pid is alive but its **start time** differs (pid reuse);
-* a fresh heartbeat exists with no recorded pid (someone else owns it);
 * a task exits, or writes no heartbeat, inside the start window (it is stopped
   again rather than left orphaned).
 

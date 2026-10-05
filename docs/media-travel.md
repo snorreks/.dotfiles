@@ -170,7 +170,7 @@ separately, or any code that opens its own socket, is not covered by it.
 | no veth DNS/Internet rule | no namespace DNS or Internet escape |
 | `OUTPUT` **DROP** | policy |
 | `ip6tables OUTPUT` **DROP** | all IPv6 |
-| `INPUT` allow lo and exact host proxy tuple; reject tunnel WebUI; default **DROP** | no direct tunnel WebUI access |
+| `INPUT` allow lo and exact host proxy tuple; drop WebUI on `$WG_IF`, then accept all other `$WG_IF` ingress; default **DROP** for unmatched traffic | no direct tunnel WebUI access; other tunnel ingress is allowed |
 
 There is **no default route via the veth** — a `/32` host route to the veth
 peer and nothing more. Routing and netfilter are two independent mechanisms;

@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory() as tmp:
         run('check')
     # Execute the shipped shell wrapper with fake CLIs and the real checker.
     shell = source.split('name = "jellyfin-private-serve";', 1)[1].split("text = ''\n", 1)[1].split("\n    '';", 1)[0]
-    shell = textwrap.dedent(shell)
+    shell = textwrap.dedent(shell).replace("''${", "${")
     shell = shell.replace('${toString cfg.serveHttpsPort}', '8443').replace('${toString cfg.port}', '28096')
     shell = shell.replace('${lib.getExe nativeConfig}', shlex.quote(sys.executable) + ' ' + shlex.quote(str(helper)))
     shell = shell.replace('${lib.escapeShellArg cfg.configDir}', shlex.quote(str(config)))
@@ -84,7 +84,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cli.mkdir()
     log = root / 'calls'
     tailscale = cli / 'tailscale'
-    tailscale.write_text('#!' + sys.executable + '\nimport os,sys\nwith open(os.environ["CALLS"], "a") as f: f.write(" ".join(sys.argv[1:]) + "\\n")\n')
+    tailscale.write_text('#!' + sys.executable + '\nimport os,sys\nwith open(os.environ["CALLS"], "a") as f: f.write(" ".join(sys.argv[1:]) + "\\n")\nif sys.argv[-1] == "off" and os.environ.get("CLEANUP_ERROR"):\n print(os.environ["CLEANUP_ERROR"], file=sys.stderr)\n sys.exit(1)\n')
     runuser = cli / 'runuser'
     runuser.write_text('#!' + sys.executable + '\nimport os,sys\nassert sys.argv[1:4] == ["-u", "jellyfin", "--"]\nos.execv(sys.argv[4], sys.argv[4:])\n')
     tailscale.chmod(0o755)
@@ -101,6 +101,19 @@ with tempfile.TemporaryDirectory() as tmp:
         if published:
             assert calls[1] == 'serve --bg --https=8443 http://127.0.0.1:28096'
         assert b'fixture-secret' not in result.stdout + result.stderr
+    for error, succeeds in (
+        ('error: failed to remove web serve: handler does not exist', True),
+        ('error: failed to remove web serve: handler does not exist\n\ntry `tailscale serve --help` for usage info', True),
+        ('error: failed to remove web serve: cannot remove web handler; currently serving TCP', False),
+        ('failed to connect to local tailscaled', False),
+    ):
+        log.write_text('')
+        result = subprocess.run([shutil.which('bash'), '-e', '-u', '-o', 'pipefail', '-c', script],
+                                env={**os.environ, 'PATH': str(cli), 'CALLS': str(log), 'CLEANUP_ERROR': error}, capture_output=True)
+        assert (result.returncode == 0) == succeeds, result.stderr
+        assert len(log.read_text().splitlines()) == (2 if succeeds else 1)
+        if not succeeds:
+            assert error.encode() in result.stderr
     # Refuse symlink reads both at the file and directory level.
     system.unlink()
     system.symlink_to(auth)

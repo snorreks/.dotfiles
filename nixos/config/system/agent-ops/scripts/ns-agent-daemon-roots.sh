@@ -68,8 +68,6 @@ NS_OPS_STORE_ROOT=${NS_OPS_STORE_ROOT:-/nix/store}
 # it. Same reason PROC_ROOT is prefixed.
 NS_OPS_NIX_STORE=${NS_OPS_NIX_STORE:-nix-store}
 SYSTEMCTL_BIN=${SYSTEMCTL_BIN:-systemctl}
-NS_OPS_USER=${NS_OPS_USER:-$(id -un)}
-NS_OPS_UID=${NS_OPS_UID:-$(id -u "$NS_OPS_USER")}
 
 say() { printf '%s\n' "$*"; }
 sayf() { printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2; }
@@ -77,6 +75,13 @@ die() {
 	sayf "$*"
 	exit 2
 }
+
+# Root has no implicit target: its user manager is not the operator's.
+if [[ -z "${NS_OPS_USER:-}" ]]; then
+	[[ "$(id -u)" != 0 ]] || die "root must set NS_OPS_USER to the target user."
+	NS_OPS_USER="$(id -un)"
+fi
+NS_OPS_UID="$(id -u "$NS_OPS_USER")" || die "cannot resolve target user '$NS_OPS_USER'."
 
 usage() {
 	cat >&2 <<EOF
@@ -87,6 +92,8 @@ usage: $PROGRAM_NAME <command> [options]
   verify              re-resolve each pinned root; nonzero if any is missing
   gc-check            run nix-store --gc --dry-run, then verify the roots survived
   release <name>      remove one pin
+
+  NS_OPS_USER         target user (required for root; defaults to self otherwise)
 
   --unit NAME         systemd user unit to take the main pid from
                        (default: \$NS_OPS_UNIT or herdr.service)
@@ -160,9 +167,10 @@ resolve_pid() {
 	fi
 	command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || return 1
 	local p
-	p="$(user_systemctl show "$UNIT" -p MainPID --value 2>/dev/null || true)"
+	p="$(user_systemctl show "$UNIT" -p MainPID --value 2>/dev/null)" || return 1
 	p="${p//[[:space:]]/}"
-	[[ "$p" =~ ^[0-9]+$ && "$p" != "0" ]] || return 1
+	[[ "$p" =~ ^[0-9]+$ ]] || return 1
+	[[ "$p" != 0 ]] || return 2 # Confirmed stopped, not a failed query.
 	printf '%s' "$p"
 }
 
@@ -170,11 +178,17 @@ resolve_pid() {
 # exactly the manually-started-server case and refusing to pin it would leave
 # the most at-risk daemon unprotected.
 resolve_pid_from_proc() {
-	[[ "$UNIT" == herdr.service ]] || return 1
-	local d found=''
+	local d executable found=''
+	local -a args=()
 	for d in "$PROC_ROOT"/[0-9]*; do
 		process_identity "${d##*/}" >/dev/null || continue
-		is_herdr_server "${d##*/}" || continue
+		if [[ "$UNIT" == herdr.service ]]; then
+			is_herdr_server "${d##*/}" || continue
+		else
+			mapfile -d '' -t args <"$d/cmdline" 2>/dev/null || continue
+			executable="${args[0]:-}"
+			[[ "${executable##*/}" == "${UNIT%.service}" ]] || continue
+		fi
 		# Multiple manual servers are ambiguous, not permission to pick one.
 		[[ -z "$found" ]] || return 1
 		found="${d##*/}"
@@ -246,11 +260,17 @@ closure_count() {
 cmd_pin() {
 	require_privileged || exit $?
 
-	local pid exe store_path identity
-	if ! pid="$(resolve_pid)" && ! pid="$(resolve_pid_from_proc)"; then
-		sayf "no running herdr server found (unit $UNIT MainPID, and no 'herdr server' in $PROC_ROOT)."
-		sayf "Nothing to pin. A daemon that is not running cannot lose its closure."
-		return 0
+	local pid exe store_path identity discovery_rc=0
+	pid="$(resolve_pid)" || discovery_rc=$?
+	if ((discovery_rc != 0)); then
+		# A stopped herdr unit may still have a manually launched server.
+		# Other units use /proc only when the manager could not answer.
+		if [[ -n "$EXPLICIT_PID" || -n "$PID_FILE" ]] ||
+			{ ((discovery_rc == 2)) && [[ "$UNIT" != herdr.service ]]; } ||
+			! pid="$(resolve_pid_from_proc)"; then
+			sayf "cannot determine a running PID for $UNIT; no root created (discovery status $discovery_rc)."
+			return 1
+		fi
 	fi
 	[[ "$pid" =~ ^[0-9]+$ ]] || {
 		sayf "refusing to pin: pid '$pid' is not a number."

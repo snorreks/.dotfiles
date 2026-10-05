@@ -169,7 +169,15 @@
     runtimeInputs = [config.services.tailscale.package pkgs.util-linux];
     text = ''
       # Revoke only our mapping first, including when opt-in is withdrawn.
-      tailscale serve --https=${toString cfg.serveHttpsPort} off
+      if cleanup_error="$(tailscale serve --https=${toString cfg.serveHttpsPort} off 2>&1)"; then
+        :
+      else
+        # Tailscale appends usage guidance after the error line.
+        case "''${cleanup_error%%$'\n'*}" in
+          "error: failed to remove web serve: handler does not exist") ;;
+          *) printf '%s\n' "$cleanup_error" >&2; exit 1 ;;
+        esac
+      fi
       if ! ${if cfg.setupCompleted then "true" else "false"}; then
         exit 1
       fi
@@ -333,6 +341,7 @@ in {
   # database matters.
   # Only default.nix registers the application-consistent export tree.
   # Never register the live SQLite data directory as a raw backup source.
+  agentOps.backup.additionalSources = lib.mkIf (cfg.enable && config.agentOps.backup.enable) [cfg.configDir];
 
   # ── Refusals, and visible half-configured states ──────────────────────────
   assertions = lib.optionals cfg.enable [

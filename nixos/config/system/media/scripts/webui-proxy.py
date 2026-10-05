@@ -99,9 +99,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if parsed.query:
             target += '?' + parsed.query
         connection_headers = {part.strip().lower() for part in self.headers.get('Connection', '').split(',')}
-        excluded = HOP | connection_headers | {TOKEN_HEADER, 'host', 'content-length'}
+        excluded = HOP | connection_headers | {TOKEN_HEADER, 'host', 'content-length', 'x-forwarded-host'}
         headers = {key: value for key, value in self.headers.items() if key.lower() not in excluded}
         headers['Host'] = '%s:%s' % (BACKEND_HOST, BACKEND_PORT)
+        if self.headers.get('Host'):
+            headers['X-Forwarded-Host'] = self.headers['Host']
         connection = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=TIMEOUT)
         # Bound upstream's total lifetime as well as each socket operation.
         timer = threading.Timer(TIMEOUT, lambda: close_socket(connection.sock) if connection.sock else None)

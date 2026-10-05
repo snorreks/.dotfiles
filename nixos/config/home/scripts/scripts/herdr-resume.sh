@@ -46,7 +46,8 @@
 #          or command-substituted by this script.
 # HEARTBEAT_FILE  path whose mtime is the progress signal. Only a current-boot
 #          PID + start-time record proves ownership; heartbeat alone cannot.
-#          A relaunched run must update this file during its start window.
+#          A relaunched runner must write its HERDR_RESUME_TOKEN environment
+#          value to this file during startup, then keep its mtime fresh.
 #
 # ── Exit codes ───────────────────────────────────────────────────────────────
 #   0  nothing to do, or everything asked for was already running
@@ -351,10 +352,14 @@ run_task() {
 		return
 	fi
 
-	local previous_heartbeat=""
-	if [[ -n "$heartbeat" && -e "$heartbeat" ]]; then
-		previous_heartbeat="$(stat -c %y "$heartbeat" 2>/dev/null || true)"
-	fi
+	# A shared file can still be updated by an older run. Require this launch
+	# to acknowledge its own token as well as supplying a fresh heartbeat.
+	local run_token
+	run_token="$(cat /proc/sys/kernel/random/uuid)" || {
+		RC=1
+		release_lock
+		return
+	}
 	say "task '$name': launching '$runner' in '$root'."
 	# A separate service owns its own cgroup and survives this oneshot's exit.
 	# setsid only detaches the session; it is sufficient outside systemd.
@@ -366,6 +371,7 @@ run_task() {
 		if ! systemd-run --user --quiet --collect --service-type=exec \
 			--unit="$task_unit" --working-directory="$root" \
 			--setenv="HERDR_RESUMED_TASK=$name" --setenv="HERDR_RESUMED_ROOT=$root" \
+			--setenv="HERDR_RESUME_TOKEN=$run_token" \
 			--property="StandardOutput=append:$out/$name.log" \
 			--property="StandardError=append:$out/$name.log" -- "$runner"; then
 			sayf "task '$name': could not start user service $task_unit."
@@ -390,7 +396,7 @@ run_task() {
 	else
 		(
 			cd "$root" || exit 2
-			HERDR_RESUMED_TASK="$name" HERDR_RESUMED_ROOT="$root" \
+			HERDR_RESUMED_TASK="$name" HERDR_RESUMED_ROOT="$root" HERDR_RESUME_TOKEN="$run_token" \
 				setsid "$runner" >>"$out/$name.log" 2>&1 < /dev/null &
 			echo $!
 		) >"$out/$name.pid" || true
@@ -417,7 +423,7 @@ run_task() {
 			local m2 n2
 			m2="$(stat -c %Y "$heartbeat" 2>/dev/null || echo 0)"
 			n2="$(date +%s)"
-			if [[ "$(stat -c %y "$heartbeat" 2>/dev/null || true)" != "$previous_heartbeat" ]] &&
+			if [[ "$(head -c 128 -- "$heartbeat" 2>/dev/null)" == "$run_token" ]] &&
 				((n2 - m2 <= MAX_HEARTBEAT_AGE)); then
 				beat_seen=1
 			fi

@@ -283,6 +283,22 @@ teardown
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
+t_start "a headless user's manager must actually become active"
+setup
+NM_BOOT_USER="$(id -un)"
+export NM_BOOT_USER
+manager="user@$(id -u).service"
+export FAKE_UNIT_STATES="local-fs.target=active systemd-modules-load.service=active $manager=failed"
+out="$(run_health)" && rc=0 || rc=$?
+assert_ne_zero "failed manager" "$rc"
+assert_contains "manager failure is visible" "$out" "$manager is failed"
+export FAKE_UNIT_STATES="local-fs.target=active systemd-modules-load.service=active $manager=active"
+out="$(run_health)" && rc=0 || rc=$?
+assert_eq "active manager passes" 0 "$rc"
+unset NM_BOOT_USER FAKE_UNIT_STATES
+teardown
+t_done
+
 t_start "no bootloader means no blessing, because there is nothing to fall back to"
 setup
 export FAKE_BOOTCTL_FOUND=0

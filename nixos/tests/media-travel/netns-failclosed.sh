@@ -138,6 +138,11 @@ assert 'systemctl stop qbittorrent.service media-tunnel.service' in module
 # The Nix indented string must contain Qt subgroup separators, not doubled
 # literal backslashes which Python preserves as different INI keys.
 assert 'WebUI\\Address=' in module and 'Session\\Interface=' in module
+assert 'WebUI\\ReverseProxySupportEnabled=true' in module
+assert 'WebUI\\TrustedReverseProxiesList=${cfg.gateway}' in module
+assert 'hosts: files dns' in module
+assert '"${nsswitch}:/etc/nsswitch.conf"' in module
+assert 'InaccessiblePaths = ["-/run/nscd" "-/run/systemd/resolve"]' in module
 assert 'WebUI\\\\Address=' not in module and 'Session\\\\Interface=' not in module
 assert 'allowedTCPPorts' not in module and 'ip_forward' not in module
 print('PASS: namespace rules, canonical mutations, host scope, runtime credential and headless settings (mock tools; not packet proof)')

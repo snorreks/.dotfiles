@@ -129,6 +129,10 @@ in {
     description = "Local (offline-capable) boot health gate for boot counting";
     after = criticalUnits;
     path = [pkgs.coreutils pkgs.systemd pkgs.util-linux];
+    preStart = lib.optionalString opts.headless ''
+      uid="$(id -u ${lib.escapeShellArg opts.username})"
+      systemctl --no-block start "user@$uid.service"
+    '';
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;

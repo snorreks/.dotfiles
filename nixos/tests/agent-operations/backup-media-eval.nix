@@ -68,7 +68,7 @@
   core = map (entry: entry.path) (builtins.filter (entry:
     !(entry.excludeFromBackup or false))
   config.agentOps.state.manifest);
-  integrations = [exportDir opts.media.syncthing.dataDir];
+  integrations = [exportDir opts.media.syncthing.dataDir opts.media.jellyfin.configDir];
   hasAll = wanted: actual: builtins.all (path: builtins.elem path actual) wanted;
   noDuplicates = xs: builtins.length xs == builtins.length (builtins.attrNames
     (builtins.listToAttrs (map (x: {name = x; value = true;}) xs)));
@@ -80,7 +80,8 @@ in
   assert noDuplicates (paths config);
   assert hasAll (["/operator/selected"] ++ integrations) (paths selected);
   assert !(hasAll core (paths selected));
-  assert paths selected == ["/operator/selected" exportDir opts.media.syncthing.dataDir];
+  assert builtins.length (paths selected) == 4;
+  assert config.systemd.services.media-state-export.environment.MEDI_JELLYFIN_DB == "${opts.media.jellyfin.dataDir}/data/jellyfin.db";
   assert builtins.all (unit: config.systemd.services.${unit}.environment.AGENT_OPS_STATE_DIR == stateDir) units;
   assert value "quiesceFile" config == "${stateDir}/quiesce.conf";
   assert builtins.match ".*ioMaxConcurrent.*" (conf config) == null;

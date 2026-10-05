@@ -251,8 +251,9 @@ in {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${nsMaintExe} tick";
-        # Bounded so a wedged tick cannot pile up behind itself.
-        TimeoutStartSec = 120;
+        # Allow all three bounded restoration steps (10min each), plus
+        # bookkeeping, before the outer watchdog terminates the worker.
+        TimeoutStartSec = "31min";
       };
     };
 

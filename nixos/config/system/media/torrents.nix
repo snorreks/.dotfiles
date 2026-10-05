@@ -27,6 +27,11 @@
   # connections to this backend via this interface; it never accepts traffic
   # or relaxes an existing host OUTPUT policy.
   guard = lib.escapeShellArgs ["-o" cfg.vethHost "-d" "${backend}/32" "-p" "tcp" "--dport" (toString cfg.webuiPort) "-m" "owner" "!" "--uid-owner" "media-webui-proxy" "-m" "conntrack" "--ctstate" "NEW" "-j" "REJECT"];
+  nsswitch = pkgs.writeText "qbittorrent-nsswitch.conf" ''
+    passwd: files
+    group: files
+    hosts: files dns
+  '';
   clientConfig = pkgs.writeText "qBittorrent.conf" ''
     [LegalNotice]
     Accepted=true
@@ -38,6 +43,8 @@
     Downloads\TempPathEnabled=true
     WebUI\Address=${backend}
     WebUI\Port=${toString cfg.webuiPort}
+    WebUI\ReverseProxySupportEnabled=true
+    WebUI\TrustedReverseProxiesList=${cfg.gateway}
     [BitTorrent]
     Session\Interface=${cfg.tunnel.interface}
     Session\DefaultSavePath=${cfg.downloadDir}/
@@ -182,7 +189,11 @@ in lib.mkIf cfg.enable {
       ExecStartPre = ["+${audit}"];
       WorkingDirectory = cfg.stateDir;
       NetworkNamespacePath = "/run/netns/${cfg.namespace}";
-      BindReadOnlyPaths = ["/etc/netns/${cfg.namespace}/resolv.conf:/etc/resolv.conf"];
+      BindReadOnlyPaths = [
+        "/etc/netns/${cfg.namespace}/resolv.conf:/etc/resolv.conf"
+        "${nsswitch}:/etc/nsswitch.conf"
+      ];
+      InaccessiblePaths = ["-/run/nscd" "-/run/systemd/resolve"];
       Environment = ["XDG_CONFIG_HOME=${cfg.configDir}" "XDG_DATA_HOME=${cfg.stateDir}" "HOME=${cfg.stateDir}"];
       ExecStart = lib.escapeShellArgs ["${package}/bin/qbittorrent-nox" "--webui-port=${toString cfg.webuiPort}"];
       Restart = "on-failure";

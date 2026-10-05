@@ -150,7 +150,7 @@ in {
     environment = {
       MEDI_STATE_DIR = exportDir;
       MEDI_JELLYFIN_DB =
-        lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/library.db";
+        lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/jellyfin.db";
       MEDI_QBITTORRENT_PATHS_JSON = builtins.toJSON (lib.optionals torrents.enable
         (lib.unique [torrents.stateDir torrents.configDir]));
       MEDI_QBITTORRENT_UNIT = lib.optionalString torrents.enable "qbittorrent.service";

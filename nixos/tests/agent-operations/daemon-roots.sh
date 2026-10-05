@@ -27,6 +27,8 @@ GCROOTS="$TMP/gcroots"
 mkdir -p "$GCROOTS"
 export NM_GCROOTS="$GCROOTS"
 export NS_OPS_TEST_MODE=1
+NS_OPS_USER="$(id -un)"
+export NS_OPS_USER
 
 # ── the fake store ──────────────────────────────────────────────────────────
 #
@@ -188,6 +190,7 @@ export PROC_ROOT="$TMP/proc"
 # ── a fake systemd ──────────────────────────────────────────────────────────
 fake systemctl <<'FAKE'
 #!/bin/bash
+[[ "${FAKE_MANAGER_FAIL:-0}" == 0 ]] || exit 1
 if [[ "$*" == *"MainPID"* ]]; then printf '%s\n' "${FAKE_SYSTEMCTL_MAINPID:-}"; exit 0; fi
 printf '%s\n' "${FAKE_SYSTEMCTL_ACTIVE:-unknown}"
 FAKE
@@ -295,6 +298,33 @@ assert_file "$GCROOTS/ns-ops-other.service" 'every configured unit is pinned, no
 rm -rf "$TMP/proc/100" "$TMP/proc/101"
 
 # ═══════════════════════════════════════════════════════════════════════════
+_t_start "manager failure permits unique owner-checked discovery for another unit"
+OTHER="$(add_path other-daemon)"
+mk_proc 4800 "$OTHER/bin/other"
+rm -f "$GCROOTS/ns-ops-other.service"
+out="$(FAKE_MANAGER_FAIL=1 bash "$DAEMON_ROOTS" pin --unit other.service 2>&1)"
+assert_eq 0 "$?" 'unavailable manager falls back for another configured unit'
+assert_symlink_target "$GCROOTS/ns-ops-other.service" "$OTHER" 'fallback pins the matching executable'
+out="$(FAKE_SYSTEMCTL_MAINPID=0 bash "$DAEMON_ROOTS" pin --unit other.service 2>&1)"
+assert_eq 1 "$?" 'confirmed stopped unit does not use generic fallback'
+assert_contains "$out" 'discovery status 2' 'stopped is distinguished from query failure'
+rm -rf "$TMP/proc/4800"
+out="$(FAKE_MANAGER_FAIL=1 bash "$DAEMON_ROOTS" pin --unit other.service 2>&1)"
+assert_eq 1 "$?" 'unresolved discovery fails the pin run'
+assert_contains "$out" 'no root created' 'no false pin success'
+out="$(NS_OPS_UID=98765 bash "$DAEMON_ROOTS" pin --unit herdr.service 2>&1)"
+assert_eq 0 "$?" 'UID is derived from the target user, not an independent override'
+# Model a root caller even when this suite runs unprivileged.
+REAL_ID="$(command -v id)"
+export REAL_ID
+fake id <<'FAKE'
+if [[ "$*" == -u ]]; then printf '0\n'; else exec "$REAL_ID" "$@"; fi
+FAKE
+out="$(env -u NS_OPS_USER bash "$DAEMON_ROOTS" pin 2>&1)"
+assert_eq 2 "$?" 'root without an explicit target refuses'
+assert_contains "$out" 'root must set NS_OPS_USER' 'actionable target-user diagnostic'
+rm "$TMP/bin/id"
+
 _t_start "a non-store executable is reported honestly, not given a fake pin"
 printf '#!/bin/sh\nexit 0\n' >"$TMP/bin/herdr"
 chmod +x "$TMP/bin/herdr"
@@ -346,13 +376,13 @@ out="$(bash "$DAEMON_ROOTS" release nonexistent 2>&1)"
 assert_contains "$out" 'no such root' 'releasing an unknown root says so'
 
 # ═══════════════════════════════════════════════════════════════════════════
-_t_start "no daemon running is a no-op, not a failure"
+_t_start "no discoverable daemon fails the pin run"
 rm -rf "$TMP/proc"/[0-9]*
 export FAKE_SYSTEMCTL_MAINPID=0
 out="$(bash "$DAEMON_ROOTS" pin --unit herdr.service 2>&1)"
 rc=$?
-assert_eq '0' "$rc" 'pinning with no daemon exits 0'
-assert_contains "$out" 'Nothing to pin' 'and says why'
+assert_eq '1' "$rc" 'pinning with no daemon exits 1'
+assert_contains "$out" 'cannot determine a running PID' 'and says why'
 
 assert_no_reboot "$TMP/reboots"
 summary

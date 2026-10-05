@@ -62,7 +62,7 @@ mk_runner() {
 
 # A well-behaved task: writes its heartbeat immediately, then waits.
 HEARTBEAT="$TMP/project/hb"
-mk_runner "$TMP/project/good.sh" "touch '$HEARTBEAT'
+mk_runner "$TMP/project/good.sh" "printf '%s\\n' \"\$HERDR_RESUME_TOKEN\" > '$HEARTBEAT'
 sleep 60"
 # A task that dies on startup.
 mk_runner "$TMP/project/dies.sh" "exit 3"
@@ -183,8 +183,24 @@ assert_contains "$out" 'rather than leaving an untracked run' 'and that it clean
 assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f 2>/dev/null | grep -c .)" 'no success record either'
 
 # ═══════════════════════════════════════════════════════════════════════════
+_t_start "an old writer cannot acknowledge a newly launched silent runner"
+opt_in "$TMP/project/silent.sh" "$TMP/project/shared-hb"
+(
+  for _ in {1..6}; do
+    printf 'previous-run-token\n' >"$TMP/project/shared-hb"
+    sleep 1
+  done
+) >/dev/null 2>&1 &
+writer=$!
+out="$(START_TIMEOUT=4 resume)"
+assert_ne '0' "$?" 'fresh progress from another run fails startup'
+wait "$writer"
+assert_contains "$out" 'no heartbeat within' 'new runner never acknowledged its token'
+assert_not_contains "$out" 'running as pid' 'no false success from the shared heartbeat'
+assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f | wc -l)" 'no record for an unacknowledged runner'
+
 _t_start "a heartbeat followed by immediate exit never claims a running task"
-mk_runner "$TMP/project/beat-exit.sh" "touch '$TMP/project/beat-exit-hb'
+mk_runner "$TMP/project/beat-exit.sh" "printf '%s\\n' \"\$HERDR_RESUME_TOKEN\" > '$TMP/project/beat-exit-hb'
 exit 9"
 opt_in "$TMP/project/beat-exit.sh" "$TMP/project/beat-exit-hb"
 out="$(START_TIMEOUT=4 resume)"
@@ -306,7 +322,7 @@ printf '%s\n%s\n%s\n' "$TMP/project" "$TMP/absent" "$TMP/other" >"$AGENT_OPS_RES
 cat >"$TMP/other/.agent-ops-resume" <<EOF
 other|$TMP/other/good.sh|$TMP/other/hb
 EOF
-mk_runner "$TMP/other/good.sh" "touch '$TMP/other/hb'
+mk_runner "$TMP/other/good.sh" "printf '%s\\n' \"\$HERDR_RESUME_TOKEN\" > '$TMP/other/hb'
 sleep 60"
 out="$(START_TIMEOUT=8 bash "$RESUME" 2>&1)"
 rc=$?
@@ -344,7 +360,7 @@ FAKE
 # Variables expand in the generated runner.
 # shellcheck disable=SC2016
 mk_runner "$TMP/project/unit.sh" 'printf "%s|%s|%s\n" "$PWD" "$HERDR_RESUMED_ROOT" "$HERDR_RESUMED_TASK" > "$TMP/unit.context"
-touch "$TMP/project/hb"
+printf "%s\n" "$HERDR_RESUME_TOKEN" > "$TMP/project/hb"
 sleep 60'
 opt_in "$TMP/project/unit.sh" "$HEARTBEAT"
 rm -f "$HEARTBEAT"
