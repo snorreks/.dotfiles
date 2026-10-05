@@ -126,7 +126,7 @@ case "$1" in
 	dryrun=no
 	for a in "$@"; do [[ "$a" == "--dry-run" ]] && dryrun=yes; done
 	printf 'gc --dry-run=%s\n' "$dryrun" >>"${TMP}/log/calls"
-	exit 0
+	exit "${FAKE_GC_EXIT:-0}"
 	;;
 esac
 exit 1
@@ -175,6 +175,10 @@ mk_proc() {
 	mkdir -p "$TMP/proc/$pid"
 	printf 'herdr\n' >"$TMP/proc/$pid/comm"
 	printf '%s\0server\0' "$exe_path" >"$TMP/proc/$pid/cmdline"
+	printf 'Uid:\t%s\t%s\t%s\t%s\n' "$(id -u)" "$(id -u)" "$(id -u)" "$(id -u)" >"$TMP/proc/$pid/status"
+	printf '%s (herdr) S' "$pid" >"$TMP/proc/$pid/stat"
+	printf ' 0%.0s' {1..18} >>"$TMP/proc/$pid/stat"
+	printf ' %s\n' "$pid" >>"$TMP/proc/$pid/stat"
 	# /proc/PID/exe is a symlink; readlink -f resolves it.
 	ln -sfn "$exe_path" "$TMP/proc/$pid/exe"
 }
@@ -231,6 +235,7 @@ UNPINNED="$(add_path herdr-0.10.0)"
 mk_proc 4712 "$UNPINNED/bin/herdr"
 collect >/dev/null
 assert_no_file "$UNPINNED" 'an unpinned store path IS collectable — so the pin is doing something'
+rm -rf "$TMP/proc/4712"
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "the pin survives CONFIRMATION and a GC, independently of any transaction"
@@ -257,6 +262,10 @@ out="$(bash "$DAEMON_ROOTS" gc-check 2>&1)"
 assert_contains "$out" 'survived the collector' 'gc-check reports survival'
 assert_contains "$out" 'independent of any transaction' 'and says why that is guaranteed'
 assert_contains "$(cat "$TMP/log/calls")" 'gc --dry-run=yes' 'it really asked for a dry run, not a real collection'
+out="$(FAKE_GC_EXIT=1 bash "$DAEMON_ROOTS" gc-check 2>&1)"
+assert_eq '1' "$?" 'failed collector dry run cannot verify retention'
+assert_contains "$out" 'retention is not verified' 'failed collector is reported'
+assert_not_contains "$out" 'survived the collector' 'no survival claim without a successful collector'
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "a manually started daemon is still pinned"
@@ -264,10 +273,26 @@ _t_start "a manually started daemon is still pinned"
 # and the unit owns nothing. Refusing to pin here would leave the most at-risk
 # daemon unprotected.
 export FAKE_SYSTEMCTL_MAINPID=0
+# A status CLI and a foreign owner's daemon must not win the /proc scan.
+CLI="$(add_path herdr-new-cli)"
+mk_proc 100 "$CLI/bin/herdr"
+printf '%s\0status\0server\0' "$CLI/bin/herdr" >"$TMP/proc/100/cmdline"
+mk_proc 101 "$CLI/bin/herdr"
+printf 'Uid:\t98765\t98765\t98765\t98765\n' >"$TMP/proc/101/status"
 rm -f "$GCROOTS"/ns-ops-*
 out="$(bash "$DAEMON_ROOTS" pin --unit herdr.service 2>&1)"
 assert_contains "$out" 'pid 4711' 'the daemon is found through /proc instead'
 assert_file "$GCROOTS/ns-ops-herdr.service" 'and it is pinned'
+assert_symlink_target "$GCROOTS/ns-ops-herdr.service" "$EXE" 'a newer CLI or foreign user cannot replace the daemon pin'
+export FAKE_SYSTEMCTL_MAINPID=100
+out="$(bash "$DAEMON_ROOTS" pin --unit herdr.service 2>&1)"
+rc=$?
+assert_eq 1 "$rc" 'a status client MainPID is explicitly refused'
+assert_symlink_target "$GCROOTS/ns-ops-herdr.service" "$EXE" 'refusal preserves the old root'
+export FAKE_SYSTEMCTL_MAINPID=4711
+out="$(bash "$DAEMON_ROOTS" pin --unit herdr.service --unit other.service 2>&1)"
+assert_file "$GCROOTS/ns-ops-other.service" 'every configured unit is pinned, not only the first'
+rm -rf "$TMP/proc/100" "$TMP/proc/101"
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "a non-store executable is reported honestly, not given a fake pin"

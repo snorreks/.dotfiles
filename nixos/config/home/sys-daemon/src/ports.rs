@@ -63,9 +63,11 @@ pub struct Snapshot {
 impl Snapshot {
     /// True when anything except `last_check` differs from `other`.
     pub fn differs_except_check(&self, other: &Snapshot) -> bool {
-        self.status != other.status
+        self.projects != other.projects
+            || self.status != other.status
             || self.other_ports != other.other_ports
             || self.other_status != other.other_status
+            || self.other_services != other.other_services
     }
 }
 
@@ -448,12 +450,52 @@ pub async fn kill_port(port: u16, self_port: u16) -> KillResult {
         }
     }
 
-    let signalled = targets.len();
+    delivery_result(port, targets.len(), delivery)
+}
+
+fn delivery_result(port: u16, signalled: usize, delivery: Vec<String>) -> KillResult {
+    let success = !delivery.is_empty()
+        && delivery.iter().all(|outcome| outcome == "pidfd" || outcome == "start_time");
     KillResult {
-        success: true,
-        message: format!("Killed {signalled} process(es) on port {port}"),
+        success,
+        message: if success {
+            format!("Sent termination signals to {signalled} process(es) on port {port}")
+        } else {
+            format!("Termination on port {port} was incomplete; inspect signal delivery")
+        },
         refusal: None,
         delivery,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_comparison_ignores_only_the_check_timestamp() {
+        let base = Snapshot {
+            projects: serde_json::json!([]), status: HashMap::new(),
+            other_ports: vec![4000], other_status: HashMap::new(),
+            other_services: HashMap::new(), last_check: 1,
+        };
+        let mut changed = base.clone();
+        changed.last_check = 2;
+        assert!(!base.differs_except_check(&changed));
+        changed.other_services.insert("4000".into(), "new-process".into());
+        assert!(base.differs_except_check(&changed));
+        changed = base.clone();
+        changed.projects = serde_json::json!([{"name": "new-project"}]);
+        assert!(base.differs_except_check(&changed));
+    }
+
+    #[test]
+    fn refused_or_failed_signals_cannot_report_success() {
+        assert!(delivery_result(4000, 1, vec!["pidfd".into()]).success);
+        for delivery in [vec![], vec!["failed:permission denied".into()],
+            vec!["pidfd".into(), "refused:reused".into()]] {
+            assert!(!delivery_result(4000, 1, delivery).success);
+        }
     }
 }
 

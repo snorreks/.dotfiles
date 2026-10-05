@@ -42,6 +42,7 @@
 {
   config,
   lib,
+  opts,
   pkgs,
   ...
 }: let
@@ -55,11 +56,15 @@
       pkgs.coreutils
       pkgs.findutils
       pkgs.gnugrep
+      pkgs.gawk
+      pkgs.nix
       pkgs.systemd
       pkgs.util-linux
     ];
     text = builtins.readFile script;
   };
+  pinCommand = lib.escapeShellArgs (["${lib.getExe tool}" "pin"] ++ lib.concatMap (unit: ["--unit" unit]) cfg.units);
+  daemonEnvironment = {NM_GCROOTS = cfg.gcrootsDir; NS_OPS_USER = opts.username;};
 in {
   options.agentOps.daemonRoots = {
     enable = lib.mkOption {
@@ -119,14 +124,10 @@ in {
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = "${lib.getExe tool} pin --unit ${lib.head cfg.units}";
-        # 1 means "a pin failed, or a root is dangling". Reported through the
-        # unit's state and through ns-agent-health; never silently treated as
-        # fine.
-        SuccessExitStatus = "0 1";
+        ExecStart = pinCommand;
         TimeoutStartSec = 300;
       };
-      environment.NM_GCROOTS = cfg.gcrootsDir;
+      environment = daemonEnvironment;
     };
 
     # ── Re-pinning after a daemon restart ────────────────────────────────────
@@ -171,14 +172,10 @@ in {
       after = ["local-fs.target"];
       serviceConfig = {
         Type = "oneshot";
-        ExecStart = "${lib.getExe tool} pin --unit ${lib.head cfg.units}";
-        # 1 means "a pin failed, or a root is dangling". Reported through the
-        # unit's state and through ns-agent-health; never silently treated as
-        # fine.
-        SuccessExitStatus = "0 1";
+        ExecStart = pinCommand;
         TimeoutStartSec = 300;
       };
-      environment.NM_GCROOTS = cfg.gcrootsDir;
+      environment = daemonEnvironment;
     };
 
     # A cheap daily proof that the pin still resolves. Without it, a root that

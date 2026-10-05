@@ -75,7 +75,8 @@ run_ud() {
   # create branches and stage files in the operator's real repository. This
   # check is the last line of defence; the pre-flight above catches the source
   # path, and this catches the target path.
-  if [[ -z "$dir" || "$dir" == "$HOME/.dotfiles" || ! -d "$dir/.git" ]]; then
+  if [[ -z "$dir" || "$dir" == "$HOME/.dotfiles" || ! -e "$dir/.git" ]] ||
+    ! printf '%s\n' "${FIXTURE_REPOS[@]}" | grep -Fxq "$dir"; then
     echo "update-dotfiles-scope: FATAL — refusing to run against '$dir'." >&2
     echo "  run_ud must be given a throwaway fixture repository." >&2
     exit 91
@@ -229,12 +230,46 @@ assert_not_contains "$(git -C "$d" diff --cached --name-only)" "surprise.txt" \
   "an untracked file must not be staged by naming a different file"
 assert_contains "$(git -C "$d" diff --cached --name-only)" "tracked.txt" \
   "the named file must be staged"
+# Git pathspecs are not explicit filenames: quoted globs/magic used to stage
+# synthetic private files even though every literal secret name was refused.
+for path in '*.txt' ':(glob)*' ':(top)*' 'missing.txt'; do
+  make_repo
+  d="${FIXTURE_REPOS[-1]}"
+  echo 'synthetic private data' >"$d/keys.txt"
+  run_ud "$d" stage "$path"
+  assert_status 1 "$UD_STATUS" "nonexistent literal '$path' must fail"
+  assert_eq '' "$(git -C "$d" diff --cached --name-only)" "a pathspec must not stage any files"
+done
+
+# Literal metacharacters in a real filename remain usable.
+make_repo
+d="${FIXTURE_REPOS[-1]}"
+echo 'safe' >"$d/literal*.txt"
+echo 'synthetic private data' >"$d/keys.txt"
+run_ud "$d" stage 'literal*.txt'
+assert_status 0 "$UD_STATUS" "a literal wildcard filename can be staged"
+assert_eq 'literal*.txt' "$(git -C "$d" diff --cached --name-only)" "only the literal filename is staged"
+
+# Linked worktrees have a .git FILE, not a directory.
+make_repo
+d="${FIXTURE_REPOS[-1]}"
+wt="$(mktemp -d)"
+FIXTURE_REPOS+=("$wt")
+git -C "$d" worktree add -q -b topic/linked "$wt"
+echo 'linked edit' >>"$wt/tracked.txt"
+run_ud "$wt" stage tracked.txt
+assert_status 0 "$UD_STATUS" "staging in a linked worktree works"
+assert_eq 'tracked.txt' "$(git -C "$wt" diff --cached --name-only)" "the linked index is staged"
+assert_eq '' "$(git -C "$d" diff --cached --name-only)" "the original worktree is untouched"
+
 # ── secret-shaped paths are refused ─────────────────────────────────────────
 
 for path in \
   "nixos/secrets.nix" \
   "keys.txt" \
   "id_rsa" \
+  "id_ed25519" \
+  "id_ecdsa" \
   "some.age" \
   "nixos/config/home/files/.ssh/github_snorreks" \
   "nixos/config/home/files/.aws/credentials" \

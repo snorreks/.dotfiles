@@ -9,6 +9,7 @@
   ...
 }: let
   bootHealth = opts.bootHealth;
+  criticalUnits = bootHealth.criticalUnits ++ lib.optionals opts.headless ["sshd.service"];
 in {
   boot = {
     # ── Shared NTFS volume ──────────────────────────────────────────────────
@@ -126,7 +127,8 @@ in {
   # pass on a machine whose uplink is down.
   systemd.services.boot-health-local = lib.mkIf bootHealth.enable {
     description = "Local (offline-capable) boot health gate for boot counting";
-    after = ["local-fs.target" "systemd-modules-load.service"];
+    after = criticalUnits;
+    path = [pkgs.coreutils pkgs.systemd pkgs.util-linux];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -136,8 +138,9 @@ in {
       TimeoutStartSec = "30s";
     };
     environment = {
-      NM_BOOT_CRITICAL_UNITS = lib.concatStringsSep " " bootHealth.criticalUnits;
+      NM_BOOT_CRITICAL_UNITS = lib.concatStringsSep " " criticalUnits;
       NM_BOOT_TRIES = toString bootHealth.tries;
+      NM_BOOT_USER = if opts.headless then opts.username else "";
     };
   };
 

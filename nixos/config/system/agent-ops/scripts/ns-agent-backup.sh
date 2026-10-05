@@ -14,17 +14,18 @@
 #      like "backup is fine".
 #   2. THE BACKUP IS BOUNDED. A backup that saturates the uplink and the disk
 #      on a box whose job is to answer a phone is a self-inflicted outage.
-#      Every run is niced, ioniced, capped in concurrent IO, and rate limited in
+#      Every write is niced, ioniced, and rate limited in
 #      both directions.
 #   3. DATABASES ARE BACKED UP CONSISTENTLY. Copying a live SQLite file gives
 #      you a file that passes `PRAGMA integrity_check` and still is corrupt,
 #      because the copy interleaved with a write. Anything configured as a
 #      quiesce source is EXPORTED with an application-consistent method first
 #      and the export is what gets backed up.
-#   4. RESTORE IS TESTABLE, TO SCRATCH ONLY. `--restore-to` requires a
-#      directory that does not already contain the target tree, and it refuses
-#      `/` and any path under a live home. Nothing here can be pointed at live
-#      data by a typo.
+#   4. RESTORE IS TESTABLE, TO SCRATCH ONLY. `restore --to` requires a
+#      canonical path strictly below /tmp or /var/tmp (never the root itself,
+#      a symlink or alias, or a path in the current home), whose ancestors
+#      exist and are private, and which is either created exclusively here or
+#      is already an EMPTY 0700 directory owned by the caller.
 #
 # ── Exclusion policy ─────────────────────────────────────────────────────────
 # Excluded, with reasons, by default:
@@ -66,6 +67,9 @@ set +o errexit
 PROGRAM_NAME=${0##*/}
 
 RESTIC=${RESTIC:-restic}
+# Stable identity shared by backup, retention, health checks and restores.
+BACKUP_HOST="$(uname -n)"
+BACKUP_TAG=agent-ops-backup
 STATE_DIR=${AGENT_OPS_STATE_DIR:-/var/lib/agent-ops/backup}
 RECORD="$STATE_DIR/last-run.env"
 CONFIG=${NS_OPS_BACKUP_CONFIG:-/etc/agent-ops/backup.conf}
@@ -119,66 +123,48 @@ load_config() {
 		value="${line#*=}"
 		CFG["$key"]="$value"
 	done <"$CONFIG"
+	local list
+	for list in sources excludes quiesceSource; do
+		printf '%s' "$(cfg "$list" '[]')" | jq -e 'type == "array" and all(.[]; type == "string" and (contains("\u0000") | not))' >/dev/null || die "invalid JSON list: $list"
+	done
+	quiesce_file >/dev/null || die "invalid path: quiesceFile (JSON string or absolute path)"
+	limit_kib limitUpload 8000000 >/dev/null || die "invalid limitUpload"
+	limit_kib limitDownload 20000000 >/dev/null || die "invalid limitDownload"
 }
 
 cfg() { printf '%s' "${CFG[$1]:-${2:-}}"; }
 
-# cfg_line KEY — same, but with a trailing NEWLINE, for feeding to `read`.
-#
-# `read` treats end-of-input as a delimiter ONLY for the line it could not
-# complete: `printf '%s' "$path" | read -r x` reads NOTHING and returns 1. Every
-# `< <(cfg key)` therefore silently looped zero times, which is why the whole
-# quiesce/export path appeared to do nothing and reported success.
-cfg_line() { printf '%s\n' "${CFG[$1]:-${2:-}}"; }
+# The quiesce table PATH. The module writes a JSON string (so any byte in a
+# path survives); a bare absolute path from a hand-written config is accepted
+# verbatim, since it cannot be confused with JSON.
+quiesce_file() {
+	local raw
+	raw="$(cfg quiesceFile)"
+	case "$raw" in
+	"") printf '%s\n' /dev/null ;;
+	\"*) printf '%s' "$raw" | jq -er 'if type == "string" and (contains("\u0000") | not) and startswith("/") then . else error("bad") end' ;;
+	/*) printf '%s\n' "$raw" ;;
+	*) return 1 ;;
+	esac
+}
 
-# cfg_list KEY — a generated JSON array of strings as one entry per line.
-#
-# The module writes these as JSON because Nix emits JSON, and hand-maintaining a
-# second newline format in Nix is how the two drift. Parsed here rather than
-# with `jq`, which would add a runtime dependency to a script that otherwise
-# needs only coreutils, and rather than by naive splitting, which mishandles a
-# path containing a comma.
-#
-# Only \" \\ and \n escapes are decoded, which is everything Nix's
-# `builtins.toJSON` produces for a path.
+# JSON is data, never shell code. NUL delimiters preserve commas, whitespace,
+# quotes and even newlines inside a path. load_config validates before use.
 cfg_list() {
-	# Every local is INITIALISED. `set -o nounset` plus a bare `local entry`
-	# makes the first `"` of the array an unbound-variable error, which looks
-	# like a parsing bug rather than a missing initialiser.
-	local raw="" entry="" i ch esc=""
-	raw="$(cfg "$1")"
-	raw="${raw#\[}"
-	raw="${raw%\]}"
-	local len=${#raw}
-	for ((i = 0; i < len; i++)); do
-		ch="${raw:i:1}"
-		if [[ -n "$esc" ]]; then
-			case "$esc" in
-			n) entry+=$'\n' ;;
-			t) entry+=$'\t' ;;
-			*) entry+="$ch" ;;
-			esac
-			esc=""
-			continue
-		fi
-		case "$ch" in
-		\\) esc=1 ;;
-		'"') ;; # element boundary; the quotes carry no data
-		,)
-			# Trim. `[ "a", "b" ]` is valid JSON and hand-written config files
-			# contain spaces, and an untrimmed " b" is an exclude pattern that
-			# matches nothing — the failure looks like "restic ignored my
-			# exclude", which is exactly what it looks like.
-			printf '%s\n' "${entry#"${entry%%[![:space:]]*}"}"
-			entry=""
-			;;
-		*) entry+="$ch" ;;
-		esac
-	done
-	if [[ -n "${entry//[[:space:]]/}" ]]; then
-		printf '%s\n' "${entry#"${entry%%[![:space:]]*}"}"
-	fi
-	return 0
+	cfg "$1" '[]' | jq -j '.[] | ., "\u0000"'
+}
+
+# Public config is bytes/s; restic flags are KiB/s. Never turn a positive cap
+# into zero (unlimited). Reject values outside safe shell integer arithmetic.
+limit_kib() {
+	local value
+	value="$(cfg "$1" "$2")"
+	[[ "$value" =~ ^[0-9]+$ ]] || die "invalid bytes/s limit: $1"
+	while [[ ${#value} -gt 1 && "$value" == 0* ]]; do value="${value#0}"; done
+	[[ ${#value} -le 18 ]] || die "bytes/s limit too large: $1"
+	local kib=$((value / 1024))
+	((value > 0 && kib == 0)) && kib=1
+	printf '%s\n' "$kib"
 }
 
 # ── credentials ─────────────────────────────────────────────────────────────
@@ -262,25 +248,20 @@ restic_opts() {
 	local cmd="${1:-}"
 	case "$cmd" in
 	backup | forget | prune)
-		# 🔴 NO --io-max-concurrent. It exists in restic's global flag set but is
-		# rejected by `backup` and `restore` in restic 0.19 ("unknown flag"), and
-		# that surfaces as a failed backup that looks like a repository problem.
-		# Verified against restic 0.19 in backup-restore.sh, which runs the real
-		# binary.
+		# No IO-concurrency setting is configured or claimed: restic has no
+		# --io-max-concurrent flag (0.19 rejects it), and backup's own
+		# --read-concurrency is left at restic's default.
 		printf '%s\n' \
-			"--limit-upload" "$(cfg limitUpload '8000000')" \
-			"--limit-download" "$(cfg limitDownload '20000000')" \
+			"--limit-upload" "$(limit_kib limitUpload 8000000)" \
+			"--limit-download" "$(limit_kib limitDownload 20000000)" \
 			"--pack-size" "$(cfg packSize '32')"
 		;;
 	restore)
-		# `--io-max-concurrent` is not accepted by `restic restore`, and passing
-		# it makes every restore fail with "unknown flag" — which reads like a
-		# corrupt repository. Verified against restic 0.19 in
-		# nixos/tests/agent-operations/backup-restore.sh.
-		printf '%s\n' "--limit-download" "$(cfg limitDownload '20000000')"
+		# Download limit only; upload/pack flags are rejected by restore.
+		printf '%s\n' "--limit-download" "$(limit_kib limitDownload 20000000)"
 		;;
 	check)
-		printf '%s\n' "--limit-download" "$(cfg limitDownload '20000000')"
+		printf '%s\n' "--limit-download" "$(limit_kib limitDownload 20000000)"
 		;;
 	*)
 		printf ''
@@ -320,14 +301,31 @@ quiesce_all() {
 	# read from that file. Reading the config value as though it were a task
 	# line — which an earlier version did — gives a one-field line and the
 	# confusing "unknown method '' for /var/lib/agent-ops/backup/quiesce.conf".
-	qf="$(cfg quiesceFile /dev/null)"
+	qf="$(quiesce_file)" || return 1
 	# Cleared FIRST, so an early return can never leave a stale path behind for
 	# the caller to back up.
 	STAGING_DIR=""
-	if [[ ! -s "$qf" ]]; then
+	# With exports DECLARED, a missing, unreadable or empty table fails closed:
+	# shipping the live database instead is exactly the corruption this exists
+	# to prevent. With none declared there is nothing to quiesce.
+	if [[ ! -r "$qf" || ! -s "$qf" ]]; then
 		rmdir "$staging" 2>/dev/null || true
+		if [[ "$(cfg quiesceSource '[]' | jq 'length')" != 0 ]]; then
+			sayf "quiesce: configured export table is missing, unreadable or empty; refusing raw backup."
+			return 1
+		fi
 		return 0
 	fi
+
+	# Every declared export must have a table entry before any data is shipped.
+	local required
+	while IFS= read -r -d '' required; do
+		if ! grep -Fqx -- "$required" <(cut -d '|' -f1 "$qf"); then
+			sayf "quiesce: configured source $required is absent from the export table."
+			rmdir "$staging" 2>/dev/null || true
+			return 1
+		fi
+	done < <(cfg_list quiesceSource)
 
 	local path method arg dest
 	while IFS='|' read -r path method arg; do
@@ -431,7 +429,7 @@ cmd_backup() {
 
 	local -a sources=()
 	local p
-	while IFS= read -r p; do
+	while IFS= read -r -d '' p; do
 		[[ -n "$p" ]] && sources+=("$p")
 	done < <(cfg_list sources)
 
@@ -455,7 +453,7 @@ cmd_backup() {
 	# happened when the quiesce substitution was added here.
 	local -a exclude_args=()
 	local entry live p
-	while IFS= read -r p; do
+	while IFS= read -r -d '' p; do
 		[[ -n "$p" ]] && exclude_args+=("--exclude" "$p")
 	done < <(cfg_list excludes)
 
@@ -478,7 +476,7 @@ cmd_backup() {
 	# silently removed NOTHING, the weekly retention timer succeeded, and the
 	# repository grew without limit. A retention policy that silently does
 	# nothing is worse than no policy: it is a false assurance.
-	local -a argv=(backup --tag agent-ops-backup "${exclude_args[@]}")
+	local -a argv=(backup --host "$BACKUP_HOST" --tag "$BACKUP_TAG" "${exclude_args[@]}")
 	local s
 	for s in "${sources[@]}"; do argv+=("$s"); done
 
@@ -538,13 +536,22 @@ cmd_check() {
 	# a full download on a machine whose uplink is shared with the tailnet it is
 	# reachable over. A percentage is the honest default; `backup check --full`
 	# is available when you have decided you have the time.
-	if ! restic_run 60 check --read-data-subset="$(cfg repositoryCheckSubset '2/1000')"; then
+	# shellcheck disable=SC2046 # numeric generated options only
+	if ! restic_run 60 check --read-data-subset="$(cfg repositoryCheckSubset '2/1000')" $(restic_opts check); then
 		sayf "repository check FAILED."
 		write_record failed "check"
 		exit 3
 	fi
 	local newest_stamp age
-	newest_stamp="$(restic_run 60 snapshots --json 2>/dev/null | grep -o '"time":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+	# --latest defaults to one per host+path; random export paths would leave
+	# old snapshots in the result. Group by the one selected host instead, and
+	# let restic order its timestamps (including time zones) chronologically.
+	if ! newest_stamp="$(restic_run 60 snapshots --host "$BACKUP_HOST" --tag "$BACKUP_TAG" --group-by host --latest 1 --json 2>/dev/null |
+		jq -er 'if length == 0 then "" else .[0].snapshots[0].time end')"; then
+		sayf "snapshot listing FAILED."
+		write_record failed "snapshots"
+		exit 3
+	fi
 	if [[ -z "$newest_stamp" ]]; then
 		sayf "repository is reachable but has NO snapshots."
 		sayf "A repository with nothing in it is not a backup."
@@ -570,6 +577,7 @@ cmd_restore() {
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 		--to)
+			[[ $# -ge 2 ]] || die "restore needs --to DIR"
 			target="$2"
 			shift 2
 			;;
@@ -580,25 +588,26 @@ cmd_restore() {
 	done
 
 	[[ -n "$target" ]] || die "restore needs --to DIR"
-	target="${target%/}"
-
-	# Refuse the three ways this could destroy live data.
-	case "$target" in
-	/) die "restore target is '/'. Refusing." ;;
-	"") die "restore target is empty." ;;
-	esac
-	if [[ "$target" != /* ]]; then
-		die "restore target '$target' must be an absolute path."
-	fi
-	if [[ -e "$target" ]] && [[ -n "$(ls -A "$target" 2>/dev/null)" ]]; then
-		# Explained BEFORE dying: `die` exits, so a message after it is never
-		# printed and the operator gets only "not empty".
-		sayf "restore target '$target' exists and is not empty."
-		sayf "A restore into a populated directory is how a verification run"
-		sayf "silently overwrites the live home. Pick an empty scratch directory."
-		die "restore target is not an empty directory."
-	fi
-	local home="${HOME:-/home/$(id -un)}"
+	[[ "$target" == /* ]] || die "restore target must be an absolute path."
+	# CANONICAL ONLY. Resolving every existing ancestor means a lexical
+	# /tmp/../home, a symlinked parent or a symlinked target is refused rather
+	# than followed into live data. The spelling must already be canonical:
+	# an alias is refused, never silently rewritten.
+	local canonical
+	canonical="$(realpath -m -- "$target")" || die "cannot resolve restore target"
+	[[ "$target" == "$canonical" ]] || die "restore target is not canonical (aliases and symlinks refused): $target"
+	# STRICTLY below a scratch root: never /tmp or /var/tmp themselves, and
+	# never anything else (/, /home, /root, /var/lib, ...).
+	local root="" r
+	for r in /tmp /var/tmp; do
+		# The roots themselves must be real directories, not aliases.
+		[[ "$(realpath -e -- "$r" 2>/dev/null)" == "$r" ]] || continue
+		if [[ "$target" == "$r"/?* ]]; then root="$r"; fi
+	done
+	[[ -n "$root" ]] || die "restore target is not strictly below the /tmp or /var/tmp scratch roots."
+	# Never a live home, even one that happens to live below a scratch root.
+	local home
+	home="$(realpath -m -- "${HOME:-/home/$(id -un)}")" || die "cannot resolve home"
 	case "$target" in
 	"$home" | "$home"/*)
 		sayf "restore target '$target' is inside \$HOME ($home). Refusing:"
@@ -606,12 +615,52 @@ cmd_restore() {
 		die "restore target is inside the live home directory"
 		;;
 	esac
+	# Ancestors between the scratch root and the target must EXIST, be ours
+	# (or root's) and not be writable by anyone else, so nobody can swap a component
+	# for a symlink after the checks below.
+	local uid rel dir="$root" part owner mode
+	uid="$(id -u)"
+	rel="${target#"$root"/}"
+	while [[ "$rel" == */* ]]; do
+		part="${rel%%/*}"
+		rel="${rel#*/}"
+		dir="$dir/$part"
+		[[ -d "$dir" && ! -L "$dir" ]] || die "restore target ancestor is not a directory: $dir"
+		owner="$(stat -c %u -- "$dir")" mode="$(stat -c %a -- "$dir")"
+		[[ "$owner" == "$uid" || "$owner" == 0 ]] || die "restore target ancestor is owned by another user: $dir"
+		(( (8#$mode & 8#022) == 0 )) || die "restore target ancestor is writable by others: $dir"
+	done
+	[[ ! -e "$target" && ! -L "$target" || -d "$target" && ! -L "$target" ]] || die "restore target is not a directory."
+	if [[ -d "$target" ]] && [[ -n "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+		# Explained BEFORE dying: `die` exits, so a message after it is never
+		# printed and the operator gets only "not empty".
+		sayf "restore target '$target' exists and is not empty."
+		sayf "A restore into a populated directory is how a verification run"
+		sayf "silently overwrites the live home. Pick an empty scratch directory."
+		die "restore target is not an empty directory."
+	fi
 
-	mkdir -p "$target"
+	# EXCLUSIVE: a missing target is created by us, privately, in one mkdir
+	# (never -p); an existing empty one must already be ours and private, as
+	# `mktemp -d` makes it.
+	if [[ ! -e "$target" ]]; then
+		mkdir -m 0700 -- "$target" || die "cannot create scratch directory exclusively"
+	fi
+	[[ "$(stat -c %u -- "$target")" == "$uid" ]] || die "restore target is owned by another user."
+	(( (8#$(stat -c %a -- "$target") & 8#077) == 0 )) || die "restore target is accessible by others; use mktemp -d."
+	# Recheck after creation before handing the target to restic.
+	[[ "$(realpath -e -- "$target")" == "$target" ]] || die "scratch target changed"
+	[[ -z "$(find "$target" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "scratch target is not empty"
 	say "restoring into scratch: $target"
-	local -a argv=(restore latest --target "$target")
+	local -a argv=(restore latest --host "$BACKUP_HOST" --tag "$BACKUP_TAG" --target "$target")
+	# PATH arguments select what to restore. Only absolute snapshot paths are
+	# accepted, each passed as --include, so no argument can become a restic
+	# flag (a second --target would win over the scratch target).
 	local w
-	for w in ${wanted[@]+"${wanted[@]}"}; do argv+=("$w"); done
+	for w in ${wanted[@]+"${wanted[@]}"}; do
+		[[ "$w" == /* ]] || die "restore PATH must be an absolute snapshot path: $w"
+		argv+=(--include "$w")
+	done
 
 	# shellcheck disable=SC2046 # restic_opts is a generated flag list
 	if ! bounded_restic "$RESTIC_TIMEOUT" "${argv[@]}" $(restic_opts restore); then
@@ -638,7 +687,9 @@ cmd_prune() {
 	# keep-daily policy legitimately keeps them all. It exists so the retention
 	# contract is TESTABLE, and it is refused unless asked for by name.
 	local -a forget_args=(
-		--tag agent-ops-backup
+		--host "$BACKUP_HOST" --tag "$BACKUP_TAG"
+		# Random staging paths must not create a new retention group per run.
+		--group-by "host,tags"
 		--keep-daily "$(cfg keepDaily 7)"
 		--keep-weekly "$(cfg keepWeekly 4)"
 		--keep-monthly "$(cfg keepMonthly 6)"

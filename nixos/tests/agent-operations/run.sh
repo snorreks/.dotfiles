@@ -30,6 +30,7 @@ SUITES=(
 	"daemon-roots.sh"
 	"herdr-resume.sh"
 	"health-redaction.sh"
+	"health-history.sh"
 	"backup-restore.sh"
 )
 
@@ -55,6 +56,7 @@ done
 # (headless x mobileAgents) matrix is agent-lifetime.sh's job.
 NIX_PARSED=(
 	"config/home/agent-lifetime.nix"
+	"config/system/agent-ops/health.nix"
 )
 
 failed=0

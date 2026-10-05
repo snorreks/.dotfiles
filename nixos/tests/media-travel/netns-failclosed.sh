@@ -1,237 +1,147 @@
 #!/usr/bin/env bash
-# nixos/tests/media-travel/netns-failclosed.sh
-#
-# The torrent namespace must FAIL CLOSED. This suite runs the shipped
-# netns-up.sh against stubbed privileged tools and asserts the netfilter calls
-# it actually makes.
-#
-# Covered (audit checklist: "no tunnel, endpoint/DNS failure, IPv4/IPv6/direct
-# DNS attempts"):
-#
-#   * a hostname endpoint is REFUSED, and no namespace is built at all
-#   * OUTPUT and INPUT policies are DROP, on both stacks
-#   * the tunnel is allowed by interface NAME, so an absent tunnel matches
-#     nothing and falls through to DROP
-#   * the ONLY non-tunnel egress is one UDP flow to one numeric endpoint
-#   * no DNS can leave over the veth
-#   * the namespace has a host route but NO default route via the veth
-#
-# What is NOT covered here, and is covered by netns-audit.sh against a REAL
-# namespace: whether the kernel honours these rules at runtime, and whether a
-# live process in the namespace can actually escape them. This suite proves the
-# rules are correct; the audit proves they took effect. Both are needed and
-# neither substitutes for the other.
-#
-# shellcheck shell=bash
-set -uo pipefail
-
+# No live network operations: execute production scripts against stateful tools.
+set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=lib/fixture.sh
-source "$HERE/lib/fixture.sh"
-
-printf '=== netns-failclosed ===\n'
-
-# NOT `STUBS="$(fake_root_bin ...)"`. Command substitution runs in a subshell,
-# so the `export FAKE_LOG` inside fake_root_bin would never reach this shell and
-# every later assertion would fail on an unbound variable under `set -u` — which
-# reads as a broken suite rather than as a fixture mistake.
-STUBS="$FIXTURE_TMP/stubs"
-fake_root_bin "$STUBS"
-
-# ── 1. A hostname endpoint is refused before anything is created ────────────
-#
-# The single most important case: this is the bootstrap DNS leak. If a hostname
-# were accepted, the namespace would have to resolve it through the veth before
-# the tunnel exists, and the whole design would be circular.
-run_netns_up "$STUBS" "vpn.example.invalid:51820"
-status=$?
-if [[ "$status" -ne 0 ]]; then
-  ok "hostname endpoint refused (exit $status)"
-else
-  bad "hostname endpoint was ACCEPTED" "a hostname needs DNS to leave through the veth before the tunnel exists"
-fi
-
-if log_has "netns add"; then
-  bad "a namespace was created despite the bad endpoint" "netns-up.sh must validate before creating anything"
-else
-  ok "no namespace was created"
-fi
-if log_has "iptables -w -A OUTPUT" || log_has "NSEXEC iptables"; then
-  bad "netfilter rules were installed despite the bad endpoint" "validation must happen first"
-else
-  ok "no netfilter rules were installed"
-fi
-
-# ── 2. A numeric endpoint is accepted ───────────────────────────────────────
-: >"$FAKE_LOG"
-run_netns_up "$STUBS" "203.0.113.7:51820"
-status=$?
-if [[ "$status" -eq 0 ]]; then
-  ok "numeric endpoint accepted"
-else
-  bad "numeric endpoint refused" "$(tail -3 "$STUBS/stderr")"
-fi
-
-if log_has "netns add medtns"; then
-  ok "namespace medtns created"
-else
-  bad "namespace not created"
-fi
-if log_has "ip link add mthost type veth peer name mtns0"; then
-  ok "veth pair created"
-else
-  bad "veth pair not created"
-fi
-
-# ── 3. Both policies are DROP, on both stacks ──────────────────────────────
-for tool in iptables ip6tables; do
-  if grep -E "^NSEXEC $tool -w -A OUTPUT -j DROP$" "$FAKE_LOG" | grep -q .; then
-    ok "$tool OUTPUT policy is DROP"
-  else
-    bad "$tool OUTPUT policy is not DROP" "the policy IS the kill switch; binding is only extra"
-  fi
-done
-# if/then rather than `grep && ok || bad`: with `A && B || C`, C also runs when
-# B fails, so a FAIL line is printed alongside the ok one.
-if grep -E "^NSEXEC iptables -w -A INPUT -j DROP$" "$FAKE_LOG" | grep -q .; then
-  ok "iptables INPUT policy is DROP"
-else
-  bad "iptables INPUT policy is not DROP" "a closed egress with open ingress is only half isolated"
-fi
-
-# ── 4. The tunnel is allowed BY NAME ────────────────────────────────────────
-#
-# Unconditional: the rule must be installed whether or not wg0 currently
-# exists. An absent wg0 is what makes the rule match nothing, which is the
-# fail-closed property.
-if ns_has "iptables -w -A OUTPUT -o wg0 -j ACCEPT"; then
-  ok "tunnel allowed via '-o wg0', installed unconditionally"
-else
-  bad "no unconditional '-o wg0' ACCEPT rule" "the fail-closed behaviour depends on it matching nothing while absent"
-fi
-
-# ── 5. The ONLY non-tunnel egress is one UDP flow ───────────────────────────
-endpoint_rules="$(grep -E "^NSEXEC iptables -w -A OUTPUT -o mtns0" "$FAKE_LOG" | grep -v -- "--dport 53" || true)"
-count="$(printf '%s\n' "$endpoint_rules" | grep -c . || true)"
-if [[ "$count" == "1" ]]; then
-  ok "exactly one non-DNS rule scoped to the veth"
-else
-  bad "expected 1 non-DNS veth rule, found $count" "$endpoint_rules"
-fi
-
-if ns_has "iptables -w -A OUTPUT -o mtns0 -p udp -d 203.0.113.7 --dport 51820 -j ACCEPT"; then
-  ok "the single veth egress is UDP to the pinned numeric endpoint"
-else
-  bad "the endpoint bootstrap rule is not the expected single UDP flow" "$endpoint_rules"
-fi
-
-# No rule may carry a subnet, a range, or a wildcard destination.
-if printf '%s\n' "$endpoint_rules" | grep -qE -- "-d [0-9.]+/|-m multiport|--dport [0-9]+:[0-9]+"; then
-  bad "a veth rule widens the destination" "$endpoint_rules"
-else
-  ok "the endpoint rule names one address and one port"
-fi
-
-# ── 6. DNS cannot leave over the veth ───────────────────────────────────────
-if grep -E "^NSEXEC iptables -w -A OUTPUT -o mtns0 -p udp --dport 53 -j DROP$" "$FAKE_LOG" | grep -q .; then
-  ok "UDP/53 over the veth is dropped"
-else
-  bad "UDP/53 over the veth is not dropped"
-fi
-if grep -E "^NSEXEC iptables -w -A OUTPUT -o mtns0 -p tcp --dport 53 -j DROP$" "$FAKE_LOG" | grep -q .; then
-  ok "TCP/53 over the veth is dropped"
-else
-  bad "TCP/53 over the veth is not dropped"
-fi
-
-if printf '%s\n' "$endpoint_rules" | grep -q -- "--dport 53"; then
-  bad "a DNS rule is not a DROP" "an ACCEPT of DNS on the veth is a working leak"
-else
-  ok "no DNS rule permits anything"
-fi
-
-# ── 7. IPv4-mapped traffic and IPv6 are both dropped ────────────────────────
-if grep -E "^NSEXEC ip6tables -w -A OUTPUT -j DROP$" "$FAKE_LOG" | grep -q .; then
-  ok "all IPv6 OUTPUT is dropped"
-else
-  bad "IPv6 OUTPUT is not dropped"
-fi
-
-# ── 8. The namespace has a host route but NO default route ─────────────────
-if log_has "ip -n medtns route add 10.77.0.1/32 dev mtns0"; then
-  ok "a /32 host route to the veth peer exists"
-else
-  bad "no host route in the namespace" "the permitted flows need somewhere to go"
-fi
-if log_has "route add default"; then
-  bad "a DEFAULT route was added inside the namespace" "routing alone would carry traffic out if netfilter were removed"
-else
-  ok "no default route inside the namespace"
-fi
-
-# ── 9. IPv6 is disabled on the interfaces, not merely unrouted ─────────────
-if ns_has "sysctl -q -w net.ipv6.conf.mtns0.disable_ipv6=1"; then
-  ok "IPv6 disabled on mtns0"
-else
-  bad "IPv6 not disabled on mtns0"
-fi
-if ns_has "sysctl -q -w net.ipv6.conf.all.disable_ipv6=1"; then
-  ok "IPv6 disabled across the namespace"
-else
-  bad "IPv6 not disabled namespace-wide"
-fi
-
-# ── 10. INPUT permits only loopback and the host proxy ─────────────────────
-input_allow="$(grep -E "^NSEXEC iptables -w -A INPUT" "$FAKE_LOG" | grep -v -- "-j DROP" || true)"
-if printf '%s\n' "$input_allow" | grep -q -- "-i lo -j ACCEPT"; then
-  ok "loopback INPUT accepted"
-else
-  bad "loopback INPUT not accepted"
-fi
-if printf '%s\n' "$input_allow" | grep -qE -- "-i mtns0 -s 10.77.0.1 -p tcp --dport 18080 -j ACCEPT"; then
-  ok "the WebUI port is reachable only from the host side of the veth"
-else
-  bad "the WebUI INPUT rule is wrong" "$input_allow"
-fi
-if printf '%s\n' "$input_allow" | grep -vE -- "-i lo|-i mtns0 -s 10.77.0.1" | grep -q .; then
-  bad "an unexpected INPUT rule is permitted" "$input_allow"
-else
-  ok "no other INPUT rule is permitted"
-fi
-
-# ── 10b. NOTHING firewall-related ran in the HOST namespace ───────────────
-#
-# This is the assertion that matters most in this suite, and it is the reason
-# the fixture models `netns exec` at all.
-#
-# `$IPT -A OUTPUT -j DROP` executed in the host namespace installs a deny-all
-# OUTPUT policy on this machine. On a box whose only ingress is the tailnet,
-# that is a lockout with no console. A suite that only checked the rules were
-# present would pass while they were being installed in the wrong place.
-# The one deliberate exception: net.ipv4.ip_forward is a HOST property (the
-# host must not route between namespaces), so it is set unscoped on purpose and
-# named here. Every other call must be inside the namespace.
-for tool in iptables ip6tables sysctl; do
-  escaped="$(grep -E "^$tool " "$FAKE_LOG" | grep -v 'net.ipv4.ip_forward=0' || true)"
-  if [[ -n "$escaped" ]]; then
-    bad "a $tool call ran in the HOST namespace" "$(printf '%s\n' "$escaped" | head -3)"
-  else
-    ok "no $tool call escaped the namespace (except the host ip_forward sysctl)"
-  fi
-done
-
-# ── 11. Re-running is idempotent (flush before rebuild) ────────────────────
-: >"$FAKE_LOG"
-run_netns_up "$STUBS" "203.0.113.7:51820"
-if ns_has "iptables -w -F" && ns_has "iptables -w -X"; then
-  ok "rules are flushed before being rebuilt"
-else
-  bad "rules are not flushed" "appending to a previous run's rules is how an allowance outlives its justification"
-fi
-if grep -q "netns del medtns" "$FAKE_LOG"; then
-  ok "the namespace is torn down before being recreated"
-else
-  bad "no teardown before rebuild" "a killed previous run leaves a namespace that is silently inherited"
-fi
-
-summary "netns-failclosed"
+MEDIA_ROOT="$(cd "$HERE/../.." && pwd)"
+export MEDIA_ROOT
+python3 - <<'PY'
+import json, os, pathlib, subprocess, sys, tempfile
+root = pathlib.Path(os.environ['MEDIA_ROOT'])
+scripts = root / 'config/system/media/scripts'
+with tempfile.TemporaryDirectory() as directory:
+    temp = pathlib.Path(directory)
+    tool = temp / 'tool'
+    tool.write_text('#!' + sys.executable + '\n' + '''import json, os, pathlib, sys
+name = pathlib.Path(sys.argv[0]).name
+args = sys.argv[1:]
+statefile = pathlib.Path(os.environ['STATE'])
+state = json.loads(statefile.read_text()) if statefile.exists() else {'iptables': [], 'ip6tables': []}
+with open(os.environ['LOG'], 'a') as log: log.write(json.dumps([name] + args) + '\\n')
+if name == 'ip':
+    if args[:2] == ['netns', 'exec']:
+        os.execvp(args[3], args[3:])
+    if 'show' in args and 'default' in args: print(state.get('route', ''))
+    if 'replace' in args and 'default' in args: state['route'] = 'default dev customwg scope link'
+if name in ('iptables', 'ip6tables'):
+    args = [a for a in args if a != '-w']
+    if args == ['-S']:
+        policies = state[name][:3]
+        rules = state[name][3:]
+        print('\\n'.join(policies + sorted(rules, key=lambda r: 0 if r.startswith('-A INPUT') else 1)))
+    if args[0] == '-P':
+        state[name].append(' '.join(args))
+        state[name][:3] = sorted(state[name][:3], key=lambda r: ['INPUT','FORWARD','OUTPUT'].index(r.split()[1]))
+    if args[0] == '-A':
+        # Canonical iptables -S puts source/destination before interfaces.
+        for flag in ('-s', '-d'):
+            if flag in args:
+                index = args.index(flag)
+                pair = args[index:index+2]
+                del args[index:index+2]
+                args[2:2] = pair
+        state[name].append(' '.join(args))
+statefile.write_text(json.dumps(state))
+''')
+    tool.chmod(0o755)
+    for name in ('ip', 'iptables', 'ip6tables', 'sysctl', 'wg'):
+        (temp / name).symlink_to(tool)
+    env = dict(os.environ, PATH=str(temp)+':'+os.environ['PATH'], STATE=str(temp/'state'), LOG=str(temp/'log'),
+        MEDI_NS='testns', MEDI_VETH_HOST='testhost', MEDI_VETH_NS='testveth',
+        MEDI_HOST_ADDR='10.77.0.1/30', MEDI_NS_ADDR='10.77.0.2/30', MEDI_GATEWAY='10.77.0.1',
+        MEDI_WG_IF='customwg', MEDI_WEBUI_PORT='18080', MEDI_WG_ENDPOINT='203.0.113.7:51820',
+        MEDI_TUNNEL_ADDRESS='10.8.0.2/32', MEDI_RESOLVER='10.8.0.1', MEDI_NETNS_ETC=str(temp/'etc'),
+        CREDENTIALS_DIRECTORY=str(temp))
+    def run(script, *args, success=True, changes=None):
+        result = subprocess.run(['bash', str(scripts/script), *args], env=env | (changes or {}), capture_output=True, text=True)
+        assert (result.returncode == 0) == success, result.stderr + result.stdout
+    for endpoint in ('vpn.invalid:51820', '999.1.1.1:51820', '203.0.113.7:0'):
+        run('netns-up.sh', success=False, changes={'MEDI_WG_ENDPOINT': endpoint})
+        assert not (temp/'log').exists()
+    run('netns-up.sh')
+    run('netns-audit.sh')
+    original = json.loads((temp/'state').read_text())
+    assert '-P OUTPUT DROP' in original['iptables']
+    assert not any(rule in ('-A INPUT -j DROP', '-A OUTPUT -j DROP', '-A FORWARD -j DROP') for rule in original['iptables'][3:])
+    # Evaluate the installed rule arguments against packet tuples, rather than
+    # calling a terminal DROP a policy. Models this intentionally small filter.
+    import shlex
+    def verdict(chain, **packet):
+        for text in original['iptables'][3:]:
+            rule = shlex.split(text)
+            if rule[1] != chain:
+                continue
+            fields = {'-i': 'incoming', '-o': 'outgoing', '-s': 'source', '-d': 'destination',
+                      '-p': 'protocol', '--sport': 'sport', '--dport': 'dport'}
+            matches = True
+            for flag, field in fields.items():
+                if flag in rule:
+                    expected = rule[rule.index(flag)+1].removesuffix('/32')
+                    matches &= str(packet.get(field, '')) == expected
+            if '--ctstate' in rule:
+                matches &= packet.get('state') in rule[rule.index('--ctstate')+1].split(',')
+            if matches:
+                return rule[rule.index('-j')+1]
+        return next(text.split()[2] for text in original['iptables'][:3] if text.split()[1] == chain)
+    assert verdict('INPUT', incoming='testveth', source='10.77.0.1', protocol='tcp', dport=18080, state='NEW') == 'ACCEPT'
+    assert verdict('OUTPUT', outgoing='testveth', destination='10.77.0.1', protocol='tcp', sport=18080, state='ESTABLISHED') == 'ACCEPT'
+    assert verdict('OUTPUT', outgoing='testveth', destination='10.77.0.1', protocol='tcp', sport=18080, state='NEW') == 'DROP'
+    for port in (53, 51820, 443):
+        assert verdict('OUTPUT', outgoing='testveth', destination='203.0.113.7', protocol='udp', dport=port, state='NEW') == 'DROP'
+    assert verdict('INPUT', incoming='customwg', protocol='tcp', dport=6881, state='ESTABLISHED') == 'ACCEPT'
+    for state in ('NEW', 'ESTABLISHED'):
+        assert verdict('INPUT', incoming='customwg', destination='10.77.0.2', protocol='tcp', dport=18080, state=state) == 'DROP'
+    assert verdict('OUTPUT', outgoing='customwg', protocol='udp', dport=53, state='NEW') == 'ACCEPT'
+    assert verdict('OUTPUT', outgoing='missingwg', protocol='udp', dport=53, state='NEW') == 'DROP'
+    assert verdict('FORWARD', incoming='testveth', outgoing='customwg') == 'DROP'
+    # Exact allowlist rejects canonical extra/widened rules, including previously
+    # invisible broad veth, DNS, tunnel-name substring and terminal-DROP tricks.
+    mutations = [
+        lambda s: s['iptables'].append('-A OUTPUT -o testveth -j ACCEPT'),
+        lambda s: s['iptables'].append('-A INPUT -i testveth -j ACCEPT'),
+        lambda s: s['iptables'].append('-A OUTPUT -o testveth -p udp -m udp --dport 53 -j ACCEPT'),
+        lambda s: s['ip6tables'].append('-A OUTPUT -o customwg -j ACCEPT'),
+        lambda s: s['iptables'].__setitem__(2, '-P OUTPUT ACCEPT'),
+        lambda s: s['iptables'].append('-A OUTPUT -o customwg-extra -j ACCEPT'),
+        lambda s: s.__setitem__('route', 'default via 10.77.0.1 dev testveth'),
+    ]
+    for mutate in mutations:
+        state = json.loads(json.dumps(original)); mutate(state)
+        (temp/'state').write_text(json.dumps(state))
+        run('netns-audit.sh', success=False)
+    (temp/'state').write_text(json.dumps(original))
+    config = '[Interface]\nPrivateKey = dummy\n[Peer]\nPublicKey = dummy\nAllowedIPs = 0.0.0.0/0\nEndpoint = 203.0.113.7:51820\n'
+    for bad in (config.replace('203.0.113.7', 'vpn.invalid'), config + 'PostUp = touch /tmp/unsafe\n', config.replace('0.0.0.0/0', '10.0.0.0/8')):
+        (temp/'wg.conf').write_text(bad)
+        run('netns-up.sh', 'tunnel-up', success=False)
+    (temp/'wg.conf').write_text(config)
+    run('netns-up.sh', 'tunnel-up')
+    run('netns-audit.sh')
+    calls = [json.loads(line) for line in (temp/'log').read_text().splitlines()]
+    create = calls.index(['ip','link','add','customwg','type','wireguard'])
+    move = calls.index(['ip','link','set','customwg','netns','testns'])
+    assert create < move
+    assert ['wg','setconf','customwg',str(temp/'wg.conf')] in calls[create:move]
+    assert not any(c[0] == 'wg-quick' for c in calls)
+    # Every firewall/sysctl call must be dispatched by netns exec immediately
+    # before it; no host forwarding exception is permitted.
+    for index, call in enumerate(calls):
+        if call[0] in ('iptables','ip6tables','sysctl'):
+            assert calls[index-1][:4] == ['ip','netns','exec','testns']
+    assert (temp/'etc/testns/resolv.conf').read_text() == 'nameserver 10.8.0.1\n'
+module = (root/'config/system/media/torrents.nix').read_text()
+assert 'pkgs.qbittorrent-nox' in module and '"--interface"' not in module
+assert 'BindReadOnlyPaths' in module and 'XDG_CONFIG_HOME' in module and 'XDG_DATA_HOME' in module
+assert 'NetworkNamespacePath' not in module.split('systemd.services.media-tunnel =')[1].split('systemd.services.qbittorrent =')[0]
+assert '"owner" "!" "--uid-owner" "media-webui-proxy"' in module
+assert 'systemd.timers.media-netns-watchdog' in module
+assert 'systemctl stop qbittorrent.service media-tunnel.service' in module
+# The Nix indented string must contain Qt subgroup separators, not doubled
+# literal backslashes which Python preserves as different INI keys.
+assert 'WebUI\\Address=' in module and 'Session\\Interface=' in module
+assert 'WebUI\\\\Address=' not in module and 'Session\\\\Interface=' not in module
+assert 'allowedTCPPorts' not in module and 'ip_forward' not in module
+print('PASS: namespace rules, canonical mutations, host scope, runtime credential and headless settings (mock tools; not packet proof)')
+PY
+# Keep the socket-free proxy regression in the registered suite, not a manual
+# one-off worker command that CI never runs.
+python3 "$HERE/torrent-proxy.py"

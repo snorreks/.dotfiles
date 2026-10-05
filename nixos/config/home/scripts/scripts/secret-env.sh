@@ -95,6 +95,7 @@ DEFAULT_MANIFEST=${SECRET_ENV_MANIFEST:-$HOME/.config/agent-ops/secrets.manifest
 # ── output ──────────────────────────────────────────────────────────────────
 FORMAT=nul
 MANIFEST=
+READY_ONLY=false
 declare -a ONLY_NAMES=()
 declare -a COMMAND=()
 
@@ -116,6 +117,8 @@ usage: $PROGRAM_NAME [--manifest FILE] [--name NAME]... [--format=FORMAT]
                       list  credential names only, no values
                       check human-readable readiness
                       json  readiness as JSON, no values
+  --ready           --exec only: skip absent default session credentials;
+                    explicit --name remains required, malformed values fail
   --check           alias for --format=check
   --exec CMD...     exec CMD with NAME=VALUE in its environment
   --                end of options
@@ -168,6 +171,7 @@ while [[ $# -gt 0 ]]; do
 		FORMAT="$2"
 		shift 2
 		;;
+	--ready) READY_ONLY=true; shift ;;
 	--check) FORMAT=check; shift ;;
 	--list) FORMAT=list; shift ;;
 	--exec)
@@ -238,6 +242,13 @@ load_manifest() {
 
 load_manifest
 
+for n in ${ONLY_NAMES[@]+"${ONLY_NAMES[@]}"}; do
+	[[ -v SECRET_SESSION[$n] ]] || die_usage "unknown credential '$n'"
+done
+if $READY_ONLY && ((${#COMMAND[@]} == 0)); then
+	die_usage "--ready requires --exec"
+fi
+
 # ── value lookup ────────────────────────────────────────────────────────────
 #
 # The search list is the whole point of LoadCredential: a service that was not
@@ -259,12 +270,15 @@ secret_path() {
 	return 1
 }
 
-# read_value NAME — writes the value to stdout, or returns 1.
+# read_value NAME — assigns READ_VALUE without stdout/command substitution.
+# Callers must not capture stdout: bash strips ALL trailing newlines there.
+READ_VALUE=""
 #
 # Exit 4 means "found but malformed", which is NOT the same as "absent": a
 # truncated credential must never be handed to a caller as if it were whole.
 read_value() {
 	local name="$1" path
+	READ_VALUE=""
 	if ! path="$(secret_path "$name")"; then
 		return 1
 	fi
@@ -285,7 +299,7 @@ read_value() {
 	data="$(cat -- "$path"; printf x)"
 	data="${data%x}"
 	data="${data%$'\n'}"
-	printf '%s' "$data"
+	READ_VALUE="$data"
 }
 
 # ── readiness ───────────────────────────────────────────────────────────────
@@ -414,7 +428,8 @@ wanted_names() {
 emit_nul() {
 	local n v a
 	while IFS= read -r n; do
-		v="$(read_value "$n")" || return $?
+		read_value "$n" || return $?
+		v="$READ_VALUE"
 		while IFS= read -r a; do
 			printf '%s=%s\0' "$a" "$v"
 		done < <(var_names "$n")
@@ -449,11 +464,15 @@ do_exec() {
 	local -a pairs=()
 	local n rc v a
 	for n in "$@"; do
-		v="$(read_value "$n")"
+		read_value "$n"
 		rc=$?
+		v="$READ_VALUE"
 		case "$rc" in
 		0) ;;
 		1)
+			if $READY_ONLY && ((${#ONLY_NAMES[@]} == 0)); then
+				continue
+			fi
 			sayf "credential '$n' is absent — refusing to exec."
 			return 3
 			;;
@@ -464,7 +483,7 @@ do_exec() {
 			pairs+=("$a=$v")
 		done < <(var_names "$n")
 	done
-	((${#pairs[@]} > 0)) || {
+	$READY_ONLY || ((${#pairs[@]} > 0)) || {
 		sayf "nothing to exec with: no credential requested."
 		return 2
 	}
@@ -525,7 +544,8 @@ list) emit_lines; exit 0 ;;
 env)
 	collect ${ONLY_NAMES[@]+"${ONLY_NAMES[@]}"} || exit 3
 	while IFS= read -r n; do
-		v="$(read_value "$n")" || exit $?
+		read_value "$n" || exit $?
+		v="$READ_VALUE"
 		while IFS= read -r a; do
 			printf '%s=%s\n' "$a" "$v"
 		done < <(var_names "$n")

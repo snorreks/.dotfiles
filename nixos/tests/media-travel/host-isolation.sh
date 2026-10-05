@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # nixos/tests/media-travel/host-isolation.sh
 #
 # Audit checklist: "Assert host management/playback and Collie443 survive every
@@ -16,9 +17,8 @@
 #      wanted it — which is the failure that hides.
 #   2. Collie keeps tailnet HTTPS 443, and nothing else claims it.
 #   3. The media lane adds no global firewall port and no firewall interface.
-#      (Its only host firewall rule, when enabled, is an interface-scoped INPUT
-#      port inside the namespace module — an INPUT rule, and never OUTPUT.
-#      There is no host OUTPUT policy to change, which is the point.)
+#      Enabled torrents add only a narrow owner rejection on the management
+#      backend, not a global OUTPUT policy, NAT or forwarding exception.
 #
 # shellcheck shell=bash
 set -uo pipefail
@@ -218,6 +218,52 @@ if grep -q "HostKey " <<<"$sshcfg"; then
   bad "ssh_config contains a HostKey directive" "HostKey is an sshd_config option; ssh rejects the whole file"
 else
   ok "no server-only HostKey directive in the client ssh_config"
+fi
+
+# Enabled-unit proof uses the pinned input, not the disabled host defaults.
+# It still does not start a client, create a namespace or prove packet flow.
+torrent_root="$(cd "$HERE/../.." && pwd)"
+if ! timeout 120 nix eval --impure --json --extra-experimental-features 'nix-command flakes' \
+  --expr "import $HERE/torrent-fixture.nix { nixpkgsPath = (builtins.getFlake (toString $torrent_root)).inputs.nixpkgs; }" \
+  >"$FIXTURE_TMP/torrent-units.json" 2>"$FIXTURE_TMP/torrent-units.err"; then
+  bad 'enabled torrent units did not evaluate' "$(tail -15 "$FIXTURE_TMP/torrent-units.err")"
+else
+  if python3 - "$FIXTURE_TMP/torrent-units.json" <<'PY'
+import json, pathlib, shlex, sys
+facts = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert 'User=qbittorrent' in facts['client']
+assert 'NetworkNamespacePath=/run/netns/medtns' in facts['client']
+assert 'qbittorrent-nox' in facts['client'] and '--interface' not in facts['client']
+assert 'LoadCredential=wg.conf:' in facts['tunnel']
+assert 'NetworkNamespacePath=' not in facts['tunnel']
+assert 'User=media-webui-proxy' in facts['proxy']
+assert 'MEDI_PROXY_LISTEN_HOST=127.0.0.1' in facts['proxy']
+assert 'IPAddressDeny=any' in facts['proxy']
+# Model the actual generated owner guard's exact argv, not a source substring.
+line = next(line for line in facts['firewall'].splitlines() if ' -I OUTPUT ' in line)
+argv = shlex.split(line.split(' || ', 1)[1])
+assert argv[:5] == ['iptables', '-w', '-I', 'OUTPUT', '1']
+rule = argv[5:]
+assert rule == ['-o', 'mthost', '-d', '10.77.0.2/32', '-p', 'tcp', '--dport', '18080', '-m', 'owner', '!', '--uid-owner', 'media-webui-proxy', '-m', 'conntrack', '--ctstate', 'NEW', '-j', 'REJECT']
+def rejected(uid, device='mthost', destination='10.77.0.2', port=18080):
+    return uid != 'media-webui-proxy' and device == 'mthost' and destination == '10.77.0.2' and port == 18080
+assert not rejected('media-webui-proxy')
+assert rejected('ordinary-user') and rejected('qbittorrent')
+assert not rejected('ordinary-user', device='eth0')
+assert not rejected('ordinary-user', destination='100.64.0.2', port=2222)
+assert not rejected('ordinary-user', port=443)
+print('PASS: enabled torrent units and scoped owner-guard verdicts (not kernel packet proof)')
+PY
+  then ok 'enabled units and owner-guard verdicts'; else bad 'enabled torrent unit/owner-guard contract'; fi
+fi
+
+if timeout 90 nix eval --impure --json --extra-experimental-features 'nix-command flakes' \
+  --expr "import $HERE/sync-fixture.nix { nixpkgsPath = (builtins.getFlake (toString $torrent_root)).inputs.nixpkgs; }" \
+  >"$FIXTURE_TMP/sync-guard.json" 2>"$FIXTURE_TMP/sync-guard.err" \
+  && jq -e '.approved and (del(.approved) | all(.[]; . == false))' "$FIXTURE_TMP/sync-guard.json" >/dev/null; then
+  ok 'Syncthing refuses actual live herdr roots, their ancestors and descendants'
+else
+  bad 'Syncthing live-state folder guard' "$(tail -15 "$FIXTURE_TMP/sync-guard.err")"
 fi
 
 summary "host-isolation"

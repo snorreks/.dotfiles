@@ -23,7 +23,7 @@ set -o nounset -o pipefail
 # `checks` sandbox there is no nix.conf and no HOME configuration to supply it,
 # so the suite sets it for itself rather than depending on the caller's
 # environment. Set, not prepended: whatever the caller already enabled is kept.
-export NIX_CONFIG="${NIX_CONFIG:-}experimental-features = nix-command flakes"
+export NIX_CONFIG="${NIX_CONFIG:-}"$'\n'"experimental-features = nix-command flakes"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -93,7 +93,8 @@ cfg() {
 # uses, not re-derived here. Otherwise a test would assert on its own idea of the
 # precedence and could pass while the real flake does the opposite.
 combo() {
-  local role="$1" headless="$2" extra="$3" path="$4" err
+  local role="$1" headless="$2" extra="$3" path="$4" modules="${5:-}" err
+  [[ -n "$modules" ]] || modules='{}'
   err="$(mktemp)"
   if ! nix eval --impure --json --expr "
     let
@@ -113,7 +114,15 @@ combo() {
       system = lib.nixosSystem {
         system = \"x86_64-linux\";
         specialArgs = { inputs = flake.inputs; system = \"x86_64-linux\"; inherit opts; };
-        modules = [ ${ROOT}/system.nix ${ROOT}/config/system ];
+        # Match the real hosts' external option declarations. Even disabled
+        # mkIf definitions must refer to declared options.
+        modules = [
+          ${ROOT}/system.nix
+          flake.inputs.sops-nix.nixosModules.sops
+          flake.inputs.mangowm.nixosModules.mango
+          flake.inputs.impermanence.nixosModules.impermanence
+          ${modules}
+        ];
       };
     in
       ${path}
@@ -201,12 +210,12 @@ out="$(combo '"server"' true '{}' 'system.config.hostPolicy.dns')"
 assert_contains "one owner" "$out" '"owner":"dnscrypt-proxy"'
 assert_contains "loopback first" "$out" '"127.0.0.1"'
 assert_contains "a numeric rescue" "$out" '"9.9.9.9"'
-assert_contains "the cap matches the list" "$out" '"maxnames":4'
+assert_contains "the list fits glibc MAXNS" "$out" '"maxnames":3'
 
 # The cap is only meaningful if it reaches the resolver. resolv.conf options are
 # where glibc reads MAXNS from, so this asserts the wiring, not just the number.
 out="$(combo '"server"' true '{}' 'system.config.networking.resolvconf.extraOptions')"
-assert_contains "maxnames is written to resolv.conf" "$out" "maxnames 4"
+assert_eq "unsupported maxnames option is absent" '[]' "$out"
 
 out="$(combo '"server"' true '{}' 'system.config.networkmanager.dns or system.config.networking.networkmanager.dns')"
 assert_contains "NetworkManager still keeps out of the resolver's way" "$out" '"none"'
@@ -378,8 +387,8 @@ t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
 t_start "the confirm unit is the one BOTH OpenSSH listeners log to"
-out="$(cfg legion 'system.config.systemd.services.ns-maint-verify.environment.NM_SSH_UNIT')"
-assert_eq "confirmSSHUnit stays sshd.service, which covers 22 and 2222" '"sshd.service"' "$out"
+out="$(cfg legion 'let p = builtins.head (builtins.filter (p: (p.name or "") == "ns-maint") system.config.environment.systemPackages); in builtins.elem "export NM_SSH_UNIT=sshd.service" (builtins.filter builtins.isString (builtins.split "\n" p.text))')"
+assert_eq "the trusted executable embeds sshd.service, which covers 22 and 2222" 'true' "$out"
 out="$(cfg legion 'system.config.maintenance.confirmSSHUnit')"
 assert_eq "and the option behind it says the same" '"sshd.service"' "$out"
 t_done
@@ -390,11 +399,26 @@ out="$(cfg legion 'system.config.maintenance.espPath')"
 assert_eq "the ESP is measured at the mount systemd-boot writes to" '"/boot"' "$out"
 out="$(cfg legion 'system.config.maintenance.espMinMib')"
 assert_eq "with a floor above one NixOS entry" "150" "$out"
-out="$(cfg legion 'system.config.systemd.services.ns-maint-verify.environment.NM_ESP_MIN_MIB')"
-assert_eq "and the units are told the same number as the operator" '"150"' "$out"
+out="$(cfg legion 'let p = builtins.head (builtins.filter (p: (p.name or "") == "ns-maint") system.config.environment.systemPackages); in builtins.elem "export NM_ESP_MIN_MIB=150" (builtins.filter builtins.isString (builtins.split "\n" p.text))')"
+assert_eq "and the trusted executable embeds the same floor" 'true' "$out"
+out="$(cfg legion 'builtins.filter (name: builtins.substring 0 3 name == "NM_") (builtins.attrNames system.config.systemd.services.ns-maint-verify.environment)')"
+assert_eq "the unit no longer relies on caller/manager NM_* injection" '[]' "$out"
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
+t_start "resource weights reach real services and user slices have a valid hierarchy"
+resource_modules='{ agentOps.resources.enable = true; services.ollama.enable = true; services.jellyfin.enable = true; services.syncthing.enable = true; }'
+out="$(combo '"server"' true '{ enableOllama = false; }' 'system.config.systemd.user.slices."agent-workload-build".sliceConfig' "$resource_modules")"
+assert_contains 'build slice has its real CPU weight' "$out" '"CPUWeight":128'
+assert_not_contains 'Slice= is not emitted into a [Slice] section' "$out" '"Slice"'
+out="$(combo '"server"' true '{ enableOllama = false; }' '[ system.config.systemd.services.nix-daemon.serviceConfig.CPUWeight system.config.systemd.services.ollama.serviceConfig.CPUWeight system.config.systemd.services.jellyfin.serviceConfig.CPUWeight system.config.systemd.services.syncthing.serviceConfig.CPUWeight system.config.systemd.services.sshd.serviceConfig.CPUWeight system.config.systemd.services.tailscaled.serviceConfig.CPUWeight ]' "$resource_modules")"
+assert_eq 'real build, inference, transcode, sync and management services receive weights' '[128,256,256,64,2048,2048]' "$out"
+out="$(combo '"server"' true '{}' '[ system.config.agentOps.resources.policy.build.cpuWeight system.config.agentOps.resources.policy.build.ioWeight system.config.agentOps.resources.policy.management.cpuWeight ]' '{ agentOps.resources.enable = true; agentOps.resources.policy.build.cpuWeight = 192; }')"
+assert_eq 'a partial class override retains every other default' '[192,32,2048]' "$out"
+out="$(combo '"server"' true '{}' 'builtins.hasAttr "custom-load-build" system.config.systemd.user.slices' '{ agentOps.resources.enable = true; agentOps.resources.slice = "custom-load"; }')"
+assert_eq 'class hierarchy follows the configured parent name' true "$out"
+t_done
+
 if [[ "$TESTS_FAILED" -ne 0 ]]; then
   printf '\n\033[31mhost-eval: %d assertion(s) failed\033[0m\n' "$TESTS_FAILED"
   exit 1

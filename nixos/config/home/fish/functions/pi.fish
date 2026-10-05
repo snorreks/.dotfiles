@@ -16,8 +16,12 @@
 function pi -d "Launch pi inside herdr (shared workspace, numbered tabs). pib = plain pi"
     # Already in a herdr-managed pane → that pane IS herdr; run pi here.
     if set -q HERDR_ENV
-        command pi $argv
-        return
+        # Resolve the real executable, not this fish function. Pinned Pi's
+        # pi-ai/dist/auth/resolve.js reads stored OAuth/API auth before env
+        # fallback; ready API variables do not override same-provider OAuth.
+        set -l executable (command -s pi); or return 127
+        __ns_agent_exec "$executable" $argv
+        return $status
     end
     __herdr_launch_agent pi $argv
 end
@@ -48,8 +52,9 @@ function pil -d "Launch pi against a local ollama model inside herdr (pi-local).
 
     # Already in a herdr-managed pane → that pane IS herdr; run pi here.
     if set -q HERDR_ENV
-        command pi --provider ollama --model "$model" $flags $argv
-        return
+        set -l executable (command -s pi); or return 127
+        __ns_agent_exec "$executable" --provider ollama --model "$model" $flags $argv
+        return $status
     end
     __herdr_launch_agent pi --provider ollama --model "$model" $flags $argv
 end

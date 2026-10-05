@@ -192,13 +192,9 @@ in {
     # Allows wg-quick to manage /etc/resolv.conf for DNS during VPN connections.
     resolvconf.enable = true;
 
-    # The cap, stated. `maxnames N` goes into the `options` line of
-    # /etc/resolv.conf, where glibc reads it — which is why this is a
-    # resolv.conf OPTION and not an openresolv.conf setting: the number that
-    # matters is the one the libc actually uses.
-    resolvconf.extraOptions = [
-      "maxnames ${toString dns.maxnames}"
-    ];
+    # The list itself fits glibc's compiled MAXNS=3. `maxnames` is not a
+    # supported libc resolver option and cannot raise that limit.
+    resolvconf.extraOptions = [];
 
     # Enable the system firewall.
     firewall = {

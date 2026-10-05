@@ -170,6 +170,7 @@ run_health() {
     NM_BOOTED_SYSTEM="$TMP/run/booted-system" \
     NM_ROOT_DEVICE="/" \
     NM_BOOT_CRITICAL_UNITS="${CRITICAL_UNITS:-local-fs.target systemd-modules-load.service}" \
+    NM_BOOT_READY_TIMEOUT="${READY_TIMEOUT:-0}" \
     bash "$HEALTH" 2>&1
 }
 
@@ -257,13 +258,27 @@ teardown
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
-t_start "a unit that is merely not started yet is not a failure"
+t_start "an indefinitely activating critical unit is not blessed"
 setup
-# `activating` is what a critical unit looks like while local-fs is still
-# mounting. Treating that as a failure would condemn a perfectly good boot.
 export FAKE_UNIT_STATES="local-fs.target=activating systemd-modules-load.service=active"
 out="$(run_health)" && rc=0 || rc=$?
-assert_eq "exit status" 0 "$rc"
+assert_ne_zero "exit status" "$rc"
+assert_contains "startup is not readiness" "$out" "not ready"
+unset FAKE_UNIT_STATES
+teardown
+t_done
+
+t_start "local SSH readiness is required even when the WAN is down"
+setup
+export CRITICAL_UNITS='local-fs.target sshd.service'
+export FAKE_UNIT_STATES='local-fs.target=active sshd.service=failed'
+out="$(run_health)" && rc=0 || rc=$?
+assert_ne_zero "failed listener" "$rc"
+assert_contains "SSH failure is visible" "$out" 'sshd.service'
+export FAKE_UNIT_STATES='local-fs.target=active sshd.service=active'
+out="$(run_health)" && rc=0 || rc=$?
+assert_eq "local listener works without WAN" 0 "$rc"
+unset CRITICAL_UNITS FAKE_UNIT_STATES
 teardown
 t_done
 

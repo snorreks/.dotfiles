@@ -240,6 +240,9 @@ fixture_new() {
   export FAKE_SWITCH_LOG="$TMP/log/switch"
   export FAKE_SWITCH_SLEEP=0
   export FAKE_PROFILE_SET_EXIT=0
+  export FAKE_PROFILE_RESTORE_EXIT=0
+  export FAKE_SWITCH_OLD_SLEEP=0
+  export NM_RESTORE_TIMEOUT=3
   export FAKE_SWITCH_IGNORE_TERM=0
   export FAKE_SWITCH_CANDIDATE_EXIT=0
   export FAKE_SWITCH_OLD_EXIT=0
@@ -417,7 +420,9 @@ while [[ $# -gt 0 ]]; do
     ln -sfn "${prof##*/}-8-link" "$prof"
     exit 0
     ;;
-  --switch-generation) gen="$2"; shift 2 ;;
+  --switch-generation)
+    [[ "${FAKE_PROFILE_RESTORE_EXIT:-0}" -eq 0 ]] || exit "$FAKE_PROFILE_RESTORE_EXIT"
+    gen="$2"; shift 2 ;;
   *) shift ;;
   esac
 done
@@ -542,8 +547,12 @@ case "$closure" in
   exit "$rc"
   ;;
 esac
+[[ "${FAKE_SWITCH_OLD_SLEEP:-0}" -eq 0 ]] || sleep "$FAKE_SWITCH_OLD_SLEEP"
 if [[ "$mode" == "boot" ]]; then
   exit "${FAKE_SWITCH_OLD_BOOT_EXIT:-0}"
+fi
+if [[ "${FAKE_SWITCH_OLD_EXIT:-0}" -eq 0 ]]; then
+  ln -sfn "$closure" "${TMP}/run/current-system"
 fi
 exit "${FAKE_SWITCH_OLD_EXIT:-0}"
 FAKE

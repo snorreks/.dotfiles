@@ -20,9 +20,9 @@ Options live in `nixos/options.nix` under `opts.media` and `opts.travel`.
 Every switch is off because none of the three can be **half**-configured
 safely:
 
-* **Jellyfin** — its first-run wizard *creates* the administrator account.
-  Until one exists, any tailnet device can reach the wizard and claim it.
-  Enabling it from a repository is enabling an open admin UI.
+* **Jellyfin** — its first-run wizard creates the administrator account.
+  The backend is pinned to IPv4 loopback; private Serve publication is refused
+  until both the explicit setup marker and the native completed-setup flag agree.
 * **Torrents** — needs a WireGuard credential that cannot honestly be generated
   here. A private key in a git repository is a credential in history.
 * **Syncthing** — propagates deletions, and must not be switched on before the
@@ -42,31 +42,41 @@ missing is your provisioning, which is a deployment step.
 media.jellyfin.enable = true;
 ```
 
-Open Jellyfin over the tailnet, complete the wizard, create an administrator,
-then record that you did:
+Use an authenticated SSH local forward to the server's loopback port, then
+open the forwarded URL locally, complete the wizard, and create an administrator.
+For the default HTTP port:
+
+```console
+ssh -N -L 8096:127.0.0.1:8096 legion-ssh
+# Open http://127.0.0.1:8096 on the client.
+```
+
+Provision the OpenSSH host-key pin first. Then record completion:
 
 ```nix
 media.jellyfin.setupCompleted = true;
 ```
 
-While that is `false` you get a build warning. It does not check for an
-account — it records that you completed the wizard, so the fact is in the diff
-rather than in your memory.
+While the marker is false, Serve refuses publication. At startup, the publisher
+also reads Jellyfin's native `IsStartupWizardCompleted` flag as the Jellyfin user;
+a missing, malformed, or false flag refuses publication and revokes this port's
+old mapping. Neither helper creates users nor modifies authentication/setup state.
 
-### 2. After the setup wizard — three things to do by hand
+The startup helper atomically repins native network binding and the configured
+HTTP port, preserving unrelated XML settings. IPv6 listeners and discovery are
+disabled. This is an inbound boundary, not an outbound metadata policy.
 
-These are **not** applied declaratively, and the reason is stated in
-`jellyfin.nix`: nixpkgs' Jellyfin module exposes no option for them, so
-declaring one would evaluate and silently do nothing.
+### 2. After the setup wizard — review application settings
+
+These application choices remain operator-managed:
 
 * **Dashboard → Playback → Transcoding**: leave *hardware acceleration* off
   until `jellyfin-accel-check` passes (below).
 * **Dashboard → Network → Enable external access**: leave off. The service is
   published through a private Tailscale Serve listener; Jellyfin must not also
   believe it is on the public internet.
-* **Dashboard → Advanced → Intelltutor**: turn it **off**. It is on by default,
-  it phones home, and on a tailnet-reachable server that is a server making
-  outbound requests nobody asked for.
+* Review installed plugins and metadata providers before allowing outbound
+  requests. Do not assume private Serve also enforces an egress policy.
 
 ### 3. The Serve port
 
@@ -143,7 +153,7 @@ the namespace. Inside it, `OUTPUT`'s policy is `DROP` and the tunnel is allowed
 
 ```sh
 iptables -A OUTPUT -o wg0 -j ACCEPT     # while wg0 is absent this matches NOTHING
-iptables -A OUTPUT -j DROP              # so everything falls through to DROP
+iptables -P OUTPUT DROP                # unmatched packets are refused
 ```
 
 Binding qBittorrent to the tunnel is **defence in depth**, not the kill switch.
@@ -156,11 +166,11 @@ separately, or any code that opens its own socket, is not covered by it.
 |---|---|
 | `-o lo` | loopback |
 | `-o wg0` | the tunnel; matches nothing while absent |
-| `-o mtns0` UDP → one numeric endpoint:port | tunnel establishment, and nothing else |
-| `-o mtns0` udp/tcp 53 **DROP** | no DNS outside the tunnel |
+| veth replies to the host proxy's established WebUI connection | proxy responses only |
+| no veth DNS/Internet rule | no namespace DNS or Internet escape |
 | `OUTPUT` **DROP** | policy |
 | `ip6tables OUTPUT` **DROP** | all IPv6 |
-| `INPUT` allow lo, allow host proxy, **DROP** | only the loopback proxy may reach in |
+| `INPUT` allow lo and exact host proxy tuple; reject tunnel WebUI; default **DROP** | no direct tunnel WebUI access |
 
 There is **no default route via the veth** — a `/32` host route to the veth
 peer and nothing more. Routing and netfilter are two independent mechanisms;
@@ -168,10 +178,10 @@ either alone would be a single point of failure.
 
 ### Why the endpoint is numeric
 
-A hostname endpoint needs a DNS query to leave through the veth *before the
-tunnel exists* — which is precisely the bootstrap leak the namespace exists to
-prevent. `netns-up.sh` **refuses** to build a namespace with a non-numeric
-endpoint and says so.
+The WireGuard interface is created on the host and then moved into the namespace.
+Its encrypted UDP socket remains host-born: no endpoint exception, forwarding,
+DNAT or masquerading is needed inside the namespace. A numeric IPv4 endpoint
+keeps bootstrap deterministic; `netns-up.sh` rejects a hostname endpoint.
 
 Resolve once, on the host, and paste the result:
 
@@ -182,16 +192,17 @@ $ getent ahosts vpn.example.com | head -1
 
 ### The host firewall is not touched
 
-**Nothing in this lane changes the host OUTPUT policy.** Not one rule.
+**This lane never changes the host OUTPUT policy.** A narrowly scoped owner rule
+rejects direct backend traffic from any UID other than the dedicated proxy UID.
 
 The existing wg-quick kill-switch in `config/system/networking.nix` is why:
 an OUTPUT rule that rejects everything not marked for the tunnel rejects the
 **tailnet** too, and on a box in a basement that is a lockout. That module
 structurally omits it on a server for exactly this reason.
 
-The only host firewall change when torrents are enabled is an
-interface-scoped **INPUT** port on `mthost`. `mthost` is deliberately **not** in
-`trustedInterfaces`, which accepts everything unconditionally.
+The veth is not a trusted interface. The owner-scoped OUTPUT rejection targets
+only the namespace backend address/port, not general host traffic; no host NAT or
+forwarding is enabled. The proxy binds loopback and authenticates before connecting.
 
 ### The WebUI
 

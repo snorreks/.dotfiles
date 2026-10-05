@@ -374,7 +374,7 @@ in {
   # Tailscale identity, so a key-based builder stalls or is refused by the ACL,
   # reporting from the wrong layer entirely.
   systemd.services.nix-daemon.environment = lib.mkIf (opts.remoteBuilder.enable && opts.headless == false) {
-    NIX_SSHOPTS = "-p ${toString opts.remoteBuilder.port}";
+    NIX_SSHOPTS = "-p ${toString opts.remoteBuilder.port} -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/etc/ssh/ssh_known_hosts";
   };
 
   environment.systemPackages = [

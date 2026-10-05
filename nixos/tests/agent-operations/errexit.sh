@@ -71,7 +71,8 @@ _t_start "ns-agent-backup: a failing restic must not abort before the retry"
 mkdir -p "$TMP/state"
 printf '%s' "$TMP/repo" >"$TMP/creds/RESTIC_REPOSITORY"
 printf 'p\n' >"$TMP/creds/RESTIC_PASSWORD"
-printf 'sources=["%s"]\nexcludes=[]\nquiesceFile=%s/q.conf\n' "$TMP" "$TMP/state" >"$TMP/backup.conf"
+printf 'sources=["%s"]\nexcludes=[]\nquiesceFile="%s/q.conf"\n' "$TMP" "$TMP/state" >"$TMP/backup.conf"
+: >"$TMP/state/q.conf"
 
 # A restic that always fails, and records each attempt.
 #

@@ -306,9 +306,9 @@ rec {
   # resolution at all, the fallback that was supposed to save it had been
   # truncated away by the very mechanism meant to apply it.
   #
-  # So the cap is stated here, next to the list, and `maxnames` is derived
-  # from the list instead of being remembered separately. Returned rather than
-  # computed twice, so a module cannot write one and read the other.
+  # glibc's MAXNS is compiled as THREE. An `options maxnames 4` line
+  # cannot increase it. Servers therefore use one loopback and two numeric
+  # rescue resolvers; desktops keep the two local listeners.
   #
   #   owner     exactly one component listening on :53. dnscrypt-proxy is it.
   #             NetworkManager must keep `dns = "none"` or it races the owner
@@ -330,11 +330,26 @@ rec {
       # Quad9 first, then Cloudflare. Both are numeric, both answer on 53
       # without any name of their own, and neither is a resolver we run.
       rescue = ["9.9.9.9" "1.1.1.1"];
-      nameservers = loopback ++ (if headless then rescue else []);
+      nameservers = if headless then ["127.0.0.1"] ++ rescue else loopback;
     in
     {
       owner = "dnscrypt-proxy";
       nameservers = nameservers;
       maxnames = builtins.length nameservers;
     };
+
+  # Accept raw base64 or an OpenSSH public-key line, not a known_hosts record.
+  travelHostKey = { key, type ? "ssh-ed25519" }:
+    let
+      words = builtins.filter (v: builtins.isString v && v != "") (builtins.split "[[:space:]]+" key);
+      hasType = words != [] && builtins.match "(ssh-.*|ecdsa-.*)" (builtins.head words) != null;
+      value = if hasType then builtins.elemAt words 1 else builtins.head words;
+    in
+      if key == "" then ""
+      else if builtins.match ".*[\n\r].*" key != null
+        || (hasType && (builtins.length words < 2 || builtins.head words != type))
+        || (!hasType && builtins.length words != 1)
+        || builtins.match "[A-Za-z0-9+/]+={0,2}" value == null
+      then throw "travel.serverHostKey must be a single public key matching serverHostKeyType"
+      else "${type} ${value}";
 }

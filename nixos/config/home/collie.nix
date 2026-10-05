@@ -138,16 +138,15 @@ in {
       # bridge that starts before it finds an empty machine and shows the phone
       # a blank dashboard until the next poll.
       #
-      # sops second, so Collie and the agents it describes share one set of
-      # credentials — Collie shells out to git for its Changes view, and the
-      # agents' own credentials come from the same environment.
+      # Agent credentials are scoped at launch, not imported into the user
+      # manager. Collie has its own optional private EnvironmentFile below.
       #
       # 🔴 Wants, never Requires/PartOf. Collie must not be able to hold herdr's
       # startup, and — the reason that is worth a comment in a file about a
       # phone — herdr must not take Collie down with it. Nothing here may ever
       # be able to restart the server holding your live agents.
-      After = ["herdr.service" "sops-import-environment.service"];
-      Wants = ["herdr.service" "sops-import-environment.service"];
+      After = ["herdr.service"];
+      Wants = ["herdr.service"];
     };
 
     Service = {

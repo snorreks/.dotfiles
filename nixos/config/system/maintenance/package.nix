@@ -18,6 +18,7 @@
   nix,
   systemd,
   util-linux,
+  deploymentConfig ? {},
 }:
 writeShellApplication {
   name = "ns-maint";
@@ -36,5 +37,13 @@ writeShellApplication {
   # writeShellApplication runs shellcheck over this text at build time, so a
   # warning here is a build failure on every host. That is intended: this file
   # is the tool that owns the reboot-free maintenance contract.
-  text = builtins.readFile ./ns-maint.sh;
+  # Store-backed configuration survives sudo and systemd-run. Do not preserve
+  # caller-controlled command/path overrides in a privileged executable.
+  text = ''
+    for nm_variable in "''${!NM_@}"; do
+      unset "$nm_variable"
+    done
+  '' + lib.concatStringsSep "\n" (lib.mapAttrsToList
+    (name: value: "export ${name}=${lib.escapeShellArg value}") deploymentConfig)
+    + "\n" + builtins.readFile ./ns-maint.sh;
 }

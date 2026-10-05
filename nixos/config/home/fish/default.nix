@@ -12,11 +12,27 @@
   # conveniences cost you nothing. On a server the same verb means "update every
   # flake input and apply it, unreviewed, to something nobody is sitting at".
   serverHost = opts.headless;
+  # Autoloadable even in a bare pane of an already-running server: do not
+  # depend on that pane having run the new interactiveShellInit/shellInit.
+  # Other launchers can opt in with a real executable; no global PATH shim.
+  childLauncher = pkgs.writeTextDir "__ns_agent_exec.fish" ''
+      function __ns_agent_exec --description 'ready credentials scoped to one actual child'
+          set -l loader "$HOME/.config/agent-ops/secret-env"
+          if set -q SECRET_ENV
+              set loader "$SECRET_ENV"
+          end
+          command "$loader" --ready --exec $argv
+          return $status
+      end
+    '';
 in {
   home.file = {
     # Copy all function files from ./functions to ~/.config/fish/functions
     ".config/fish/functions" = {
-      source = ./functions;
+      source = pkgs.symlinkJoin {
+        name = "fish-functions";
+        paths = [./functions childLauncher];
+      };
     };
 
     # ── Project-specific fish shortcuts (auto-sourced by conf.d) ──
@@ -163,7 +179,9 @@ in {
       #
       #   ns-secrets                       # load ready credentials into this shell
       #   ns-secrets check                 # readiness, no values
-      #   ns-secrets run <cmd> [args...]   # run ONE command with them, scoped
+      #   ns-secrets run <cmd> [args...]   # strict: require all session keys
+      # For OAuth/local-friendly selection: secret-env --ready --exec <cmd>.
+      # For an explicitly required API key: secret-env --name KEY --exec <cmd>.
       #   ns-secrets exec <cmd>            # replace this shell with cmd + creds
       #
       # Nothing here is automatic. A credential arrives when a process asks for
@@ -172,35 +190,18 @@ in {
       # which put all of them into all of them.
       set -gx SECRET_ENV "$HOME/.config/agent-ops/secret-env"
       set -gx SECRET_ENV_MANIFEST "$HOME/.config/agent-ops/secrets.manifest"
-      # The SAME search order secret-env.sh uses, so the convenience path and
-      # the real path do not disagree about where a decrypted credential is.
-      set -gx SECRET_ENV_DIR (string collect -N \
-          (test -n "$CREDENTIALS_DIRECTORY"; and echo "$CREDENTIALS_DIRECTORY") \
-          (test -n "$XDG_RUNTIME_DIR"; and echo "$XDG_RUNTIME_DIR/sops-nix/secrets") \
-          (test -n "$XDG_STATE_HOME"; and echo "$XDG_STATE_HOME/sops-nix/secrets") \
-          (test -n "$HOME"; and echo "$HOME/.local/state/sops-nix/secrets"))
+      # Path lookup, aliases and byte handling belong to the loader alone.
 
       function ns-secrets --description 'load SOPS credentials as data, or check/scope them'
           if test (count $argv) -eq 0
-              # Load into THIS shell. Values are read with `cat` into a fish
-              # variable — fish variables hold bytes, they are never re-parsed,
-              # so a value containing quotes, $(...) or newlines is data.
-              for name in (command $SECRET_ENV --list 2>/dev/null)
-                  # `string collect -N` KEEPS EMBEDDED NEWLINES. A bare
-                  # command substitution splits on newlines and builds a LIST;
-                  # then "$value" joins that list back with SPACES, so a
-                  # three-line PEM key arrived with its newlines replaced by
-                  # spaces — which is exactly the opposite of what the comment
-                  # above this function claims.
-                  #
-                  # The at-most-one-trailing-newline rule is NOT applied here:
-                  # fish has no way to strip exactly one trailing newline from a
-                  # collected string without also affecting a value that
-                  # legitimately ends in one. secret-env.sh already applies that
-                  # rule, and `ns-secrets run` (the path that matters) goes
-                  # through it; this is the convenience path for a shell.
-                  if set -l value (command cat "$SECRET_ENV_DIR/$name" 2>/dev/null | string collect -N)
-                      set -gx "$name" "$value"
+              # Explicit convenience action only; skip unready credentials.
+              # NUL records preserve embedded/trailing newlines and include
+              # aliases. Split only the first '='; never source/eval values.
+              for name in (command $SECRET_ENV --list)
+                  command $SECRET_ENV --name "$name" --check >/dev/null 2>&1; or continue
+                  command $SECRET_ENV --name "$name" --format=nul | while read --null -l pair
+                      set -l fields (string split --max 1 '=' -- "$pair")
+                      set -gx "$fields[1]" "$fields[2]"
                   end
               end
               return 0

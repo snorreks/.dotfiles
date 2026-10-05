@@ -39,13 +39,144 @@
 # explicit fallback and is unaffected by any of this.
 {config, pkgs, lib, opts, ...}: let
   cfg = opts.media.jellyfin;
-  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
-  # its options — which is a decision, not a constant. Reading
-  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
-  # missing" the moment media was enabled with backups off, i.e. in the default
-  # state of every host here. `opts ? agentOps` short-circuits first.
-  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+  safeDirectory = path: lib.hasPrefix "/" path && path != "/"
+    && !(lib.any (part: builtins.elem part ["" "." ".."]) (lib.tail (lib.splitString "/" path)));
+  # Source proof (pinned nixpkgs Jellyfin v12.1):
+  # https://github.com/jellyfin/jellyfin/blob/v12.1/MediaBrowser.Common/Net/NetworkConfiguration.cs
+  # https://github.com/jellyfin/jellyfin/blob/v12.1/src/Jellyfin.Networking/Manager/NetworkManager.cs
+  # FilterBindSettings adds missing 127.0.0.1; GetAllBindInterfaces returns
+  # the filtered interfaces only when nonempty. IgnoreVirtualInterfaces=false
+  # prevents an operator's prefix list from removing lo and causing wildcard
+  # fallback. ApplicationHost.cs consumes InternalHttpPort at startup; the
+  # early startup listener uses the same filter and port in:
+  # https://github.com/jellyfin/jellyfin/blob/v12.1/Jellyfin.Server/ServerSetupApp/SetupServer.cs
+  # Native setup flag: MediaBrowser.Model/Configuration/BaseApplicationConfiguration.cs.
+  nativeConfig = pkgs.writeShellApplication {
+    name = "jellyfin-private-config";
+    runtimeInputs = [pkgs.python3];
+    text = ''
+      python3 - "$@" <<'PY'
+      import os
+      import stat
+      import sys
+      import uuid
+      from xml.dom import minidom
 
+      def directory(path):
+          # No symlink components, including the configured parent directories.
+          fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+          try:
+              for part in path.split("/"):
+                  if not part:
+                      continue
+                  if part in (".", ".."):
+                      raise ValueError()
+                  child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                  os.close(fd)
+                  fd = child
+              return fd
+          except Exception:
+              os.close(fd)
+              raise
+
+      def read_xml(fd, name, root_name, missing=False):
+          try:
+              f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+          except FileNotFoundError:
+              if missing:
+                  return minidom.parseString("<" + root_name + "/>")
+              raise
+          with os.fdopen(f, "rb") as stream:
+              if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                  raise ValueError()
+              data = stream.read()
+          # Do not resolve entities or accept DTDs in application configuration.
+          if b"<!DOCTYPE" in data or b"<!ENTITY" in data:
+              raise ValueError()
+          doc = minidom.parseString(data)
+          if doc.doctype is not None or doc.documentElement.tagName != root_name:
+              raise ValueError()
+          return doc
+
+      def fields(root, name):
+          return [n for n in root.childNodes if n.nodeType == n.ELEMENT_NODE and n.tagName == name]
+
+      fd = None
+      temporary = None
+      try:
+          mode, path = sys.argv[1:3]
+          fd = directory(path)
+          if mode == "check":
+              doc = read_xml(fd, "system.xml", "ServerConfiguration")
+              flags = fields(doc.documentElement, "IsStartupWizardCompleted")
+              if len(flags) != 1 or any(n.nodeType != n.TEXT_NODE for n in flags[0].childNodes):
+                  raise ValueError()
+              if "".join(n.data for n in flags[0].childNodes).strip() not in ("true", "1"):
+                  raise ValueError()
+          elif mode == "pin":
+              port = int(sys.argv[3])
+              if not 1 <= port <= 65535:
+                  raise ValueError()
+              doc = read_xml(fd, "network.xml", "NetworkConfiguration", missing=True)
+              root = doc.documentElement
+              values = {
+                  "LocalNetworkAddresses": None,
+                  "InternalHttpPort": str(port),
+                  "EnableIPv4": "true",
+                  "EnableIPv6": "false",
+                  "IgnoreVirtualInterfaces": "false",
+                  "AutoDiscovery": "false",
+                  "RequireHttps": "false",
+              }
+              for name, value in values.items():
+                  nodes = fields(root, name)
+                  if len(nodes) > 1:
+                      raise ValueError()
+                  node = nodes[0] if nodes else root.appendChild(doc.createElement(name))
+                  for child in list(node.childNodes):
+                      node.removeChild(child)
+                  if value is None:
+                      child = node.appendChild(doc.createElement("string"))
+                      child.appendChild(doc.createTextNode("127.0.0.1"))
+                  else:
+                      node.appendChild(doc.createTextNode(value))
+              # Atomic replacement in the already-open directory; never follow
+              # a destination symlink. No backup containing certificate secrets.
+              temporary = ".network-" + uuid.uuid4().hex
+              out = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+              with os.fdopen(out, "wb") as stream:
+                  stream.write(doc.toxml(encoding="utf-8"))
+                  stream.flush()
+                  os.fsync(stream.fileno())
+              os.replace(temporary, "network.xml", src_dir_fd=fd, dst_dir_fd=fd)
+              temporary = None
+          else:
+              raise ValueError()
+      except Exception:
+          # Never print XML, paths, flag values, or parser exception contents.
+          print("Jellyfin private configuration refused", file=sys.stderr)
+          sys.exit(1)
+      finally:
+          if temporary is not None:
+              os.unlink(temporary, dir_fd=fd)
+          if fd is not None:
+              os.close(fd)
+      PY
+    '';
+  };
+  serveStart = pkgs.writeShellApplication {
+    name = "jellyfin-private-serve";
+    runtimeInputs = [config.services.tailscale.package pkgs.util-linux];
+    text = ''
+      # Revoke only our mapping first, including when opt-in is withdrawn.
+      tailscale serve --https=${toString cfg.serveHttpsPort} off
+      if ! ${if cfg.setupCompleted then "true" else "false"}; then
+        exit 1
+      fi
+      runuser -u jellyfin -- ${lib.getExe nativeConfig} check ${lib.escapeShellArg cfg.configDir}
+      tailscale serve --bg --https=${toString cfg.serveHttpsPort} http://127.0.0.1:${toString cfg.port}
+    '';
+  };
 in {
   services.jellyfin = lib.mkIf cfg.enable {
     enable = true;
@@ -57,25 +188,8 @@ in {
     dataDir = cfg.dataDir;
     configDir = cfg.configDir;
 
-    # 🔴 NOT A STYLISTIC CHOICE, AND NOT AN OVERSIGHT.
-    #
-    # There is no firewall entry for Jellyfin anywhere in this configuration, so
-    # the LAN cannot reach it — not because a rule happens to refuse it, but
-    # because the port is never opened. `openFirewall = false` is the nixpkgs
-    # default and is stated anyway, because the natural "fix" for a transcoding
-    # problem people hit is to flip it, and it should have to be a deliberate
-    # act.
-    #
-    # This is the boundary config/system/networking.nix already draws for ollama
-    # and ComfyUI: the service may listen broadly, the port is never opened, and
-    # `networking.firewall.trustedInterfaces = ["tailscale0"]` means the tailnet
-    # reaches it while the LAN cannot.
-    #
-    # It is the firewall rather than a loopback bind because nixpkgs' jellyfin
-    # module exposes no listen-address option — the address lives in Jellyfin's
-    # own network.xml, which is application state that a module writes into and
-    # an operator also edits. That is a worse place to keep a security boundary
-    # than a port list that can be read off the configuration.
+    # Defense in depth only: trusted tailscale0 bypasses this firewall.
+    # The native loopback bind below is the actual raw-backend boundary.
     openFirewall = false;
 
     # Least privilege. Jellyfin gets its own system account and the `media`
@@ -107,18 +221,9 @@ in {
       );
     };
 
-    # 🔴 INTELLITUTOR IS NOT DISABLED HERE, DELIBERATELY.
-    #
-    # It is on by default upstream and it phones home, and it would be good to
-    # turn off on a tailnet-reachable server. It is left on here because
-    # nixpkgs' jellyfin module exposes no way to set it: it lives in Jellyfin's
-    # own system.xml, which is application state.
-    #
-    # Declaring an `environment` block to set it would evaluate, and would do
-    # nothing — which is worse than not doing it, because the next person reads
-    # the configuration, believes the server is not calling home, and does not
-    # check. docs/media-travel.md § "After the setup wizard" has the actual
-    # click path, and the checklist is not optional.
+    # Loopback binding limits inbound access, not outbound metadata requests.
+    # Review installed plugins and metadata providers separately. Do not invent
+    # a telemetry environment variable or treat private Serve as an egress policy.
   };
 
   users.groups.media = {};
@@ -153,6 +258,12 @@ in {
     "d ${cfg.configDir} 0755 jellyfin media -"
   ];
 
+  # ExecStartPre inherits User=jellyfin from nixpkgs (no '+' root override).
+  # Runs on every restart; never touches wizard, user or authentication state.
+  systemd.services.jellyfin.preStart = lib.mkIf cfg.enable (lib.mkBefore ''
+    ${lib.getExe nativeConfig} pin ${lib.escapeShellArg cfg.configDir} ${toString cfg.port}
+  '');
+
   # ── Private publication ────────────────────────────────────────────────────
   systemd.services.tailscale-serve-jellyfin = lib.mkIf cfg.enable {
     description = "Jellyfin on the node's private Tailscale HTTPS endpoint (${toString cfg.serveHttpsPort})";
@@ -161,20 +272,18 @@ in {
       "tailscaled-autoconnect.service"
       "tailscaled-set.service"
       "network-pre.target"
+      "jellyfin.service"
     ];
+    requires = ["jellyfin.service"];
+    bindsTo = ["jellyfin.service"];
+    partOf = ["jellyfin.service"];
     wants = ["tailscaled.service"];
     wantedBy = ["multi-user.target"];
 
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
-      ExecStart = lib.escapeShellArgs [
-        (lib.getExe config.services.tailscale.package)
-        "serve"
-        "--bg"
-        "--https=${toString cfg.serveHttpsPort}"
-        "http://127.0.0.1:${toString cfg.port}"
-      ];
+      ExecStart = lib.getExe serveStart;
       # THIS PORT ONLY. Never `serve reset`, which erases every mapping on the
       # node — including Collie's 443, which A's reconcile script exists to keep.
       ExecStop = lib.escapeShellArgs [
@@ -222,21 +331,20 @@ in {
   # media/default.nix owns the export service and the heartbeatHook; this module
   # only declares WHAT has to survive, so the two cannot disagree about which
   # database matters.
-  agentOps.backup = lib.mkIf (cfg.enable && backupEnabled) {
-    sources = [
-      {
-        paths = ["${cfg.dataDir}/data"];
-        excludes = [
-          "cache"
-          # Metadata, not state: regenerable and large.
-          "metadata"
-        ];
-      }
-    ];
-  };
+  # Only default.nix registers the application-consistent export tree.
+  # Never register the live SQLite data directory as a raw backup source.
 
   # ── Refusals, and visible half-configured states ──────────────────────────
   assertions = lib.optionals cfg.enable [
+    {
+      assertion = lib.all safeDirectory [cfg.libraryDir cfg.dataDir cfg.configDir];
+      message = "media.jellyfin directories must be canonical absolute non-root paths";
+    }
+    {
+      assertion = builtins.isInt cfg.port && cfg.port > 0 && cfg.port <= 65535
+        && !(builtins.elem cfg.port [22 2222 443]);
+      message = "media.jellyfin.port must not claim SSH or tailnet HTTPS";
+    }
     {
       # Two Serve units claiming one port is a race, not a conflict error.
       assertion = !(cfg.serveHttpsPort == 443 && opts.mobileAgents.collie.enable);
@@ -299,14 +407,11 @@ in {
       media: Jellyfin is enabled but opts.media.jellyfin.setupCompleted is false.
 
       Until a Jellyfin administrator account exists, Jellyfin's first-run setup
-      wizard is open to anyone who can reach the service — and every tailnet
-      device can, through the Serve mapping above. Whoever completes it first
-      becomes the administrator.
-
-      Finish the setup over the tailnet, then set:
-        opts.media.jellyfin.setupCompleted = true;
-
-      The flag does not create or check an account; it records that you did.
+      wizard is available only on localhost; private Serve publication is refused.
+      Bootstrap locally or with an SSH tunnel to 127.0.0.1:${toString cfg.port},
+      then set opts.media.jellyfin.setupCompleted = true and restart publication.
+      Serve also requires Jellyfin's native wizard-completed flag at startup.
+      Neither this opt-in nor its checker creates or modifies any account.
     ''
     ++ lib.optional (cfg.enable && cfg.hardwareAcceleration.enable) ''
       media: hardware transcoding is enabled for Jellyfin. This has not been

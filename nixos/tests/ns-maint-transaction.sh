@@ -69,7 +69,7 @@ export FAKE_SWITCH_CANDIDATE_EXIT
 prepare_and_activate 300
 assert_eq "restored" "$(phase)" "the transaction ends restored, not idle"
 assert_eq "restored-live" "$(rec_field restore_result)" "restoration is reported as having happened"
-assert_contains "$(switch_calls)" "switch $FAKE_RUNNING" "the OLD closure was re-activated, without a reboot"
+assert_contains "$(switch_calls)" "test $FAKE_RUNNING" "the OLD closure was re-activated, without a reboot"
 assert_contains "$(fake_calls)" "profile-at-activation $FAKE_CANDIDATE" "the candidate profile is selected before activation"
 assert_eq "system-7-link" "$(readlink "$NM_PROFILE")" "the original profile generation is restored through Nix"
 assert_contains "$(fake_calls)" "switch-generation 7" "generation restoration uses nix-env"
@@ -157,7 +157,7 @@ assert_ne "$stale" "$fresh" "the second transaction has a different id"
 
 as_ssh_session
 now="$(date +%s)"
-sshd_accepts "$now" 51234
+sshd_accepts "$((now + 1))" 51234
 
 out="$(ns_maint confirm "$stale" 2>&1)" && rc=0 || rc=$?
 assert_ne 0 "$rc" "confirming with the OLD id is refused"
@@ -188,7 +188,7 @@ fixture_new
 prepare_and_activate 300
 as_ssh_session
 now="$(date +%s)"
-sshd_accepts "$now" 51234
+sshd_accepts "$((now + 1))" 51234
 id="$(txid)"
 ns_maint confirm "$id" >"$TMP/log/confirm.out" 2>&1
 assert_eq "confirmed" "$(phase)" "confirm before the deadline wins"
@@ -218,7 +218,7 @@ assert_eq "awaiting-confirm" "$(phase)" "activation finished inside its own wind
 sleep 5
 as_ssh_session
 now="$(date +%s)"
-sshd_accepts "$now" 51234
+sshd_accepts "$((now + 1))" 51234
 id="$(txid)"
 
 ns_maint tick >"$TMP/log/tick.out" 2>&1
@@ -243,7 +243,7 @@ assert_eq "awaiting-confirm" "$(phase)" "activation finished inside its own wind
 sleep 5
 as_ssh_session
 now="$(date +%s)"
-sshd_accepts "$now" 51234
+sshd_accepts "$((now + 1))" 51234
 id="$(txid)"
 out="$(ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
 assert_ne 0 "$rc" "a confirmation after the window closes is refused even before restore"
@@ -267,7 +267,7 @@ export FAKE_SWITCH_CANDIDATE_EXIT FAKE_SWITCH_OLD_EXIT FAKE_SWITCH_OLD_BOOT_EXIT
 prepare_and_activate 300
 assert_eq "restore-failed" "$(phase)" "the phase says the restoration failed"
 detail="$(rec_field restore_detail)"
-assert_contains "$detail" "switch-to-configuration switch failed" "the live failure is recorded"
+assert_contains "$detail" "switch-to-configuration test failed" "the live failure is recorded"
 assert_contains "$detail" "boot also failed" "the boot-intent fallback failure is recorded too"
 out="$(cat "$TMP/log/unit.out")"
 assert_contains "$out" "RESTORATION DID NOT COMPLETE" "the operator is told, in those words"
@@ -373,7 +373,7 @@ assert_gc_root booted "the booted closure is pinned too"
 assert_not_contains "$(fake_calls)" "gc --delete" "no collection is asked to delete generations"
 
 as_ssh_session
-sshd_accepts "$(date +%s)" 51234
+sshd_accepts "$(( $(date +%s) + 1 ))" 51234
 ns_maint confirm "$(txid)" >"$TMP/log/confirm.out" 2>&1
 assert_eq "confirmed" "$(phase)" "the transaction is confirmed before the roots are checked"
 assert_no_gc_root running "confirming releases the recovery closure root"
@@ -385,10 +385,16 @@ fixture_free
 
 t_start "ns-maint gc collects without ever deleting generations"
 fixture_new
-out="$(ns_maint gc --keep 3 2>&1)"
-assert_contains "$(fake_calls)" "nix-store --gc --keep 3" "collection runs with an explicit retention"
-assert_not_contains "$(fake_calls)" "--delete" "and never passes --delete"
-assert_contains "$out" "generations are NOT deleted" "the operator is told that outright"
+out="$(ns_maint gc --keep 3 2>&1)" && rc=0 || rc=$?
+assert_ne 0 "$rc" "unsupported retention safely refuses"
+assert_not_contains "$(fake_calls)" "--gc" "no collection is run"
+assert_contains "$out" "--keep is not supported" "the operator is told why"
+ns_maint gc >"$TMP/log/gc.out" 2>&1
+assert_contains "$(fake_calls)" 'nix-store --gc' 'ordinary collection actually runs'
+assert_not_contains "$(fake_calls)" '--delete-generations' 'generation links are never removed'
+assert_gc_root running 'the running closure is protected before collection'
+assert_gc_root booted 'the booted closure is protected before collection'
+assert_gc_root profile 'the selected profile is protected before collection'
 assert_no_reboot
 t_done
 fixture_free
@@ -414,7 +420,7 @@ new_ts=$(( $(date +%s) + 1 ))
 sshd_accepts "$new_ts" 51234
 ns_maint confirm "$id" >"$TMP/log/confirm.out" 2>&1
 assert_eq "confirmed" "$(phase)" "a new connection confirms"
-assert_contains "$(rec_field confirm_connection)" "after the switch was armed" "and the evidence is stored in the record"
+assert_contains "$(rec_field confirm_connection)" "after APPLY completed" "and the evidence is stored in the record"
 assert_no_reboot
 t_done
 fixture_free
@@ -426,7 +432,7 @@ export FAKE_FAILED_UNITS
 prepare_and_activate 300
 as_ssh_session
 now="$(date +%s)"
-sshd_accepts "$now" 51234
+sshd_accepts "$((now + 1))" 51234
 id="$(txid)"
 out="$(ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
 assert_ne 0 "$rc" "a failed unit blocks confirmation"
@@ -568,7 +574,7 @@ ns_maint activate --timeout 300 >/dev/null 2>&1
 assert_eq "awaiting-confirm" "$(phase)" "activate"
 as_ssh_session
 now="$(date +%s)"
-sshd_accepts "$now" 51234
+sshd_accepts "$((now + 1))" 51234
 ns_maint confirm "$(txid)" >/dev/null 2>&1
 assert_eq "confirmed" "$(phase)" "confirm"
 assert_eq 1 "$(grep -c 'switch switch' "$TMP/log/switch" || true)" "exactly one live activation happened"
@@ -637,7 +643,7 @@ assert_eq 75 "$rc" "the watchdog cannot interleave with activation"
 wait "$activation_pid"
 assert_eq restored "$(phase)" "a hung activation restores without waiting for the watchdog"
 assert_contains "$(rec_field note)" "deadline-expired" "the deadline is recorded as the restore reason"
-assert_contains "$(switch_calls)" "switch $FAKE_RUNNING" "the recovery closure is activated"
+assert_contains "$(switch_calls)" "test $FAKE_RUNNING" "the recovery closure is activated"
 assert_eq system-7-link "$(readlink "$NM_PROFILE")" "the old generation is restored"
 # Written as if/then rather than `cond && ok || fail`: the short form runs the
 # FAILURE branch whenever the success branch returns non-zero, which is a trap
@@ -669,7 +675,9 @@ rm "$NM_PROFILE"
 FAKE_SWITCH_CANDIDATE_EXIT=7
 export FAKE_SWITCH_CANDIDATE_EXIT
 prepare_and_activate 300
-assert_eq restored "$(phase)" "failed activation restores"
+assert_eq restore-failed "$(phase)" "absent profile cannot claim boot intent restored"
+assert_contains "$(switch_calls)" "test $FAKE_RUNNING" "runtime still recovers"
+assert_not_contains "$(switch_calls)" "boot $FAKE_RUNNING" "no invented boot intent"
 assert_no_file "$NM_PROFILE" "the candidate profile is removed"
 if [[ ! -L "$NM_PROFILE" ]]; then
   _ok "no dangling profile remains"
@@ -696,5 +704,282 @@ for pending in armed activating awaiting-confirm restoring; do
   t_done
   fixture_free
 done
+
+t_start "prepare uses the toplevel output and default documented duration"
+fixture_new
+ns_maint prepare >"$TMP/log/prepare.out" 2>&1
+assert_contains "$(fake_calls)" "#nixosConfigurations.legion.config.system.build.toplevel" "prepare selects the real NixOS output"
+ns_maint activate >"$TMP/log/activate.out" 2>&1
+assert_eq awaiting-confirm "$(phase)" "20min default parses and applies"
+assert_eq 1200 "$(( $(rec_field deadline) - $(rec_field armed_at) ))" "default is twenty minutes"
+ns_maint abort >/dev/null 2>&1
+ns_maint prepare >/dev/null 2>&1
+ns_maint activate --timeout 90sec >/dev/null 2>&1
+assert_eq awaiting-confirm "$(phase)" "documented sec duration parses"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "restore keeps distinct runtime and profile intent"
+fixture_new
+distinct_profile="$(fake_store_path profile-intent)"
+make_closure "$distinct_profile" "6.1.0-test"
+ln -sfn "$distinct_profile" "${NM_PROFILE}-7-link"
+FAKE_SWITCH_CANDIDATE_EXIT=7
+export FAKE_SWITCH_CANDIDATE_EXIT
+prepare_and_activate 300
+assert_eq restored "$(phase)" "distinct intents restore successfully"
+assert_eq "$FAKE_RUNNING" "$(readlink -f "$NM_CURRENT_SYSTEM")" "runtime is the recorded runtime"
+assert_eq "$distinct_profile" "$(readlink -f "$NM_PROFILE")" "profile remains the distinct recorded profile"
+assert_contains "$(switch_calls)" "boot $distinct_profile" "profile-derived boot intent is restored"
+assert_gc_root "profile-$(txid)" "distinct profile closure is immutably pinned"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "profile restore failure cannot report green"
+fixture_new
+FAKE_SWITCH_CANDIDATE_EXIT=7
+FAKE_PROFILE_RESTORE_EXIT=9
+export FAKE_SWITCH_CANDIDATE_EXIT FAKE_PROFILE_RESTORE_EXIT
+prepare_and_activate 300
+assert_eq restore-failed "$(phase)" "successful runtime recovery does not hide profile failure"
+assert_contains "$(rec_field restore_detail)" "profile restoration failed" "failure is recorded"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "stage registers a generation and restores profile and boot on failure"
+fixture_new
+ns_maint prepare >/dev/null 2>&1
+FAKE_SWITCH_CANDIDATE_EXIT=7
+export FAKE_SWITCH_CANDIDATE_EXIT
+ns_maint stage >"$TMP/log/stage.out" 2>&1 && rc=0 || rc=$?
+assert_ne 0 "$rc" "failed staging is reported"
+assert_contains "$(fake_calls)" "profile-at-activation $FAKE_CANDIDATE" "candidate was registered before boot generation discovery"
+assert_eq system-7-link "$(readlink "$NM_PROFILE")" "old profile is restored"
+assert_contains "$(switch_calls)" "boot $FAKE_RUNNING" "old boot intent is restored"
+assert_eq "$FAKE_RUNNING" "$(readlink -f "$NM_CURRENT_SYSTEM")" "no live activation occurs"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "restore runtime and boot hangs are bounded"
+fixture_new
+FAKE_SWITCH_CANDIDATE_EXIT=7
+FAKE_SWITCH_OLD_SLEEP=30
+NM_RESTORE_TIMEOUT=1
+export FAKE_SWITCH_CANDIDATE_EXIT FAKE_SWITCH_OLD_SLEEP NM_RESTORE_TIMEOUT
+start=$(date +%s)
+prepare_and_activate 300
+assert_eq restore-failed "$(phase)" "both hung recovery steps fail visibly"
+assert_contains "$(rec_field restore_detail)" "boot also failed" "boot timeout is recorded"
+if [[ $(( $(date +%s) - start )) -lt 10 ]]; then _ok "restore is bounded"; else _fail "restore exceeded bound"; fi
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "store-backed settings survive a clean environment and reject caller NM overrides"
+fixture_new
+# Render the package's configuration prelude around the same source script.
+# Only FAKE_* test controls remain ambient; deployment NM_* inputs are embedded.
+configured="$TMP/bin/ns-maint-configured"
+{
+  printf '#!%s\n' "$(command -v bash)"
+  # Literal package prelude, executed by the child.
+  # shellcheck disable=SC2016
+  printf '%s\n' 'for nm_variable in "${!NM_@}"; do unset "$nm_variable"; done'
+  for name in "${!NM_@}"; do
+    printf 'export %s=%q\n' "$name" "${!name}"
+  done
+  tail -n +2 "$NS_MAINT_SRC"
+} >"$configured"
+chmod +x "$configured"
+# Strip deployment values exactly as sudo and a system manager do. Poisoning
+# caller values must also not replace the embedded host or activation seam.
+clean=(env)
+for name in "${!NM_@}"; do clean+=(-u "$name"); done
+"${clean[@]}" NM_HOST=wrong NM_NIX=/nonexistent "$configured" prepare >"$TMP/log/prepare.out" 2>&1
+assert_eq 0 "$?" "prepare runs with trusted host/flake and commands"
+assert_eq legion "$(rec_field host)" "caller host is ignored"
+"${clean[@]}" NM_SWITCH_TO_CONFIGURATION=/nonexistent "$configured" activate --timeout 90sec >"$TMP/log/activate.out" 2>&1
+assert_eq 0 "$?" "transient activation reloads trusted configuration"
+assert_eq awaiting-confirm "$(phase)" "activation completes without manager NM injection"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "a staged candidate boot is reconciled for explicit confirmation"
+fixture_new
+ns_maint prepare >/dev/null 2>&1
+ns_maint stage >"$TMP/log/stage.out" 2>&1
+assert_eq staged "$(phase)" 'successful staging has a durable distinct phase'
+ln -sfn "$FAKE_CANDIDATE" "$NM_BOOTED_SYSTEM"
+ln -sfn "$FAKE_CANDIDATE" "$NM_CURRENT_SYSTEM"
+ns_maint reconcile >"$TMP/log/reconcile.out" 2>&1
+assert_eq reconciled-booted "$(phase)" 'booting the staged closure still requires confirmation'
+assert_eq '' "$(rec_field deadline)" 'no automatic rollback/reboot is armed at boot'
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "interrupted staging is visible and never retried automatically"
+fixture_new
+ns_maint prepare >/dev/null 2>&1
+ns_maint stage >/dev/null 2>&1
+sed -i 's/^phase=staged$/phase=staging/' "$NM_DIR/record.env"
+: >"$TMP/log/switch"
+ns_maint reconcile >"$TMP/log/reconcile.out" 2>&1 && rc=0 || rc=$?
+assert_ne 0 "$rc" 'a interrupted profile/boot mutation is not a green no-op'
+assert_eq stage-interrupted "$(phase)" 'the durable record requires operator recovery'
+assert_eq '' "$(switch_calls)" 'reconciliation itself touches neither runtime nor boot intent'
+ns_maint abort "$(txid)" >"$TMP/log/abort.out" 2>&1
+assert_eq restored "$(phase)" 'explicit abort restores recorded runtime/profile/boot intent'
+assert_eq system-7-link "$(readlink "$NM_PROFILE")" 'original profile intent is recovered'
+assert_no_reboot
+t_done
+fixture_free
+
+# Closed version-1 wire contract, also usable in a Nix sandbox without .git.
+t_start "version 1 wire remains readable across generations"
+fixture_new
+prepare_and_activate 300
+wire_keys='schema_version phase txid host operation candidate old_running old_profile old_gen booted deadline armed_at activated_at restore_result restore_detail staged_candidate confirmed_at confirm_peer confirm_connection health_failed_units health_checked_at reconciled_at note'
+while IFS='=' read -r key _; do
+  [[ -z "$key" || "$key" == \#* ]] && continue
+  case " $wire_keys " in
+    *" $key "*) ;;
+    *) _fail "wire contains non-version-1 key $key" ;;
+  esac
+done <"$NM_DIR/record.env"
+assert_not_contains "$(<"$NM_DIR/record.env")" 'old_profile_closure=' "derived closure is not persisted"
+# Exercise the ACTUAL original closed reader, read-only, never its mutators.
+# Pin the pre-audit reader: HEAD becomes the fixed implementation after commit.
+legacy_reader_commit=927020cfae1180a2e8b194af8c1858513c8c3727
+if git -C "$HERE" show "$legacy_reader_commit:nixos/config/system/maintenance/ns-maint.sh" >"$TMP/old-reader.sh" 2>/dev/null; then
+  cp "$NM_DIR/record.env" "$TMP/compatible-record"
+  printf 'old_profile_closure=%s\n' "$FAKE_RUNNING" >>"$NM_DIR/record.env"
+  out="$(bash "$TMP/old-reader.sh" status --json 2>&1)" && rc=0 || rc=$?
+  assert_ne 0 "$rc" "pre-audit closed reader rejects the intermediate writer field"
+  assert_contains "$out" "unknown key 'old_profile_closure'" "actual regression is reproduced"
+  cp "$TMP/compatible-record" "$NM_DIR/record.env"
+  for old_phase in awaiting-confirm restoring restored; do
+    sed -i "s/^phase=.*/phase=$old_phase/" "$NM_DIR/record.env"
+    bash "$TMP/old-reader.sh" status --json >"$TMP/old-status.json" 2>&1 && rc=0 || rc=$?
+    assert_eq 0 "$rc" "pre-audit reader accepts fixed $old_phase wire"
+  done
+  sed -i 's/^phase=.*/phase=staging/' "$NM_DIR/record.env"
+  bash "$TMP/old-reader.sh" status --json >"$TMP/old-status.json" 2>&1 && rc=0 || rc=$?
+  assert_ne 0 "$rc" "unsupported staging remains fail closed in the pre-audit reader"
+else
+  printf '    SKIP pre-audit reader smoke: historical Git object unavailable; version-1 wire contract checked above\n'
+fi
+assert_no_reboot
+t_done
+fixture_free
+
+for recovery_case in legacy-gen legacy-direct absolute-gen missing-gen missing-both hint-only conflict malformed-path mismatch-gen corrupt-anchor corrupt-generation hint-conflict; do
+  t_start "captured profile recovery: $recovery_case"
+  fixture_new
+  distinct_profile="$(fake_store_path profile-intent)"
+  make_closure "$distinct_profile" "6.1.0-test"
+  ln -sfn "$distinct_profile" "${NM_PROFILE}-7-link"
+  FAKE_BOOTED="$(fake_store_path booted-C)"
+  make_closure "$FAKE_BOOTED" "6.1.0-test"
+  ln -sfn "$FAKE_BOOTED" "$NM_BOOTED_SYSTEM"
+  if [[ "$recovery_case" == legacy-direct ]]; then
+    ln -sfn "$distinct_profile" "$NM_PROFILE"
+  fi
+  prepare_and_activate 300
+  anchor="$TMP/gcroots/ns-maint-profile-$(txid)"
+  assert_file "$anchor" "transaction-specific anchor exists"
+  case "$recovery_case" in
+    legacy-gen|legacy-direct) rm "$anchor" ;;
+    absolute-gen) sed -i "s|^old_profile=.*|old_profile=${NM_PROFILE}-7-link|" "$NM_DIR/record.env" ;;
+    missing-gen) rm "${NM_PROFILE}-7-link" ;;
+    missing-both) rm "${NM_PROFILE}-7-link" "$anchor" ;;
+    hint-only)
+      rm "${NM_PROFILE}-7-link" "$anchor"
+      printf 'old_profile_closure=%s\n' "$distinct_profile" >>"$NM_DIR/record.env"
+      ;;
+    conflict) ln -sfn "$FAKE_RUNNING" "${NM_PROFILE}-7-link" ;;
+    malformed-path) sed -i 's|^old_profile=.*|old_profile=../system-7-link|' "$NM_DIR/record.env" ;;
+    mismatch-gen) sed -i 's/^old_gen=.*/old_gen=8/' "$NM_DIR/record.env" ;;
+    corrupt-anchor) ln -sfn /tmp/not-a-store-path "$anchor" ;;
+    corrupt-generation) ln -sfn /tmp/not-a-store-path "${NM_PROFILE}-7-link" ;;
+    hint-conflict) printf 'old_profile_closure=%s\n' "$FAKE_RUNNING" >>"$NM_DIR/record.env" ;;
+  esac
+  : >"$TMP/log/switch"
+  ns_maint abort "$(txid)" >"$TMP/log/abort.out" 2>&1 && rc=0 || rc=$?
+  case "$recovery_case" in
+    legacy-gen|legacy-direct|absolute-gen|missing-gen)
+      assert_eq 0 "$rc" "recorded B can be resolved without a persisted derived field"
+      assert_eq restored "$(phase)" "both intents restored"
+      assert_contains "$(switch_calls)" "test $FAKE_RUNNING" "A runtime recovered"
+      assert_contains "$(switch_calls)" "boot $distinct_profile" "B boot intent recovered"
+      assert_eq "$distinct_profile" "$(readlink -f "$NM_PROFILE")" "B profile recovered"
+      ;;
+    missing-both|hint-only)
+      assert_ne 0 "$rc" "lost B cannot produce a green restore"
+      assert_eq restore-failed "$(phase)" "resolution failure recorded"
+      assert_contains "$(switch_calls)" "test $FAKE_RUNNING" "A runtime still recovers"
+      assert_not_contains "$(switch_calls)" "boot " "no A fallback boot"
+      ;;
+    *)
+      assert_ne 0 "$rc" "corrupt captured intent refused"
+      assert_eq '' "$(switch_calls)" "corrupt targets never execute"
+      ;;
+  esac
+  assert_eq "$FAKE_BOOTED" "$(readlink -f "$NM_BOOTED_SYSTEM")" "booted C never changes"
+  assert_no_reboot
+  t_done
+  fixture_free
+done
+
+t_start "GC retains captured B anchor and every generation link"
+fixture_new
+prepare_and_activate 300
+anchor="$TMP/gcroots/ns-maint-profile-$(txid)"
+ln -sfn "$FAKE_OTHER_CANDIDATE" "${NM_PROFILE}-2-link"
+ln -sfn "$FAKE_RUNNING" "${NM_PROFILE}-3-link"
+ns_maint gc >"$TMP/log/gc.out" 2>&1
+assert_file "$anchor" "GC retains transaction anchor"
+for retained_gen in 2 3 7 8; do
+  assert_file "${NM_PROFILE}-${retained_gen}-link" "GC retains generation $retained_gen"
+done
+ns_maint gc --keep 1 >"$TMP/log/gc-keep.out" 2>&1 && rc=0 || rc=$?
+assert_ne 0 "$rc" "--keep remains refused"
+assert_file "$anchor" "refused retention preserves anchor"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "reboot onto A cannot bless interrupted recovery of distinct B"
+fixture_new
+distinct_profile="$(fake_store_path profile-intent)"
+make_closure "$distinct_profile" "6.1.0-test"
+ln -sfn "$distinct_profile" "${NM_PROFILE}-7-link"
+prepare_and_activate 300
+sed -i 's/^phase=.*/phase=restoring/' "$NM_DIR/record.env"
+ln -sfn "$FAKE_RUNNING" "$NM_BOOTED_SYSTEM"
+ln -sfn "$FAKE_RUNNING" "$NM_CURRENT_SYSTEM"
+ns_maint reconcile >"$TMP/log/reconcile.out" 2>&1
+assert_eq restore-failed "$(phase)" "booted A alone cannot establish B restoration"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "unknown ESP capacity refuses staging before profile or boot mutation"
+fixture_new
+ns_maint prepare >"$TMP/log/prepare.out" 2>&1
+printf '#!%s\nexit 1\n' "$(command -v bash)" >"$NM_DF"
+ns_maint stage >"$TMP/log/stage.out" 2>&1 && rc=0 || rc=$?
+assert_ne 0 "$rc" "failed ESP capacity query refuses staging"
+assert_contains "$(<"$TMP/log/stage.out")" "refusing bootloader writes" "inconclusive preflight is fail closed"
+assert_not_contains "$(switch_calls)" "boot " "no boot write after failed preflight"
+assert_eq "$FAKE_RUNNING" "$(readlink -f "$NM_PROFILE")" "selected profile remains intact"
+assert_no_reboot
+t_done
+fixture_free
 
 suite_summary "ns-maint transaction"

@@ -44,8 +44,9 @@
 # RUNNER   absolute path to an executable. It is executed DIRECTLY — never
 #          through a shell — so nothing in it can be word-split, glob-expanded
 #          or command-substituted by this script.
-# HEARTBEAT_FILE  path whose mtime is the liveness signal. Missing or stale ⇒
-#          the run is considered dead and IS relaunched.
+# HEARTBEAT_FILE  path whose mtime is the progress signal. Only a current-boot
+#          PID + start-time record proves ownership; heartbeat alone cannot.
+#          A relaunched run must update this file during its start window.
 #
 # ── Exit codes ───────────────────────────────────────────────────────────────
 #   0  nothing to do, or everything asked for was already running
@@ -72,6 +73,11 @@ MAX_HEARTBEAT_AGE=${MAX_HEARTBEAT_AGE:-3600}
 START_TIMEOUT=${START_TIMEOUT:-120}
 # Marker file a project drops in its root to opt in at all.
 OPT_IN_MARKER=${OPT_IN_MARKER:-.agent-ops-resume}
+# PID/start ticks are only identities within one boot. Never trust an old
+# heartbeat (or a reused PID with the same ticks) as ownership after reboot.
+BOOT_ID=""
+IFS= read -r BOOT_ID </proc/sys/kernel/random/boot_id || exit 2
+[[ -n "$BOOT_ID" ]] || exit 2
 
 declare -a ROOTS=()
 ROOTS_FILE=""
@@ -195,15 +201,22 @@ esac
 slugify() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'; }
 
 # proc_start_time PID — field 22 of /proc/PID/stat, the process start time in
-# clock ticks since boot. Combined with the pid this is a process identity that
-# survives pid reuse: a reused pid has a different start time.
+# clock ticks since boot. Combined with the pid AND boot ID this is a process
+# identity that survives pid reuse and reboot.
 proc_start_time() {
 	local pid="$1"
 	[[ "$pid" =~ ^[0-9]+$ ]] || return 1
 	[[ -r "/proc/$pid/stat" ]] || return 1
 	# comm can contain spaces and parentheses; everything after the LAST ')'
 	# is positionally stable, so cut there first.
-	awk '{ i = index($0, ")"); rest = substr($0, i + 2); split(rest, f, " "); print f[20] }' "/proc/$pid/stat"
+	local stat rest ticks state
+	IFS= read -r stat <"/proc/$pid/stat" || return 1
+	rest="${stat##*) }"
+	state="${rest%% *}"
+	[[ "$state" != Z && "$state" != X && "$state" != x ]] || return 1
+	ticks="$(awk '{print $20}' <<<"$rest")" || return 1
+	[[ "$ticks" =~ ^[0-9]+$ ]] || return 1
+	printf '%s\n' "$ticks"
 }
 
 record_path() { printf '%s/records/%s' "$STATE_DIR" "$(slugify "$1")"; }
@@ -287,7 +300,7 @@ run_task() {
 	fi
 
 	# ---- identity of the previously recorded run
-	local rec pid pid_start alive=0
+	local rec pid pid_start recorded_boot alive=0
 	rec="$(record_path "$root/$name")"
 	pid=""
 	pid_start=""
@@ -298,7 +311,10 @@ run_task() {
 		# this codebase.
 		pid="$(grep -o '^PID=.*' "$rec" 2>/dev/null | head -1 | cut -d= -f2- || true)"
 		pid_start="$(grep -o '^PID_START=.*' "$rec" 2>/dev/null | head -1 | cut -d= -f2- || true)"
-		if [[ "$pid" =~ ^[0-9]+$ ]]; then
+		recorded_boot="$(grep -o '^BOOT_ID=.*' "$rec" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+		if [[ "$recorded_boot" != "$BOOT_ID" ]]; then
+			say "task '$name': prior/unknown boot record — heartbeat is not ownership."
+		elif [[ "$pid" =~ ^[0-9]+$ ]]; then
 			local cur_start
 			if cur_start="$(proc_start_time "$pid")" && [[ "$cur_start" == "$pid_start" ]]; then
 				alive=1
@@ -325,12 +341,8 @@ run_task() {
 		release_lock
 		return
 	fi
-	if ((beat_age <= MAX_HEARTBEAT_AGE)) && ((FORCE == 0)) && ((alive == 0)) && [[ -n "$heartbeat" ]]; then
-		say "task '$name': heartbeat is ${beat_age}s old (limit ${MAX_HEARTBEAT_AGE}s) and no pid is recorded."
-		say "              Assuming another launcher owns it. Use --force to override."
-		release_lock
-		return
-	fi
+	# A heartbeat measures progress, not ownership. Only a live process with
+	# matching PID, start ticks AND boot ID can suppress a resume.
 
 	if ((DRY_RUN == 1)); then
 		say "DRY-RUN task '$name': would launch '$runner' in '$root' (heartbeat ${heartbeat:-none}, last seen ${beat_age}s ago)."
@@ -339,6 +351,10 @@ run_task() {
 		return
 	fi
 
+	local previous_heartbeat=""
+	if [[ -n "$heartbeat" && -e "$heartbeat" ]]; then
+		previous_heartbeat="$(stat -c %y "$heartbeat" 2>/dev/null || true)"
+	fi
 	say "task '$name': launching '$runner' in '$root'."
 	# A separate service owns its own cgroup and survives this oneshot's exit.
 	# setsid only detaches the session; it is sufficient outside systemd.
@@ -381,6 +397,17 @@ run_task() {
 		new_pid="$(tr -dc '0-9' <"$out/$name.pid" 2>/dev/null || true)"
 	fi
 
+	# Capture identity before waiting: a heartbeat alone is not a live runner.
+	local start_time="" current_start=""
+	if ! start_time="$(proc_start_time "$new_pid")"; then
+		sayf "task '$name': runner exited before establishing a live identity."
+		sayf "  see $out/$name.log"
+		[[ -z "$task_unit" ]] || systemctl --user stop "$task_unit" 2>/dev/null || true
+		RC=1
+		release_lock
+		return
+	fi
+
 	# ---- wait for the first heartbeat, so a task that dies on startup is
 	# caught here instead of being reported as successfully resumed.
 	local waited=0
@@ -390,16 +417,19 @@ run_task() {
 			local m2 n2
 			m2="$(stat -c %Y "$heartbeat" 2>/dev/null || echo 0)"
 			n2="$(date +%s)"
-			((n2 - m2 <= MAX_HEARTBEAT_AGE)) && beat_seen=1
+			if [[ "$(stat -c %y "$heartbeat" 2>/dev/null || true)" != "$previous_heartbeat" ]] &&
+				((n2 - m2 <= MAX_HEARTBEAT_AGE)); then
+				beat_seen=1
+			fi
 		fi
-		if ((beat_seen == 1)); then break; fi
-		if [[ -n "$new_pid" && ! -d "/proc/$new_pid" ]]; then
-			sayf "task '$name': process $new_pid exited before writing a heartbeat."
+		if ! current_start="$(proc_start_time "$new_pid")" || [[ "$current_start" != "$start_time" ]]; then
+			sayf "task '$name': process $new_pid exited or changed identity during startup."
 			sayf "  see $out/$name.log"
 			RC=1
 			release_lock
 			return
 		fi
+		if ((beat_seen == 1)); then break; fi
 		sleep 2
 		waited=$((waited + 2))
 	done
@@ -418,14 +448,19 @@ run_task() {
 		return
 	fi
 
-	local start_time=""
-	start_time="$(proc_start_time "$new_pid" || true)"
+	if ! current_start="$(proc_start_time "$new_pid")" || [[ "$current_start" != "$start_time" ]]; then
+		sayf "task '$name': no matching live runner remains; refusing a running record."
+		RC=1
+		release_lock
+		return
+	fi
 	{
 		printf 'NAME=%s\n' "$name"
 		printf 'ROOT=%s\n' "$root"
 		printf 'RUNNER=%s\n' "$runner"
 		printf 'PID=%s\n' "$new_pid"
 		printf 'PID_START=%s\n' "$start_time"
+		printf 'BOOT_ID=%s\n' "$BOOT_ID"
 		printf 'STARTED_AT=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	} >"$rec"
 

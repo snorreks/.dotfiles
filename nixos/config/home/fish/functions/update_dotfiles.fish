@@ -44,8 +44,9 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
         set REPO "$NM_DOTFILES_REPO"
     end
 
-    if not test -d "$REPO/.git"
-        echo "update_dotfiles: $REPO is not a git repository" >&2
+    set -l top (command git -C "$REPO" rev-parse --show-toplevel 2>/dev/null)
+    if test -z "$top"; or test (realpath -m -- "$REPO") != (realpath -m -- "$top")
+        echo "update_dotfiles: $REPO is not a git worktree root" >&2
         return 1
     end
 
@@ -60,7 +61,7 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
     function _ud_guard_not_master
         set -l repo $argv[1]
         set -l branch (command git -C "$repo" branch --show-current)
-        if test "$branch" = "master"
+        if test -z "$branch"; or contains -- "$branch" master main
             echo "update_dotfiles: refusing to work directly on master." >&2
             echo "  Create a topic branch first:  update_dotfiles branch <name>" >&2
             return 1
@@ -80,7 +81,7 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
         set -l repo $argv[1]
         set -l files $argv[2..-1]
 
-        set -l forbidden '*.age' '*.key' 'id_rsa*' 'keys.txt' \
+        set -l forbidden '*.age' '*.key' 'id_rsa*' 'id_ed25519*' 'id_ecdsa*' 'keys.txt' \
             'nixos/secrets.nix' 'nixos/local.nix' \
             'nixos/config/home/files/.ssh/*' 'nixos/config/home/files/.aws/*' \
             'nixos/config/home/vpn/configs/*' '*__pycache__*' '*/target/*' 'result*'
@@ -109,11 +110,12 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 return 1
             end
 
-            set -l rel (string replace -- "$root/" '' $abs)
-            if test -z "$rel" || test "$rel" = "$abs"
-                echo "update_dotfiles: refusing to stage '$path' — it is the repository root." >&2
+            set -l prefix "$root/"
+            if test (string sub --length (string length -- "$prefix") -- "$abs") != "$prefix"
+                echo "update_dotfiles: refusing to stage '$path' — it is outside the repository." >&2
                 return 1
             end
+            set -l rel (string sub --start (math (string length -- "$prefix") + 1) -- "$abs")
 
             # A directory is never something to stage, and `stage .` is
             # `git add -A` with extra steps — the exact behaviour this
@@ -179,8 +181,9 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 return 1
             end
             _ud_guard_staging_paths "$REPO" $argv; or return 1
-            # `--` before the paths so a filename cannot be read as an option.
-            command git -C $REPO add -- $argv
+            # `--` stops option parsing, NOT Git pathspec expansion. A quoted
+            # '*.txt' or ':(glob)*' used to bypass every private-path guard.
+            command git --literal-pathspecs -C $REPO add -- $argv; or return 1
             echo "staged: $argv"
             echo "review with:  update_dotfiles review"
 
@@ -189,7 +192,7 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 echo "update_dotfiles: unstage needs at least one path." >&2
                 return 1
             end
-            command git -C $REPO restore --staged -- $argv
+            command git --literal-pathspecs -C $REPO restore --staged -- $argv
 
         case review
             if command git -C $REPO diff --cached --quiet
@@ -217,7 +220,7 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 echo "update_dotfiles: branch needs a name." >&2
                 return 1
             end
-            command git -C $REPO switch -c "$argv"
+            command git -C $REPO switch -c "$argv"; or return 1
             echo "on branch: $argv"
 
         case push
@@ -275,6 +278,11 @@ function update_dotfiles --description "Scoped, reviewable dotfiles changes (no 
                 if test "$abs" = "$root"
                     echo "update_dotfiles: refusing to chown the repository root ($root)." >&2
                     echo "  Name the specific file or subdirectory instead." >&2
+                    return 1
+                end
+                set -l prefix "$root/"
+                if test (string sub --length (string length -- "$prefix") -- "$abs") != "$prefix"
+                    echo "update_dotfiles: refusing to chown outside the repository ($abs)." >&2
                     return 1
                 end
                 set -a targets $abs

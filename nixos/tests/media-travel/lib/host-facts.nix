@@ -36,6 +36,7 @@ let
     "tailscale-serve-syncthing"
     "media-netns"
     "media-netns-audit"
+    "media-netns-watchdog"
     "media-tunnel"
     "media-webui-proxy"
     "media-state-export"
