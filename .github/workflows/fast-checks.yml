@@ -87,6 +87,9 @@ jobs:
         # part of a flake". This is the same form tests/README.md documents.
         run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.repo-contracts-shells
 
+      - name: Mango generated config validation (both hosts, no activation)
+        run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.mango-config
+
       - name: sys-daemon HTTP admission and process-kill tests
         run: nix build --print-build-logs -L ./nixos#checks.x86_64-linux.repo-contracts
 

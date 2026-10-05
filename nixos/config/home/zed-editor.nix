@@ -17,7 +17,11 @@
       "html"
       "codebook"
       # "deno" is removed; Zed will default to the standard TS LSP
-      # "biome" is assumed to be installed locally or handled by Zed
+      # "biome" used to be left out on the theory that Zed "handled" it. Zed
+      # resolved both the project-local biome and its own bundled copy, and the
+      # log carried "duplicate textDocument/formatting registration
+      # biome_formatting". Declaring it here gives exactly one, managed server.
+      "biome"
     ];
 
     userSettings = {
@@ -96,7 +100,10 @@
       theme = {
         mode = "dark";
         light = "One Light";
-        dark = "Dynamic";
+        # Zed resolves an installed theme by FILE STEM, not by the "name" field
+        # inside it. The generated theme is dynamic.json and its internal name
+        # is "Dynamic", so asking for "Dynamic" logged: theme not found: Dynamic.
+        dark = "dynamic";
       };
 
       node = {
@@ -113,11 +120,14 @@
       # --- Font and Appearance ---
       buffer_font_family = "JetBrainsMono Nerd Font Mono";
       buffer_font_size = 16;
-      buffer_font_features = {ligatures = true;};
+      # OpenType feature TAGS with a value. `ligatures` is not a tag; Zed
+      # rejected it on every settings parse ("Incorrect font feature tag:
+      # ligatures"). `calt` is the contextual-alternates tag that ligatures use.
+      buffer_font_features = {calt = true;};
 
       ui_font_family = "JetBrainsMono Nerd Font Mono";
       ui_font_size = 16;
-      ui_font_features = {ligatures = true;};
+      ui_font_features = {calt = true;};
 
       # --- Transparency / Blur ---
       # Transparent: backgrounds, title bar, tab bar
@@ -186,7 +196,7 @@
         };
         env = {};
         font_family = "JetBrainsMono Nerd Font Mono";
-        font_features = {ligatures = true;};
+        font_features = {calt = true;};
         font_size = 16;
         line_height = "comfortable";
         option_as_meta = false;
@@ -203,18 +213,16 @@
           };
         };
         nix = {
+          # Zed's nix extension runs `nil`, not `nixd`. `path_lookup` found
+          # nothing (nil is not in the store), so every Nix file logged:
+          #   Failed to start language server "nil": nil must be installed
+          #   manually.
+          # The settings block below used to configure `nixd`, which this
+          # extension no longer speaks, so it was dead config; nixd's
+          # sema-escaping-with suppression has no nil equivalent and is gone.
+          # Nix files are still formatted, by languages.Nix.formatter below.
           binary = {
-            path_lookup = true;
-          };
-          settings = {
-            "nixd" = {
-              "formatting" = {
-                "command" = ["${pkgs.alejandra}/bin/alejandra"];
-              };
-              "diagnostic" = {
-                "suppress" = ["sema-escaping-with"];
-              };
-            };
+            path = "${pkgs.nil}/bin/nil";
           };
         };
         gdscript = {

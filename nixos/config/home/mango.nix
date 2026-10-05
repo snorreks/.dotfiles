@@ -9,7 +9,31 @@
   _ = lib.getExe;
   c = config.lib.stylix.colors;
   theme = import ./theme/lib.nix {inherit lib;};
+  mango = config.wayland.windowManager.mango;
+  # The current upstream HM module still emits the removed exec-once key.
+  # Keep its session activation semantics, but launch with the new exec_once.
+  autostart = pkgs.writeShellScript "mango-autostart" ''
+    ${lib.optionalString mango.systemd.enable ''
+      ${pkgs.dbus}/bin/dbus-update-activation-environment --systemd ${lib.concatStringsSep " " mango.systemd.variables};
+      ${lib.concatStringsSep " && " mango.systemd.extraCommands}
+    ''}
+    ${autostartBody}
+  '';
+  autostartBody = ''
+    # 0. XDG Portals (CRITICAL for screen sharing / file pickers)
+    # Import the session environment above, then restart backends first.
+    (
+      systemctl --user restart xdg-desktop-portal-wlr.service xdg-desktop-portal-gtk.service
+      systemctl --user restart xdg-desktop-portal.service
+    ) &
+    wall-change &
+    ${_ pkgs.thunderbird} &
+  '';
 in {
+  xdg.configFile."mango/autostart.sh" = {
+    source = autostart;
+    executable = true;
+  };
   wayland.windowManager.mango = {
     enable = true;
 
@@ -18,32 +42,8 @@ in {
       variables = ["--all"];
     };
 
-    # ── Autostart ─────────────────────────────────────────────────────────
-    autostart_sh = ''
-      # 0. XDG Portals (CRITICAL for screen sharing / file pickers)
-      # home-manager's autostart header already runs
-      #   dbus-update-activation-environment --systemd --all
-      # before this script, so a second, narrower export here is redundant.
-      # What IS needed is restarting the portal *backends* too, not just the
-      # frontend: the user systemd manager survives logout, so on a re-login the
-      # already-running wlr/gtk backends would keep the previous session's
-      # WAYLAND_DISPLAY and screencasting silently breaks. Backends first, then
-      # the frontend, so it re-discovers them.
-      (
-        systemctl --user restart xdg-desktop-portal-wlr.service xdg-desktop-portal-gtk.service
-        systemctl --user restart xdg-desktop-portal.service
-      ) &
-
-      # 1. Background Daemons (Notifications & Wallpapers)
-      # wall-change restores the saved default wallpaper (see wall-change.sh)
-      wall-change &
-
-      # 3. Declarative Silent Apps
-      # NOTE: solaar used to be launched here. It now runs as a supervised
-      # systemd user service (config/home/mouse.nix) — and, more importantly,
-      # device settings no longer depend on it being up at all.
-      ${_ pkgs.thunderbird} &
-    '';
+    # Use our equivalent script until the upstream autostart spelling is fixed.
+    autostart_sh = "";
 
     # ── Settings ──────────────────────────────────────────────────────────
     # Colors are NOT here — they live in `extraConfig` below (single source:
@@ -52,23 +52,24 @@ in {
     settings = {
       # ── Window Appearance & Geometry ───────────────────────────────
       border_radius = 8;
-      borderpx = 1; # Slightly thicker border for accent pop
+      exec_once = "~/.config/mango/autostart.sh";
+      border_px = 1; # Slightly thicker border for accent pop
       no_border_when_single = 1;
 
       # ── Window Gaps (Padding Around Windows) ─────────────────────────
       # Inner Gaps (spacing between adjacent tiled windows)
-      gappih = 2; # Horizontal inner gap
-      gappiv = 2; # Vertical inner gap
+      gap_inner_horizontal = 2; # Horizontal inner gap
+      gap_inner_vertical = 2; # Vertical inner gap
 
       # Outer Gaps (spacing between windows and screen edges/Waybar)
-      gappoh = 4; # Horizontal outer gap
-      gappov = 4; # Vertical outer gap
+      gap_outer_horizontal = 4; # Horizontal outer gap
+      gap_outer_vertical = 4; # Vertical outer gap
 
       # Smart Gaps: Automatically removes gaps when only 1 window is visible
-      smartgaps = 1;
+      smart_gaps = 1;
 
-      # Try syncobj_enable=1 in your mango settings block as a separate experiment from the gamescope fixes above — mango's own docs note it fixes flicker/hangs in some Electron/game surfaces, though it's occasionally the opposite problem on other GPUs, so test it both ways:
-      syncobj_enable = 1;
+      # Sync objects can help flicker/hangs, but remain GPU-dependent.
+      sync_obj_enable = 1;
 
       # Opacity: fully opaque allows direct-scanout on one output, eliminating
       # recomposition and slashing CPU usage. Per-app overrides below set opacity
@@ -91,10 +92,10 @@ in {
 
       # ── Keyboard & Input ──────────────────────────────────────────────
       xkb_rules_layout = "us,no";
-      numlockon = 1;
+      numlock_on = 1;
 
       # Mouse & Focus
-      sloppyfocus = 1;
+      sloppy_focus = 1;
       focus_on_activate = 1;
       drag_tile_to_tile = 1; # 0 make file drag-and-drop lag less across windows
 
@@ -112,16 +113,16 @@ in {
       # ── Layout Settings ───────────────────────────────────────────────
       circle_layout = "tile,vertical_tile";
       new_is_master = 1;
-      default_mfact = 0.55;
+      default_master_factor = 0.55;
 
       # ── Monitor Rules ─────────────────────────────────────────────────
       # Per-host rules from opts.monitorrule (default: laptop-only; see
       # hosts/legion/options.nix for the 3-monitor desktop setup).
       # rr:0 = normal (0°), rr:1 = 90° rotation (portrait)
-      monitorrule = opts.monitorrule;
+      monitor_rule = opts.monitorrule;
 
       # ── Tag Layout Rules ──────────────────────────────────────────────
-      tagrule = [
+      tag_rule = [
         "id:1,monitor_name:HDMI-A-1,layout_name:tile"
         "id:2,monitor_name:eDP-1,layout_name:tile"
         "id:3,monitor_name:DP-1,layout_name:tile"
@@ -134,59 +135,59 @@ in {
       ];
 
       # ── Window Rules ──────────────────────────────────────────────────
-      windowrule = [
+      window_rule = [
         # Floating Rules
-        "appid:pwvucontrol,isfloating:1,width:700,height:450"
-        "appid:SoundWireServer,isfloating:1,tags:5,isopensilent:1"
-        "title:^float_${opts.defaultTerminal}$,isfloating:1,width:950,height:600"
+        "app_id:pwvucontrol,is_floating:1,width:700,height:450"
+        "app_id:SoundWireServer,is_floating:1,tags:5,is_open_silent:1"
+        "title:^float_${opts.defaultTerminal}$,is_floating:1,width:950,height:600"
         # PiP: open silently (auto-PiP on tab switch no longer steals focus),
         # still clickable/interactive and minimizable once focused
-        "title:^Picture-in-Picture$,isfloating:1,isglobal:1,isnoborder:1,isopensilent:1,istagsilent:1"
+        "title:^Picture-in-Picture$,is_floating:1,is_global:1,no_border:1,is_open_silent:1,is_tag_silent:1"
 
         # Bluetooth TUI popup
-        "title:^bluetuith-popup$,isfloating:1"
+        "title:^bluetuith-popup$,is_floating:1"
 
         # Game & Wine Helper Floating Matches
-        "title:^.*[.][eE][xX][eE]$,isfloating:1"
-        "appid:^regsvr32$,isfloating:1"
-        "appid:transmission,isfloating:1"
-        "appid:^\.sameboy-wrapped$,isfloating:1"
-        "title:^Firefox — Sharing Indicator$,isfloating:1"
-        "appid:file_progress,isfloating:1"
-        "appid:confirm,isfloating:1"
-        "appid:dialog,isfloating:1"
-        "appid:download,isfloating:1"
-        "appid:notification,isfloating:1"
-        "appid:error,isfloating:1"
-        "appid:confirmreset,isfloating:1"
-        "title:^Open File$,isfloating:1"
-        "title:^branchdialog$,isfloating:1"
-        "title:^Confirm to replace files$,isfloating:1"
-        "title:^File Operation Progress$,isfloating:1"
+        "title:^.*[.][eE][xX][eE]$,is_floating:1"
+        "app_id:^regsvr32$,is_floating:1"
+        "app_id:transmission,is_floating:1"
+        "app_id:^\.sameboy-wrapped$,is_floating:1"
+        "title:^Firefox — Sharing Indicator$,is_floating:1"
+        "app_id:file_progress,is_floating:1"
+        "app_id:confirm,is_floating:1"
+        "app_id:dialog,is_floating:1"
+        "app_id:download,is_floating:1"
+        "app_id:notification,is_floating:1"
+        "app_id:error,is_floating:1"
+        "app_id:confirmreset,is_floating:1"
+        "title:^Open File$,is_floating:1"
+        "title:^branchdialog$,is_floating:1"
+        "title:^Confirm to replace files$,is_floating:1"
+        "title:^File Operation Progress$,is_floating:1"
 
         # Steam Popups & Dialogs (Properties, Settings, Friends, etc.)
-        "appid:steam,isglobal:1"
-        "title:^Steam$,isglobal:1"
-        "title:^.*[-—] Properties$,isfloating:1,isglobal:1"
-        "title:^Steam - Settings$,isfloating:1,isglobal:1"
-        "title:^Steam.*News$,isglobal:1"
+        "app_id:steam,is_global:1"
+        "title:^Steam$,is_global:1"
+        "title:^.*[-—] Properties$,is_floating:1,is_global:1"
+        "title:^Steam - Settings$,is_floating:1,is_global:1"
+        "title:^Steam.*News$,is_global:1"
 
         # Opacity Tweaks (Set focused & unfocused EQUAL for pcmanfm-qt to eliminate drag lag)
-        "appid:^pcmanfm-qt$,focused_opacity:1.0,unfocused_opacity:1.0"
-        "appid:^pcmanfm$,focused_opacity:1.0,unfocused_opacity:1.0"
-        "appid:^${opts.defaultFileManager}$,focused_opacity:1.0,unfocused_opacity:1.0"
-        "appid:zen,focused_opacity:0.95,unfocused_opacity:0.88"
-        "appid:zed,focused_opacity:0.96,unfocused_opacity:0.92"
+        "app_id:^pcmanfm-qt$,focused_opacity:1.0,unfocused_opacity:1.0"
+        "app_id:^pcmanfm$,focused_opacity:1.0,unfocused_opacity:1.0"
+        "app_id:^${opts.defaultFileManager}$,focused_opacity:1.0,unfocused_opacity:1.0"
+        "app_id:zen,focused_opacity:0.95,unfocused_opacity:0.88"
+        "app_id:zed,focused_opacity:0.96,unfocused_opacity:0.92"
 
         # Media & Canvas Opacity Overrides (Always Solid)
         "title:^.*imv.*$,focused_opacity:1.0,unfocused_opacity:1.0"
         "title:^.*mpv.*$,focused_opacity:1.0,unfocused_opacity:1.0"
-        "appid:aseprite,focused_opacity:1.0,unfocused_opacity:1.0"
-        "appid:unity,focused_opacity:1.0,unfocused_opacity:1.0"
+        "app_id:aseprite,focused_opacity:1.0,unfocused_opacity:1.0"
+        "app_id:unity,focused_opacity:1.0,unfocused_opacity:1.0"
 
         # Declarative background / silent apps
-        "appid:thunderbird,tags:9,isopensilent:1"
-        "appid:discord,tags:4,isopensilent:1"
+        "app_id:thunderbird,tags:9,is_open_silent:1"
+        "app_id:discord,tags:4,is_open_silent:1"
 
         # Gamescope. Two things make the obvious rule wrong:
         #   * its app_id is the *wrapper* binary name, `.gamescope-wrapped`,
@@ -195,7 +196,7 @@ in {
         #     Proton game makes gamescope's own toplevel match the
         #     `title:^.*\.exe$` float rule above.
         # Hence: match on the real app_id, and keep this last so it wins.
-        "appid:^\\.gamescope-wrapped$,isfloating:0,isfullscreen:1,isglobal:1"
+        "app_id:^\\.gamescope-wrapped$,is_floating:0,is_fullscreen:1,is_global:1"
       ];
 
       # ── Keybindings ───────────────────────────────────────────────────

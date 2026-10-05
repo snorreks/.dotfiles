@@ -200,7 +200,9 @@
     mango_config="$HOME/.config/mango/config.conf"
     if [ -f "$mango_config" ] && [ -f "$THEME_DIR/mango-colors.conf" ]; then
         need_reload=0
-        color_keys='^(focuscolor|bordercolor|rootcolor|urgentcolor|scratchpadcolor|maximizescreencolor|globalcolor|overlaycolor) = '
+        # Remove both schemas so a pre-migration dynamic file is upgraded too.
+        color_keys='^(focus_color|border_color|root_color|urgent_color|scratchpad_color|maximized_screen_color|global_color|overlay_color|focuscolor|bordercolor|rootcolor|urgentcolor|scratchpadcolor|maximizescreencolor|globalcolor|overlaycolor)[[:space:]]*='
+
         if [ -L "$mango_config" ]; then
             # HM-managed static symlink — only dynamic mode touches it
             if [ "$mode" = "dynamic" ]; then

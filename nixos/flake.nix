@@ -433,6 +433,27 @@
     # belong to the repo-contracts PR; adding them here would mean every
     # sequential PR carries the noise of the last one.
     checks.${system} = {
+      # Build the real HM config, not just its drvPath: Mango's -p validator
+      # catches upstream keyword changes only when this derivation is built.
+      mango-config = let
+        pkgs = nixpkgs.legacyPackages.${system};
+        lib = nixpkgs.lib;
+        homes = map (host: allHosts.${host}.config.home-manager.users.sonny) ["legion" "gs65"];
+      in pkgs.runCommand "mango-config-check" {nativeBuildInputs = [pkgs.bash pkgs.gnugrep];} ''
+        ${lib.concatMapStringsSep "\n" (hm: ''
+          test "$(grep -c '^exec_once = ' ${hm.xdg.configFile."mango/config.conf".source})" = 1
+          if grep -Eq '^(exec-once|borderpx|gappih|gappiv|gappoh|gappov|monitorrule|tagrule|windowrule|focuscolor|bordercolor) *=' \
+            ${hm.xdg.configFile."mango/config.conf".source}; then
+            echo "obsolete Mango configuration keyword" >&2
+            exit 1
+          fi
+          bash -n ${hm.xdg.configFile."mango/autostart.sh".source}
+          grep -q 'dbus-update-activation-environment --systemd --all' ${hm.xdg.configFile."mango/autostart.sh".source}
+          grep -q 'start mango-session.target' ${hm.xdg.configFile."mango/autostart.sh".source}
+        '') homes}
+        touch "$out"
+      '';
+
       maintenance-contracts =
         nixpkgs.legacyPackages.${system}.runCommand
         "maintenance-contracts"
