@@ -26,7 +26,7 @@
 {
   pkgs,
   maintenanceModule,
-  maintenancePackage,
+  maintenancePackage, # retained caller API; module installs its configured package
   testDir,
   username ? "maintenance",
   hostname ? "legion-vm",
@@ -74,9 +74,8 @@
     esac
     case "$outcome" in
     success)
+      [ "$mode" != boot ] || exit 0
       mkdir -p /nix/var/nix/profiles
-      ln -sfn "$closure" /nix/var/nix/profiles/vm-candidate-link
-      ln -sfn /nix/var/nix/profiles/vm-candidate-link /nix/var/nix/profiles/system
       ln -sfn "$closure" /run/current-system
       exit 0
       ;;
@@ -130,6 +129,9 @@
       printf 'candidate=${candidateSystem}\n'
       printf 'old_running=%s\n' "$current"
       printf 'old_profile=%s\n' "$genlink"
+      if [ -n "$genlink" ]; then
+        printf 'old_profile_closure=%s\n' "$(readlink -f /nix/var/nix/profiles/system)"
+      fi
       printf 'old_gen=\n'
       printf 'booted=%s\n' "$booted"
       printf 'deadline=%s\n' "$((now + offset))"
@@ -189,7 +191,7 @@ in
           services.xserver.enable = false;
           documentation.enable = false;
 
-          environment.systemPackages = [maintenancePackage];
+          # Use the configured package installed by maintenanceModule.
 
           # `maintenance.activationCommand` is the seam. It exists in production
           # too — it is how an operator wraps activation — and the shell suite's
@@ -211,15 +213,11 @@ in
           # A faster watchdog than the real 30s one, so the VM test does not
           # spend minutes waiting for a timer that is otherwise correct.
           systemd.services.ns-maint-watchdog = {
-            # Inherit the SAME environment the real deadline unit gets. Without
-            # this the test watchdog runs ns-maint with none of the NM_* values,
-            # so it falls back to defaults, ignores maintenance.activationCommand
-            # and tries to run the test closure's real switch-to-configuration —
-            # a failure that looks like a transaction bug and is not one.
-            environment = config.environment.variables;
+            # Deliberately no NM_* manager injection: the installed executable
+            # must carry the module's trusted settings into this service.
             serviceConfig = {
               Type = "oneshot";
-              ExecStart = "${maintenancePackage}/bin/ns-maint tick";
+              ExecStart = "/run/current-system/sw/bin/ns-maint tick";
             };
           };
           systemd.timers.vm-watchdog = {
@@ -242,18 +240,7 @@ in
       # as an unrelated storm of "name not defined" errors.
       start_all()
 
-      ns_maint = "${maintenancePackage}/bin/ns-maint"
-
-      # The same environment the module gives the units. Invoking the tool
-      # directly is how the OPERATOR invokes it, and the operator's shell has
-      # these from the deployment's shellHook — not, as here, from systemd.
-      ns_env = (
-          "NM_DIR=/var/lib/nixos/maintenance "
-          "NM_GCROOTS=/nix/var/nix/gcroots "
-          "NM_PROFILE=/nix/var/nix/profiles/system "
-          "NM_HOST=${hostname} "
-          "NM_SWITCH_TO_CONFIGURATION=${activationCommand} "
-      )
+      ns_maint = "/run/current-system/sw/bin/ns-maint"
 
       def ns(*args, check=True):
           # execute(), not succeed(): ns-maint writes its operator-facing
@@ -263,7 +250,7 @@ in
           # `2>&1` rather than relying on the driver merging streams: ns-maint's
           # operator-facing messages all go to stderr, and a capture that missed
           # them would turn every wording assertion into a vacuous one.
-          cmd = ns_env + ns_maint + " " + " ".join(args) + " 2>&1"
+          cmd = "env -i PATH=/run/current-system/sw/bin " + ns_maint + " " + " ".join(args) + " 2>&1"
           rc, out = machine.execute(cmd, check_return=False)
           if check and rc != 0:
               machine.fail(f"ns-maint {' '.join(args)} failed ({rc}):\n{out}")
@@ -372,12 +359,6 @@ in
       old_running = machine.succeed("readlink -f /run/current-system").strip()
       machine.succeed(f"ln -sfn {old_running} /nix/var/nix/profiles/system")
       machine.succeed("${writeRecord} prepared 600 refused-activation 999999")
-      # Transient system services inherit the manager environment, not the
-      # calling shell's environment. Supply the VM's activation substitute.
-      machine.succeed(
-          "systemctl set-environment NM_HOST=${hostname} "
-          "NM_SWITCH_TO_CONFIGURATION=${activationCommand}"
-      )
       machine.succeed(": > /tmp/vm-activation-log")
       ns("activate", "--timeout", "60", "--allow-unknown-kernel")
       machine.wait_until_succeeds(
@@ -385,7 +366,7 @@ in
       )
       status = ns("status", "--json")
       log = machine.succeed("cat /tmp/vm-activation-log").splitlines()
-      assert log == ["switch ${candidateSystem}", f"switch {old_running}"], log
+      assert log == ["switch ${candidateSystem}", f"test {old_running}", f"boot {old_running}"], log
       assert machine.succeed("readlink -f /run/current-system").strip() == old_running
       assert machine.succeed("readlink -f /nix/var/nix/profiles/system").strip() == old_running
       assert "activation-failed-rc-7" in status, status

@@ -47,7 +47,9 @@
   # The pinned entry itself: "<host> <type> <key>", the known_hosts(5) format.
   # Written only when a key has been configured, so the file never exists in an
   # unpinned machine's half-finished state.
-  knownHostsEntry = "${cfg.serverHost} ${cfg.serverHostKeyType} ${cfg.serverHostKey}";
+  hostPattern = if cfg.sshPort == 22 then cfg.serverHost else "[${cfg.serverHost}]:${toString cfg.sshPort}";
+  publicKey = (import ../../lib/host-policy.nix).travelHostKey {key = cfg.serverHostKey; type = cfg.serverHostKeyType;};
+  knownHostsEntry = "${hostPattern} ${publicKey}";
 in {
   # ── SSH aliases ────────────────────────────────────────────────────────────
   #
@@ -133,6 +135,7 @@ in {
         pkgs.coreutils
         pkgs.gnugrep
         pkgs.python3
+        pkgs.openssh
       ];
       # The script lives in its own file rather than inline in this module.
       # It is bash full of ${...} and $(), and keeping it here means every
@@ -166,6 +169,6 @@ in {
 
     On the server:
       cat /etc/ssh/ssh_host_ed25519_key.pub
-    Then paste the public half into opts.travel.serverHostKey and rebuild.
+    Then paste that single public-key line into opts.travel.serverHostKey and rebuild.
   '';
 }

@@ -194,7 +194,7 @@ out="$(cat "$TMP/log/ks.out")"
 assert_contains "$out" "SERVER MODE" "the mode is announced"
 assert_contains "$out" "would terminate 0 process(es)" "an agent loop under herdr is not a target"
 assert_not_contains "$out" "herdr server" "nor is herdr itself"
-assert_not_contains "$(killed)" "101" "nothing is signalled in a dry run"
+assert_not_contains "$(cat "$TMP/log/killed")" "101" "nothing is signalled in a dry run"
 t_done
 fixture_free
 

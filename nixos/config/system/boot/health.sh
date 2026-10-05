@@ -57,6 +57,15 @@ set -o nounset -o pipefail
 # Space-separated unit names that must be healthy. Local units only; see the
 # header for why this is a list and not `systemctl --failed`.
 : "${NM_BOOT_CRITICAL_UNITS:=local-fs.target systemd-modules-load.service}"
+: "${NM_BOOT_READY_TIMEOUT:=20}"
+if [[ -n "${NM_BOOT_USER:-}" ]]; then
+  uid="$(id -u "$NM_BOOT_USER" 2>/dev/null)" || {
+    printf 'boot-health: cannot resolve management user\n' >&2
+    exit 1
+  }
+  NM_BOOT_CRITICAL_UNITS+=" user@$uid.service"
+fi
+[[ "$NM_BOOT_READY_TIMEOUT" =~ ^[0-9]+$ ]] || exit 1
 
 problems=0
 fail() {
@@ -92,32 +101,19 @@ fi
 
 # ── 3. The local units that have to work before anything else can ────────────
 #
-# Read individually rather than by asking for "is the unit failed": a unit that
-# is inactive because it has not been started yet must not count as a failure,
-# and neither must one that is deliberately masked. `is-active` returns a status
-# for both, which is what makes the distinction possible.
+# A unit still activating is not proof of readiness. Wait a bounded total
+# interval for local startup only; failed/absent critical units fail closed.
+deadline=$((SECONDS + NM_BOOT_READY_TIMEOUT))
 for unit in $NM_BOOT_CRITICAL_UNITS; do
-  # Decide on the REPORTED STATE, not on `is-active`'s exit code.
-  #
-  # `systemctl is-active` exits non-zero for anything that is not exactly
-  # "active", which includes "activating" — and local-fs.target is genuinely
-  # "activating" on a slow boot. Trusting the exit code there would condemn a
-  # healthy boot and send the machine back to the previous generation for having
-  # taken a few seconds longer to mount its filesystems, which is the exact
-  # class of false negative this gate exists to avoid.
-  #
-  # The states that DO fail — inactive, failed, deactivating, unknown (a unit
-  # name that does not exist) — are all ones that report themselves in the
-  # output, so the printed state is the reliable signal.
-  state="$("$NM_SYSTEMCTL" is-active "$unit" 2>/dev/null || true)"
-  case "$state" in
-    active | activating | reloading)
-      :
-      ;;
-    *)
-      fail "critical unit $unit is ${state:-unknown}, not active"
-      ;;
-  esac
+  while :; do
+    state="$(timeout 2 "$NM_SYSTEMCTL" is-active "$unit" 2>/dev/null || true)"
+    [[ "$state" == active ]] && break
+    if [[ "$state" != activating && "$state" != reloading ]] || ((SECONDS >= deadline)); then
+      fail "critical unit $unit is ${state:-unknown}, not ready"
+      break
+    fi
+    sleep 1
+  done
 done
 
 # ── 4. The boot loader still answers ─────────────────────────────────────────

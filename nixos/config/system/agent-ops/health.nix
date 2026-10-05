@@ -45,6 +45,84 @@
 }: let
   cfg = config.agentOps.health;
   script = ./scripts/ns-agent-health.sh;
+  # The backup script writes directly under AGENT_OPS_STATE_DIR, without
+  # appending another /backup component.
+  defaultBackupRecord = "${config.agentOps.backup.stateDir}/last-run.env";
+  historyDir = "/var/lib/agent-ops/health/history";
+  # One immutable, private file per run: <UTC timestamp>.<random>.json. There
+  # is deliberately no append-only log; tmpfiles ages each file on its own
+  # mtime, so the history is bounded by retentionHours without rotation.
+  #
+  # Exit contract (the unit's SuccessExitStatus is "0 1"):
+  #   0/1  collector verdict (healthy / degraded-or-unhealthy), report kept
+  #   >1   collector failure, propagated as-is (report kept if it is valid)
+  #   65   collector exited 0/1 but its output was not ONE JSON object;
+  #        nothing is written, and the unit fails visibly. The malformed output
+  #        is never echoed, so it cannot leak into the journal.
+  snapshotScript = name: arguments: pkgs.writeShellScript name ''
+    set -euo pipefail
+    umask 0077
+    status=0
+    snapshot="$(${lib.getExe tool} --json ${arguments})" || status=$?
+    if ! printf '%s\n' "$snapshot" | ${pkgs.jq}/bin/jq -e -s \
+      'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
+      printf '%s: collector (exit %s) produced no single JSON object; nothing recorded\n' \
+        ${lib.escapeShellArg name} "$status" >&2
+      if [ "$status" -gt 1 ]; then exit "$status"; fi
+      exit 65
+    fi
+    stamp="$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%SZ)"
+    # Write a hidden partial first and rename, so a reader (or the age
+    # cleaner) never sees a truncated report under its final name.
+    partial="$(${pkgs.coreutils}/bin/mktemp ${historyDir}/."$stamp".XXXXXXXX)"
+    trap '${pkgs.coreutils}/bin/rm -f -- "$partial"' EXIT
+    printf '%s\n' "$snapshot" >"$partial"
+    final="${historyDir}/''${partial##*/.}.json"
+    ${pkgs.coreutils}/bin/mv -n -T -- "$partial" "$final"
+    [ ! -e "$partial" ] || { printf '%s: snapshot name collision\n' ${lib.escapeShellArg name} >&2; exit 73; }
+    trap - EXIT
+    exit "$status"
+  '';
+  ownerHome = config.users.users.${opts.username}.home;
+  ownerServices = lib.attrByPath ["home-manager" "users" opts.username "systemd" "user" "services"] {} config;
+  # Only enabled stateful agent services are required; desktop helpers and
+  # oneshot validation units are not long-running health dependencies.
+  requiredServices = lib.filter (name:
+    let unit = ownerServices.${name} or {}; in
+    (unit.Install.WantedBy or []) != [] && (unit.Service.Type or "simple") != "oneshot"
+  ) ["herdr" "collie"];
+  ownerEnvironment = {
+    AGENT_OPS_HEALTH_USER = opts.username;
+    AGENT_OPS_SECRET_ENV = toString (pkgs.writeShellScript "health-owner-readiness" ''
+      export HOME=${lib.escapeShellArg ownerHome}
+      export SECRET_ENV_MANIFEST=${lib.escapeShellArg "${ownerHome}/.config/agent-ops/secrets.manifest"}
+      export XDG_STATE_HOME=${lib.escapeShellArg "${ownerHome}/.local/state"}
+      export XDG_RUNTIME_DIR="/run/user/$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg opts.username})"
+      # Never execute a user-writable helper as the privileged collector.
+      unset CREDENTIALS_DIRECTORY
+      if [ "$(${pkgs.coreutils}/bin/id -u)" = 0 ]; then
+        exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg opts.username} -- \
+          ${pkgs.coreutils}/bin/env HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" XDG_STATE_HOME="$XDG_STATE_HOME" SECRET_ENV_MANIFEST="$SECRET_ENV_MANIFEST" \
+          ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/secret-env"} "$@"
+      fi
+      exec ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/secret-env"} "$@"
+    '');
+    # The checker also invokes the owner's herdr client and user manager.
+    # Run it as that owner, not as the root timer's HOME/session.
+    AGENT_OPS_DAEMON_CHECK = if !(builtins.elem "herdr" requiredServices) then "" else toString (pkgs.writeShellScript "health-owner-daemon-check" ''
+      export HOME=${lib.escapeShellArg ownerHome}
+      export XDG_RUNTIME_DIR="/run/user/$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg opts.username})"
+      export HERDR_BIN=/etc/profiles/per-user/${opts.username}/bin/herdr
+      unset CREDENTIALS_DIRECTORY
+      if [ "$(${pkgs.coreutils}/bin/id -u)" = 0 ]; then
+        exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg opts.username} -- \
+          ${pkgs.coreutils}/bin/env HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" HERDR_BIN="$HERDR_BIN" \
+          ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/herdr-daemon-check"} "$@"
+      fi
+      exec ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/herdr-daemon-check"} "$@"
+    '');
+    AGENT_OPS_HEALTH_REQUIRED_SERVICES = lib.concatStringsSep " " (map (name: "${name}.service") requiredServices);
+  };
 
   # sopsFileHasKey FILE KEY — does the sops YAML have a top-level KEY?
   #
@@ -151,17 +229,14 @@ in {
 
       systemd.tmpfiles.rules = [
         "d /var/lib/agent-ops 0700 root root -"
-        # Retention on the snapshots themselves, so an hourly timer cannot
-        # slowly fill the disk of the machine it is monitoring.
-        #
-        # ONE line for this path, not two: systemd-tmpfiles ignores a second
-        # rule for the same path and logs a warning, so the retention age was
-        # silently never applied.
-        "d /var/lib/agent-ops/health 0700 root root ${toString cfg.retentionHours}h"
+        "d /var/lib/agent-ops/health 0700 root root -"
+        # Immutable snapshots age independently; reading them or collecting a
+        # new report must not refresh an older report's retention clock.
+        "d ${historyDir} 0700 root root m:${toString cfg.retentionHours}h"
       ];
 
-      environment.variables = {
-        AGENT_OPS_BACKUP_RECORD = "/var/lib/agent-ops/backup/last-run.env";
+      environment.variables = ownerEnvironment // {
+        AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
         AGENT_OPS_HEALTH_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
       };
 
@@ -179,7 +254,9 @@ in {
         after = ["local-fs.target"];
         serviceConfig = {
           Type = "oneshot";
-          ExecStart = "${lib.getExe tool} --json";
+          User = "root";
+          ExecStart = snapshotScript "agent-ops-health-snapshot" "";
+          MemoryMax = "128M";
           # Bounded on the unit as well as inside the script. A hung collector
           # must not be able to hold this open.
           TimeoutStartSec = "60";
@@ -195,7 +272,10 @@ in {
             "AGENT_OPS_HEARTBEAT_TOKEN:${config.sops.secrets.${cfg.heartbeat.tokenSecretName}.path}"
           ];
         };
-        environment.AGENT_OPS_HEARTBEAT_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
+        environment = ownerEnvironment // {
+          AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
+          AGENT_OPS_HEARTBEAT_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
+        };
       };
 
       systemd.timers.agent-ops-health = {
@@ -213,16 +293,18 @@ in {
       # from the box rather than from memory. Contains no values; see the
       # redaction note in the module header.
       systemd.services.agent-ops-health-record = {
-        description = "Append the latest health snapshot to the local history";
+        description = "Record one redacted boot health snapshot";
+        environment = ownerEnvironment // {
+          AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
+        };
         wantedBy = ["multi-user.target"];
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-          ExecStart = pkgs.writeShellScript "agent-ops-health-record" ''
-            set -e
-            printf '%s\n' "$(${lib.getExe tool} --json --no-heartbeat || true)" \
-              >> /var/lib/agent-ops/health/history.jsonl
-          '';
+          MemoryMax = "128M";
+          User = "root";
+          ExecStart = snapshotScript "agent-ops-health-record" "--no-heartbeat";
+          SuccessExitStatus = "0 1";
           TimeoutStartSec = "60";
         };
       };

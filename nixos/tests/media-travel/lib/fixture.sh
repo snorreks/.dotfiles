@@ -13,9 +13,8 @@
 # That distinction is the whole point. A test that greps netns-up.sh for the
 # string "DROP" proves the word is in the file. This one proves the script
 # installs a DROP policy, that it installs one on BOTH stacks, that it refuses
-# a hostname endpoint outright, and that its only non-tunnel egress rule is a
-# single UDP flow — which are the properties that actually decide whether the
-# namespace leaks.
+# a hostname endpoint outright, and permits only established WebUI replies on
+# the management veth. Encrypted UDP sockets use host routing, not veth egress.
 #
 # shellcheck shell=bash
 
@@ -108,7 +107,7 @@ EOF
   for tool in iptables ip6tables sysctl; do
     cat >"$dir/$tool" <<'EOF'
 @@BASH@@
-printf '%s %s\n' "$tool" "\$*" >>"\$FAKE_LOG"
+printf '%s %s\n' "${0##*/}" "$*" >>"$FAKE_LOG"
 exit 0
 EOF
   done

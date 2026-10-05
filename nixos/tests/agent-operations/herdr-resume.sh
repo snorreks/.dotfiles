@@ -62,7 +62,7 @@ mk_runner() {
 
 # A well-behaved task: writes its heartbeat immediately, then waits.
 HEARTBEAT="$TMP/project/hb"
-mk_runner "$TMP/project/good.sh" "touch '$HEARTBEAT'
+mk_runner "$TMP/project/good.sh" "printf '%s\\n' \"\$HERDR_RESUME_TOKEN\" > '$HEARTBEAT'
 sleep 60"
 # A task that dies on startup.
 mk_runner "$TMP/project/dies.sh" "exit 3"
@@ -164,7 +164,7 @@ opt_in "$TMP/project/dies.sh" "$TMP/project/never"
 out="$(resume)"
 rc=$?
 assert_ne '0' "$rc" 'a task that exits before its heartbeat is a failure'
-assert_contains "$out" 'before writing a heartbeat' 'and the reason is specific'
+assert_contains "$out" 'exited' 'and the reason is specific'
 assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f 2>/dev/null | grep -c .)" 'and no record was written claiming success'
 
 out="$(resume)"
@@ -183,6 +183,31 @@ assert_contains "$out" 'rather than leaving an untracked run' 'and that it clean
 assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f 2>/dev/null | grep -c .)" 'no success record either'
 
 # ═══════════════════════════════════════════════════════════════════════════
+_t_start "an old writer cannot acknowledge a newly launched silent runner"
+opt_in "$TMP/project/silent.sh" "$TMP/project/shared-hb"
+(
+  for _ in {1..6}; do
+    printf 'previous-run-token\n' >"$TMP/project/shared-hb"
+    sleep 1
+  done
+) >/dev/null 2>&1 &
+writer=$!
+out="$(START_TIMEOUT=4 resume)"
+assert_ne '0' "$?" 'fresh progress from another run fails startup'
+wait "$writer"
+assert_contains "$out" 'no heartbeat within' 'new runner never acknowledged its token'
+assert_not_contains "$out" 'running as pid' 'no false success from the shared heartbeat'
+assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f | wc -l)" 'no record for an unacknowledged runner'
+
+_t_start "a heartbeat followed by immediate exit never claims a running task"
+mk_runner "$TMP/project/beat-exit.sh" "printf '%s\\n' \"\$HERDR_RESUME_TOKEN\" > '$TMP/project/beat-exit-hb'
+exit 9"
+opt_in "$TMP/project/beat-exit.sh" "$TMP/project/beat-exit-hb"
+out="$(START_TIMEOUT=4 resume)"
+assert_ne '0' "$?" 'heartbeat does not substitute for a live process'
+assert_not_contains "$out" 'running as pid' 'no successful launch verdict for an exited runner'
+assert_eq '0' "$(find "$AGENT_OPS_STATE_DIR/records" -type f 2>/dev/null | grep -c .)" 'no new running record for a dead or zombie runner'
+
 _t_start "a healthy task starts, and its identity is recorded"
 rm -f "$HEARTBEAT"
 opt_in "$TMP/project/good.sh" "$HEARTBEAT"
@@ -195,6 +220,7 @@ RECORDED_PID="$(grep -o '^PID=.*' "$rec" | cut -d= -f2-)"
 assert_file "$rec" 'a record was written'
 assert_contains "$(cat "$rec")" 'PID_START=' 'with the process START TIME, not just the pid'
 assert_ne '' "$(grep -o '^PID_START=.*' "$rec" | cut -d= -f2-)" 'and the start time is not empty'
+assert_eq "$(</proc/sys/kernel/random/boot_id)" "$(grep '^BOOT_ID=' "$rec" | cut -d= -f2-)" 'records the current boot ID'
 sleep 1
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -223,14 +249,34 @@ assert_contains "$out" 'has been reused' 'a reused pid is recognised, not assume
 assert_contains "$out" 'Treating as dead' 'and the run is treated as dead'
 
 # ═══════════════════════════════════════════════════════════════════════════
-_t_start "a fresh heartbeat with no recorded pid is assumed owned by someone else"
+_t_start "fresh prior-boot heartbeat is not ownership, even with matching live PID ticks"
 cleanup_runs
-rm -f "$rec"
+mkdir -p "$AGENT_OPS_STATE_DIR/records"
+rec="$AGENT_OPS_STATE_DIR/records/$(printf '%s' "$TMP/project/task" | tr -c 'A-Za-z0-9_.-' '_')"
+printf 'PID=%s\nPID_START=%s\nBOOT_ID=prior-boot\n' "$$" "$(awk '{print $22}' /proc/$$/stat)" >"$rec"
 touch "$HEARTBEAT"
 out="$(START_TIMEOUT=8 resume)"
-assert_contains "$out" 'no pid is recorded' 'the missing pid is named'
-assert_contains "$out" 'Assuming another launcher owns it' 'and the decision is to stand aside'
-assert_contains "$out" 'Use --force' 'with the documented override'
+assert_eq '0' "$?" 'fresh prior-boot heartbeat does not prevent resume'
+assert_contains "$out" 'heartbeat is not ownership' 'prior-boot ownership is explicitly rejected'
+assert_contains "$out" "launching '$TMP/project/good.sh'" 'the orphan is relaunched'
+assert_eq "$(</proc/sys/kernel/random/boot_id)" "$(grep '^BOOT_ID=' "$rec" | cut -d= -f2-)" 'new record belongs to this boot'
+out="$(START_TIMEOUT=8 resume)"
+assert_contains "$out" 'already running' 'current-boot duplicate is suppressed'
+cleanup_runs
+
+_t_start "fresh prior-boot heartbeat with a dead PID is resumed"
+mkdir -p "$AGENT_OPS_STATE_DIR/records"
+printf 'PID=999999999\nPID_START=1\nBOOT_ID=prior-boot\n' >"$rec"
+touch "$HEARTBEAT"
+out="$(START_TIMEOUT=8 resume)"
+assert_eq '0' "$?" 'dead prior-boot run resumes despite fresh heartbeat'
+assert_contains "$out" "launching '$TMP/project/good.sh'" 'fresh prior-boot dead record cannot skip permanently'
+cleanup_runs
+
+_t_start "fresh heartbeat without a record cannot suppress resume"
+touch "$HEARTBEAT"
+out="$(START_TIMEOUT=8 resume)"
+assert_contains "$out" "launching '$TMP/project/good.sh'" 'a heartbeat alone is not ownership'
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "--force overrides both gates"
@@ -276,7 +322,7 @@ printf '%s\n%s\n%s\n' "$TMP/project" "$TMP/absent" "$TMP/other" >"$AGENT_OPS_RES
 cat >"$TMP/other/.agent-ops-resume" <<EOF
 other|$TMP/other/good.sh|$TMP/other/hb
 EOF
-mk_runner "$TMP/other/good.sh" "touch '$TMP/other/hb'
+mk_runner "$TMP/other/good.sh" "printf '%s\\n' \"\$HERDR_RESUME_TOKEN\" > '$TMP/other/hb'
 sleep 60"
 out="$(START_TIMEOUT=8 bash "$RESUME" 2>&1)"
 rc=$?
@@ -314,7 +360,7 @@ FAKE
 # Variables expand in the generated runner.
 # shellcheck disable=SC2016
 mk_runner "$TMP/project/unit.sh" 'printf "%s|%s|%s\n" "$PWD" "$HERDR_RESUMED_ROOT" "$HERDR_RESUMED_TASK" > "$TMP/unit.context"
-touch "$TMP/project/hb"
+printf "%s\n" "$HERDR_RESUME_TOKEN" > "$TMP/project/hb"
 sleep 60'
 opt_in "$TMP/project/unit.sh" "$HEARTBEAT"
 rm -f "$HEARTBEAT"
@@ -343,6 +389,7 @@ assert_no_file "$HEARTBEAT" 'no fallback into the oneshot cgroup'
 
 _t_start "heartbeat timeout stops the transient service"
 opt_in "$TMP/project/silent.sh" "$TMP/project/silent-hb"
+touch "$TMP/project/silent-hb"
 out="$(START_TIMEOUT=2 resume)"
 assert_eq '1' "$?" 'missing heartbeat fails'
 assert_contains "$(cat "$TMP/unit.stops")" '--user stop herdr-task-' 'stops the entire task unit'

@@ -75,6 +75,7 @@ NM_SSH_UNIT="${NM_SSH_UNIT:-sshd.service}"
 # overridable so tests do not have to wait minutes.
 NM_TICK_SECONDS="${NM_TICK_SECONDS:-30}"
 NM_DEFAULT_TIMEOUT="${NM_DEFAULT_TIMEOUT:-20min}"
+NM_RESTORE_TIMEOUT="${NM_RESTORE_TIMEOUT:-10min}"
 # TEST ONLY. Lets the failure-injection suite drive the real state machine as
 # an unprivileged user, because production requires uid 0 for every mutation.
 # It changes nothing about the logic under test; see require_privileged below.
@@ -138,7 +139,7 @@ esac
 STORE_PATH_RE="^${NM_STORE_PREFIX}/[a-z0-9]{32}-[A-Za-z0-9+._?=-]+\$"
 TXID_RE='^tx-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$'
 HOSTNAME_RE='^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$'
-PHASES=(idle prepared armed activating awaiting-confirm restoring restored
+PHASES=(idle prepared staging staged stage-interrupted armed activating awaiting-confirm restoring restored
   restore-failed confirmed aborted reconciled-booted reconciled-not-applied)
 
 valid_store_path() { [[ "$1" =~ $STORE_PATH_RE ]]; }
@@ -193,18 +194,16 @@ NM_ESP_MIN_MIB="${NM_ESP_MIN_MIB:-150}"
 NM_DF="${NM_DF:-df}"
 
 esp_free_mib() {
-  "$NM_DF" -P -k "$NM_ESP_PATH" 2>/dev/null | awk 'NR==2 { printf "%d", $4 / 1024 }'
+  "$NM_DF" -P -k "$NM_ESP_PATH" 2>/dev/null | awk 'NR==2 { if ($4 !~ /^[0-9]+$/) exit 1; printf "%d", $4 / 1024 }'
 }
 
 esp_preflight() {
   local free
-  free="$(esp_free_mib)"
-  if [[ -z "$free" ]]; then
-    # Not a reason to refuse: the path may simply not be a mountpoint in the
-    # fixture or on a host with a different layout. Say it and continue.
-    sayf "stage: could not read free space on $NM_ESP_PATH (is it mounted?). Continuing."
-    return 0
+  if ! free="$(esp_free_mib)" || [[ ! "$free" =~ ^[0-9]+$ ]]; then
+    sayf "stage: could not verify free space on $NM_ESP_PATH; refusing bootloader writes."
+    return 1
   fi
+  [[ "$NM_ESP_MIN_MIB" =~ ^[0-9]+$ ]] || die "invalid ESP minimum-space policy"
   if ((free < NM_ESP_MIN_MIB)); then
     sayf "stage: $NM_ESP_PATH has ${free} MiB free, and this stage needs at least"
     sayf "       ${NM_ESP_MIN_MIB} MiB for the kernel, the initrd and the boot entry."
@@ -225,7 +224,7 @@ esp_preflight() {
 
 # PENDING_PHASES are the phases in which a transaction still owns the machine:
 # a confirmation or a deadline is outstanding, or a restore is mid-flight.
-PENDING_PHASES=(armed activating awaiting-confirm restoring)
+PENDING_PHASES=(staging stage-interrupted armed activating awaiting-confirm restoring)
 
 is_pending_phase() {
   local want="$1" p
@@ -261,11 +260,11 @@ is_pending_phase() {
 #                 happened, and conflating them is how "the profile still looks
 #                 fine" becomes mistaken for "the machine is fine".
 # deadline      — epoch seconds after which the restore is due.
-# armed_at      — epoch seconds the mutation window opened. The NEW-connection
-#                 check compares against this.
+# armed_at      — epoch seconds the mutation window opened.
+# activated_at  — APPLY completion time. NEW-connection evidence must be later.
 # restore_*     — outcome of the last restore attempt, reported verbatim.
 RECORD_KEYS=(schema_version phase txid host operation candidate old_running
-  old_profile old_gen booted deadline armed_at activated_at restore_result
+  old_profile old_profile_closure old_gen booted deadline armed_at activated_at restore_result
   restore_detail staged_candidate confirmed_at confirm_peer confirm_connection
   health_failed_units health_checked_at reconciled_at note)
 
@@ -274,6 +273,7 @@ declare -A RECORD=()
 record_defaults() {
   local k
   for k in "${RECORD_KEYS[@]}"; do RECORD["$k"]=""; done
+  RECORD["profile_resolution_error"]=""
   RECORD["schema_version"]="1"
   RECORD["phase"]="idle"
 }
@@ -304,6 +304,7 @@ record_load() {
     RECORD["$key"]="$value"
   done <"$RECORD_FILE"
   record_validate
+  resolve_recorded_profile || true
 }
 
 # record_validate — refuse to act on anything we cannot vouch for.
@@ -336,7 +337,7 @@ record_validate() {
   fi
 
   local p
-  for p in candidate old_running booted staged_candidate; do
+  for p in candidate old_running old_profile_closure booted staged_candidate; do
     v="${RECORD[$p]}"
     if [[ -n "$v" ]]; then
       valid_store_path "$v" || die "record $p '$v' is not a Nix store path; refusing to use it."
@@ -362,6 +363,8 @@ record_save() {
     printf '# Delete this file only after reading it: it is the record of what was\n'
     printf '# armed and whether it was confirmed or restored.\n'
     for k in "${RECORD_KEYS[@]}"; do
+      # Derived in memory; version 1 readers have a closed wire schema.
+      [[ "$k" == old_profile_closure ]] && continue
       printf '%s=%s\n' "$k" "${RECORD[$k]}"
     done
   } >"$tmp"
@@ -437,6 +440,69 @@ gc_protect() {
   log_event "gc root $(gc_root_name "$name") -> $path"
 }
 
+# Immutable transaction-specific anchor: generic roots may be replaced by later GC.
+profile_anchor() {
+  valid_txid "${RECORD[txid]}" || die "profile anchor requires a valid txid"
+  printf '%s/%s' "$NM_GCROOTS" "$(gc_root_name "profile-${RECORD[txid]}")"
+}
+
+protect_recorded_profile() {
+  local root
+  root="$(profile_anchor)"
+  if [[ -e "$root" || -L "$root" ]]; then
+    [[ "$(readlink "$root")" == "${RECORD[old_profile_closure]}" ]] || die "profile anchor conflict"
+    return 0
+  fi
+  gc_protect "profile-${RECORD[txid]}" "${RECORD[old_profile_closure]}"
+}
+
+# Never consult the mutable system profile when reading a transaction. The
+# captured generation and the immutable anchor must agree; a persisted derived
+# field from an intermediate writer is only a consistency hint.
+resolve_recorded_profile() {
+  local target="${RECORD[old_profile]}" gen="${RECORD[old_gen]}"
+  local hint="${RECORD[old_profile_closure]}" closure="" anchor="" root="" link=""
+  RECORD[old_profile_closure]=""
+  RECORD[profile_resolution_error]=""
+  if [[ -z "$target" ]]; then
+    [[ -z "$gen$hint" ]] || die "absent recorded profile has generation or closure"
+    return 0
+  fi
+  if valid_store_path "$target"; then
+    [[ -z "$gen" ]] || die "direct recorded profile has a generation"
+    closure="$target"
+  else
+    [[ "$gen" =~ ^[1-9][0-9]*$ ]] || die "recorded profile has no positive matching generation"
+    link="${NM_PROFILE}-${gen}-link"
+    [[ "$target" == "${link##*/}" || "$target" == "$link" ]] || die "recorded profile path does not match old_gen"
+    if [[ -e "$link" || -L "$link" ]]; then
+      closure="$(readlink "$link" 2>/dev/null || true)"
+      valid_store_path "$closure" || die "recorded generation target is corrupt"
+      [[ -d "$closure" ]] || closure=""
+    fi
+  fi
+  if [[ -n "${RECORD[txid]}" ]]; then
+    root="$(profile_anchor)"
+    if [[ -e "$root" || -L "$root" ]]; then
+      anchor="$(readlink "$root" 2>/dev/null || true)"
+      valid_store_path "$anchor" || die "recorded profile anchor is corrupt"
+      [[ -d "$anchor" ]] || anchor=""
+    fi
+  fi
+  if [[ -n "$closure" && -n "$anchor" && "$closure" != "$anchor" ]]; then
+    die "recorded profile generation and anchor conflict"
+  fi
+  closure="${closure:-$anchor}"
+  if [[ -n "$hint" && -n "$closure" && "$hint" != "$closure" ]]; then
+    die "recorded profile closure hint conflicts with captured intent"
+  fi
+  if [[ -z "$closure" ]]; then
+    RECORD[profile_resolution_error]="recorded profile generation and transaction anchor are missing"
+    return 1
+  fi
+  RECORD[old_profile_closure]="$closure"
+}
+
 gc_unprotect() {
   local name="$1"
   local root
@@ -491,9 +557,12 @@ generation_of() {
     printf ''
     return 0
   }
-  gen="${link#system-}"
+  if [[ "$link" == "${NM_PROFILE}-"* ]]; then
+    link="${link##*/}"
+  fi
+  gen="${link#"${NM_PROFILE##*/}"-}"
   gen="${gen%-link}"
-  if [[ "$gen" =~ ^[0-9]+$ ]]; then
+  if [[ "$gen" =~ ^[1-9][0-9]*$ && "$link" == "${NM_PROFILE##*/}-${gen}-link" ]]; then
     printf '%s' "$gen"
   else
     printf ''
@@ -698,7 +767,7 @@ cmd_prepare() {
 
   # --output selects a different flake output (e.g. "$host-fast") while the
   # record's `host` stays the real hostname, so host validation is unaffected.
-  local attr="nixosConfigurations.${output:-$host}.system"
+  local attr="nixosConfigurations.${output:-$host}.config.system.build.toplevel"
   local -a nix_args=(build --no-link --print-out-paths)
   [[ "$offline" -eq 1 ]] && nix_args+=(--offline)
 
@@ -772,6 +841,9 @@ cmd_activate() {
     esac
   done
 
+  local duration
+  duration="$(parse_duration "$timeout_s")" || return 1
+  [[ "$duration" -gt 0 ]] || die "activate: timeout must be positive"
   lock_acquire
   record_load
 
@@ -831,7 +903,7 @@ cmd_activate() {
   gc_protect "running" "$running"
   valid_store_path "$booted" && gc_protect "booted" "$booted"
 
-  deadline=$(( $(now_epoch) + $(parse_duration "$timeout_s") ))
+  deadline=$(( $(now_epoch) + duration ))
 
   RECORD["phase"]="armed"
   RECORD["txid"]="$txid"
@@ -840,11 +912,19 @@ cmd_activate() {
   RECORD["candidate"]="$candidate"
   RECORD["old_running"]="$running"
   RECORD["old_profile"]="$old_profile"
+  RECORD["old_profile_closure"]="$(profile_closure)"
+  if [[ -n "$old_profile" ]]; then
+    valid_store_path "${RECORD[old_profile_closure]}" || die "cannot record a usable profile closure"
+    protect_recorded_profile
+  else
+    RECORD["old_profile_closure"]=""
+  fi
   RECORD["old_gen"]="$old_gen"
   RECORD["booted"]="$booted"
   RECORD["deadline"]="$deadline"
-  RECORD["armed_at"]="$(now_epoch)"
+  RECORD["armed_at"]="$((deadline - duration))"
   RECORD["note"]="armed ${timeout_s} window"
+  resolve_recorded_profile || die "cannot resolve captured profile before arming"
   record_save
 
   log_event "armed txid=$txid candidate=$candidate running=$running booted=$booted deadline=$deadline"
@@ -879,21 +959,28 @@ parse_duration() {
   # cannot parse must not silently become 0, which would mean "restore now".
   local v="$1" n u
   if [[ "$v" =~ ^([0-9]+)$ ]]; then
-    printf '%s' "$((BASH_REMATCH[1]))"
+    printf '%s' "$((10#${BASH_REMATCH[1]}))"
     return 0
   fi
-  if [[ "$v" =~ ^([0-9]+)([smh])$ ]]; then
-    n="${BASH_REMATCH[1]}"
+  if [[ "$v" =~ ^([0-9]+)(s|sec|m|min|h)$ ]]; then
+    n="$((10#${BASH_REMATCH[1]}))"
     u="${BASH_REMATCH[2]}"
     case "$u" in
-    s) printf '%s' "$n" ;;
-    m) printf '%s' "$((n * 60))" ;;
+    s | sec) printf '%s' "$n" ;;
+    m | min) printf '%s' "$((n * 60))" ;;
     h) printf '%s' "$((n * 3600))" ;;
     esac
     return 0
   fi
   die "'$v' is not a duration this tool understands (use e.g. 90, 90s, 20m, 1h)"
 }
+
+# Normalize our duration syntax before any GNU timeout invocation. Zero would
+# disable its deadline entirely, including for bootloader restoration.
+NM_RESTORE_TIMEOUT="$(parse_duration "$NM_RESTORE_TIMEOUT")" || exit 1
+if [[ ! "$NM_RESTORE_TIMEOUT" =~ ^[0-9]+$ ]] || ((NM_RESTORE_TIMEOUT <= 0)); then
+  die "NM_RESTORE_TIMEOUT must be a positive duration"
+fi
 
 # self_path — absolute path to this script, so the transient unit runs the same
 # build regardless of PATH or working directory.
@@ -932,7 +1019,7 @@ cmd_run_activation() {
   fi
 
   RECORD["phase"]="activating"
-  RECORD["activated_at"]="$(now_epoch)"
+  RECORD["activated_at"]=""
   record_save
   log_event "activating txid=$txid candidate=$candidate"
 
@@ -943,7 +1030,7 @@ cmd_run_activation() {
     return $?
   fi
 
-  "$NM_ENV" --profile "$NM_PROFILE" --set "$candidate" || rc=$?
+  timeout --signal=KILL "$remaining" "$NM_ENV" --profile "$NM_PROFILE" --set "$candidate" || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     RECORD["note"]="profile update failed (exit $rc); restoring"
     record_save
@@ -968,6 +1055,9 @@ cmd_run_activation() {
 
   if [[ "$rc" -eq 0 ]]; then
     RECORD["phase"]="awaiting-confirm"
+    # Completion, not arming or start time. Reject same-second evidence too:
+    # journald's seconds-only query cannot order events within that second.
+    RECORD["activated_at"]="$(now_epoch)"
     record_save
     log_event "activation $txid applied, awaiting confirmation"
     sayf "activation $txid applied. Confirm it from a NEW session:"
@@ -1015,13 +1105,11 @@ switch_to_configuration() {
 
 # do_restore — the recovery path. NEVER reboots.
 #
-# Order matters. First try the old closure's `switch`, which restores runtime,
-# profile and bootloader entry together. If THAT fails — which is the realistic
-# case, since the old generation is what we are recovering to precisely because
-# something is wrong — fall back to its `boot`, which writes the bootloader
-# entry and touches nothing live. That way the next ordinary boot lands on the
-# known-good closure, and the operator is told plainly that live restoration did
-# not fully succeed rather than being handed a green checkmark.
+# Runtime is restored with `test`, then the recorded profile is restored and
+# its closure's `boot` rebuilds boot intent. Those closures may differ. Every
+# step is bounded and any failure is recorded, even if another step succeeds.
+# Existing bootloader default overrides are not observable from the profile;
+# this restores profile-derived boot intent, not arbitrary manual overrides.
 do_restore() {
   local txid="$1" reason="$2" rc=0 boot_rc=0 detail=""
   lock_acquire
@@ -1057,50 +1145,38 @@ do_restore() {
   # here, and nothing else guarantees it survives the next collection.
   gc_protect "running" "$old"
 
-  sayf "restoring $txid to $old (live, no reboot) because: $reason"
-  switch_to_configuration "$old" switch || rc=$?
-
-  if [[ "$rc" -eq 0 ]]; then
-    # Belt and braces: make the profile intent agree even if the old closure's
-    # switch took a shortcut.
-    restore_profile_intent || true
+  # Runtime and profile may deliberately differ (e.g. an earlier test switch).
+  # `test` restores runtime only; boot intent is then rebuilt from the recorded
+  # profile closure. Never let `switch` silently collapse those two intents.
+  local boot="${RECORD[old_profile_closure]}"
+  sayf "restoring $txid runtime to $old (no reboot) because: $reason"
+  switch_to_configuration "$old" test "$NM_RESTORE_TIMEOUT" || rc=$?
+  restore_profile_intent || boot_rc=$?
+  if [[ "$boot_rc" -ne 0 ]]; then
+    detail="profile restoration failed with exit $boot_rc"
+  else
+    switch_to_configuration "$boot" boot "$NM_RESTORE_TIMEOUT" || boot_rc=$?
+    [[ "$boot_rc" -eq 0 ]] || detail="switch-to-configuration boot also failed with exit $boot_rc"
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    detail="switch-to-configuration test failed with exit $rc; $detail"
+  fi
+  if [[ "$rc" -eq 0 && "$boot_rc" -eq 0 ]]; then
     RECORD["phase"]="restored"
     RECORD["restore_result"]="restored-live"
-    RECORD["restore_detail"]="switch-to-configuration switch returned 0"
+    RECORD["restore_detail"]="runtime test, recorded profile and boot intent restored"
     record_save
-    gc_protect "running" "$old"
     log_event "restore $txid ok (live)"
-    sayf "restore $txid complete: runtime, profile and boot entry are back on $old."
-    sayf "  NO REBOOT WAS PERFORMED. If the kernel changed, the running kernel is"
-    sayf "  still the old one, which is the desired outcome for an unattended host."
+    sayf "restore $txid complete: runtime $old; recorded profile/boot intent restored. NO REBOOT WAS PERFORMED."
     return 0
   fi
-
-  detail="switch-to-configuration switch failed with exit $rc"
-  sayf "live restoration FAILED (exit $rc). Falling back to boot intent only:"
-  switch_to_configuration "$old" boot || boot_rc=$?
-  if [[ "$boot_rc" -ne 0 ]]; then
-    detail="$detail; switch-to-configuration boot also failed with exit $boot_rc"
-  fi
-  restore_profile_intent || true
-
   RECORD["phase"]="restore-failed"
   RECORD["restore_result"]="restore-failed"
   RECORD["restore_detail"]="$detail"
   record_save
   log_event "restore $txid FAILED: $detail"
-
-  sayf ""
-  sayf "RESTORATION DID NOT COMPLETE for $txid."
-  sayf "  reason: $detail"
-  sayf "  runtime may still be running SOME of the failed candidate's units."
-  if [[ "$boot_rc" -eq 0 ]]; then
-    sayf "  the next ordinary boot will land on $old, because its bootloader entry was written."
-  else
-    sayf "  boot intent was NOT written either. The next boot will use whatever entry"
-    sayf "  the bootloader already has — check it with: bootctl list"
-  fi
-  sayf "  The machine was NOT rebooted. Read 'ns-maint status' for the full record."
+  sayf "RESTORATION DID NOT COMPLETE for $txid: $detail"
+  sayf "runtime may still be running SOME of the failed candidate's units. No reboot was performed."
   return 1
 }
 
@@ -1112,11 +1188,17 @@ do_restore() {
 # leaving the profile pointed at a failed candidate is worse than losing a
 # generation number.
 restore_profile_intent() {
-  local target="${RECORD[old_profile]-}" gen="${RECORD[old_gen]-}" closure="${RECORD[old_running]-}"
+  local target="${RECORD[old_profile]-}" gen="${RECORD[old_gen]-}" closure="${RECORD[old_profile_closure]-}"
+  if [[ -n "${RECORD[profile_resolution_error]}" ]]; then
+    sayf "restore: ${RECORD[profile_resolution_error]}"
+    return 1
+  fi
   if [[ -z "$target" ]]; then
     rm -f -- "$NM_PROFILE"
-    return $?
+    sayf "restore: originally absent profile has no recorded boot intent"
+    return 1
   fi
+  valid_store_path "$closure" || { sayf "restore: recorded profile closure is missing or invalid"; return 1; }
   if [[ -n "$gen" ]]; then
     # Verify before switching: the recorded generation must still exist AND it
     # must still resolve to the recorded recovery closure. If either is false the
@@ -1125,10 +1207,12 @@ restore_profile_intent() {
     local gen_path
     gen_path="$(readlink -e "${NM_PROFILE}-${gen}-link" 2>/dev/null || true)"
     if [[ -n "$gen_path" ]] && valid_store_path "$gen_path" && [[ "$gen_path" == "$closure" ]]; then
-      if "$NM_ENV" --profile "$NM_PROFILE" --switch-generation "$gen"; then
+      if timeout --signal=KILL "$NM_RESTORE_TIMEOUT" "$NM_ENV" --profile "$NM_PROFILE" --switch-generation "$gen"; then
         log_event "profile restored to generation $gen"
         return 0
       fi
+      sayf "restore: nix-env could NOT restore recorded generation $gen"
+      return 1
     fi
   fi
   if ln -sfn "$closure" "$NM_PROFILE"; then
@@ -1144,14 +1228,14 @@ restore_profile_intent() {
 #
 # Requires the exact txid, so a confirmation left over from an earlier update
 # cannot bless a newer one. Requires local health evidence. And requires proof
-# that a NEW connection was established after the switch was armed, because an
+# that a NEW connection was established after APPLY completed, because an
 # SSH socket that was already open when the network unit was rewritten tells you
 # nothing about whether a fresh client could get in.
 cmd_confirm() {
   local txid_arg="" assume=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --txid) txid_arg="$2" ;;
+    --txid) txid_arg="$2"; shift ;;
     --assume-new-connection) assume=1 ;;
     -h | --help)
       say "usage: ns-maint confirm <txid> [--assume-new-connection]"
@@ -1236,8 +1320,8 @@ cmd_confirm() {
 
   if [[ -n "$peer_ip" ]]; then
     # Ask sshd itself whether it accepted a session from that peer AFTER the
-    # switch was armed. A pre-existing socket cannot produce such a line,
-    # because the session it belongs to was accepted before armed_at.
+    # APPLY completed. A session opened during APPLY proves nothing about
+    # reachability after all service mutations finished.
     #
     # NM_SSH_UNIT (sshd.service) covers BOTH OpenSSH listeners this host has —
     # 22 and 2222 — because they are one unit: systemd runs both from the same
@@ -1246,13 +1330,21 @@ cmd_confirm() {
     # this host, where both ports were listening at once. So a confirmation made
     # over the phone's 2222 session is evidence in exactly the same way a
     # confirmation over 22 is, and neither needs a second unit.
-    local since="${RECORD[armed_at]}"
+    local completed="${RECORD[activated_at]}"
+    [[ "${RECORD[phase]}" != "reconciled-booted" ]] || completed="${RECORD[reconciled_at]}"
+    valid_integer "$completed" || die "confirm: no APPLY completion timestamp recorded; reconnect after a fresh activation"
+    local since=$((completed + 1))
+    # Literal field comparisons avoid regex metacharacters and port prefixes.
     if "$NM_JOURNALCTL" -u "$NM_SSH_UNIT" --since "@$since" --no-pager 2>/dev/null |
-      grep -q "Accepted .* from ${peer_ip} port ${peer_port}"; then
-      evidence="sshd accepted a session from ${peer_ip}:${peer_port} after the switch was armed"
+      awk -v peer="$peer_ip" -v port="$peer_port" '
+        /Accepted / { for (i=1; i+4<=NF; i++)
+          if ($i == "from" && $(i+1) == peer && $(i+2) == "port" &&
+              $(i+3) == port && $(i+4) == "ssh2:") found=1 }
+        END { exit !found }'; then
+      evidence="sshd accepted a session from ${peer_ip}:${peer_port} after APPLY completed"
     else
       sayf "confirm: no NEW sshd session from ${peer_ip}:${peer_port} was accepted after the"
-      sayf "         switch was armed (armed_at $since)."
+      sayf "         APPLY completed (activated_at $completed; evidence must be later)."
       sayf "         The connection you are using may have been established BEFORE the"
       sayf "         switch, which proves nothing about whether a fresh client can get in."
       sayf "         Open a second connection and run this from it, or pass"
@@ -1312,6 +1404,7 @@ cmd_confirm() {
   # released explicitly rather than left to accumulate. The booted closure is
   # still pinned until the operator actually reboots into something.
   gc_unprotect running
+  gc_unprotect profile
   gc_unprotect candidate
   log_event "confirmed txid=$txid_arg; $evidence"
   sayf "confirm: $txid_arg is now permanent. $evidence."
@@ -1362,7 +1455,7 @@ cmd_reconcile() {
   lock_acquire
   record_load
 
-  if ! is_pending_phase "${RECORD[phase]}"; then
+  if ! is_pending_phase "${RECORD[phase]}" && [[ "${RECORD[phase]}" != staged ]]; then
     sayf "reconcile: nothing pending (phase ${RECORD[phase]})."
     return 0
   fi
@@ -1392,18 +1485,34 @@ cmd_reconcile() {
     return 0
   fi
 
+  if [[ "$phase" == staging || "$phase" == stage-interrupted ]]; then
+    RECORD[phase]=stage-interrupted
+    RECORD[reconciled_at]="$now"
+    RECORD[note]="staging was interrupted; profile/boot intent may have changed. Explicit abort or inspected recovery required; nothing retried automatically"
+    record_save
+    sayf "reconcile: interrupted stage $txid; inspect status and run ns-maint abort $txid to restore recorded intent. No runtime was activated."
+    return 1
+  fi
+
   if [[ "${RECORD[phase]}" == "restoring" ]]; then
-    # We were mid-restore when the machine went down. If it came back on the
-    # old closure, the reboot completed the restore in the only way it possibly
-    # could. If not, say so instead of claiming success.
-    if [[ "$booted" == "${RECORD[old_running]}" ]]; then
+    # A reboot onto A alone proves nothing about distinct profile/boot intent B.
+    # Only bless a restore when all observed and recorded intents agree.
+    if [[ -z "${RECORD[profile_resolution_error]}" && -n "${RECORD[old_profile_closure]}" &&
+      "$booted" == "${RECORD[old_running]}" &&
+      "$booted" == "${RECORD[old_profile_closure]}" &&
+      "$(current_closure)" == "${RECORD[old_running]}" &&
+      "$(profile_closure)" == "${RECORD[old_profile_closure]}" ]]; then
       RECORD["phase"]="restored"
       RECORD["restore_result"]="restored-by-reboot"
       RECORD["restore_detail"]="the machine rebooted onto the recovery closure while a restore was in flight"
     else
       RECORD["phase"]="restore-failed"
       RECORD["restore_result"]="restore-interrupted-by-reboot"
-      RECORD["restore_detail"]="rebooted onto $booted, which is neither the candidate nor the recorded recovery closure ${RECORD[old_running]}"
+      local runtime profile
+      runtime="$(current_closure)"
+      profile="$(profile_closure)"
+      [[ -n "$profile" && -e "$profile" ]] || profile="<unresolved>"
+      RECORD["restore_detail"]="rebooted onto $booted; recovery state not established: current runtime=${runtime:-<unresolved>}, profile=$profile; recorded runtime=${RECORD[old_running]}, profile=${RECORD[old_profile_closure]:-<unresolved>}, profile resolution error=${RECORD[profile_resolution_error]:-none}"
     fi
     RECORD["reconciled_at"]="$now"
     record_save
@@ -1429,9 +1538,8 @@ cmd_reconcile() {
 
 # ── stage / reboot — boot maintenance, always explicit ──────────────────────
 #
-# `stage` writes the bootloader entry for the candidate WITHOUT switching the
-# profile or touching anything live, so the machine is ready to boot into it
-# the next time somebody chooses to reboot.
+# `stage` registers a system profile generation and writes its boot entry,
+# without touching the live runtime. Generation discovery requires the profile.
 cmd_stage() {
   require_privileged
   local candidate_arg=""
@@ -1461,6 +1569,8 @@ cmd_stage() {
   local running booted
   running="$(current_closure)"
   booted="$(booted_closure)"
+  valid_store_path "$running" || die "stage: no usable recovery runtime"
+  valid_store_path "$booted" || die "stage: no usable booted closure"
   valid_store_path "$running" && gc_protect running "$running"
   valid_store_path "$booted" && gc_protect booted "$booted"
 
@@ -1468,12 +1578,45 @@ cmd_stage() {
   # here rather than left to the bootloader.
   esp_preflight || die "stage: refusing to write a boot entry with this little EFI space."
 
-  # `boot` and NOT `switch`: this writes the bootloader entry for the candidate
-  # and touches nothing that is currently running. That is the entire difference
-  # between staging a reboot and taking one.
-  switch_to_configuration "$candidate" boot
+  # Bootloader generation discovery reads the SYSTEM PROFILE. Register first,
+  # without live activation, and restore the old profile/boot intent on failure.
+  RECORD[txid]="$(new_txid)"
+  RECORD["old_running"]="$running"
+  RECORD["old_profile"]="$(profile_target)"
+  RECORD["old_gen"]="$(generation_of "${RECORD[old_profile]}")"
+  RECORD["old_profile_closure"]=""
+  if [[ -n "${RECORD[old_profile]}" ]]; then
+    RECORD["old_profile_closure"]="$(profile_closure)"
+    valid_store_path "${RECORD[old_profile_closure]}" || die "stage: unusable previous profile"
+    protect_recorded_profile
+  fi
+  RECORD[phase]=staging
+  RECORD[operation]=stage
+  RECORD[candidate]="$candidate"
+  RECORD[booted]="$booted"
+  RECORD[deadline]=""
+  RECORD[activated_at]=""
+  RECORD[staged_candidate]=""
+  resolve_recorded_profile || die "cannot resolve captured profile before staging"
+  record_save
+  local rc=0 recovery_rc=0
+  timeout --signal=KILL "$NM_RESTORE_TIMEOUT" "$NM_ENV" --profile "$NM_PROFILE" --set "$candidate" || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    switch_to_configuration "$candidate" boot "$NM_RESTORE_TIMEOUT" || rc=$?
+  fi
+  if [[ "$rc" -ne 0 ]]; then
+    restore_profile_intent || recovery_rc=$?
+    if [[ "$recovery_rc" -eq 0 ]]; then
+      switch_to_configuration "${RECORD[old_profile_closure]}" boot "$NM_RESTORE_TIMEOUT" || recovery_rc=$?
+    fi
+    RECORD["restore_detail"]="stage failed exit $rc; profile/boot recovery exit $recovery_rc"
+    RECORD["staged_candidate"]=""
+    if [[ "$recovery_rc" -ne 0 ]]; then RECORD["phase"]="restore-failed"; else RECORD["phase"]="prepared"; fi
+    record_save
+    die "${RECORD[restore_detail]}"
+  fi
 
-  RECORD["phase"]="prepared"
+  RECORD["phase"]="staged"
   RECORD["operation"]="stage"
   RECORD["candidate"]="$candidate"
   RECORD["staged_candidate"]="$candidate"
@@ -1482,7 +1625,7 @@ cmd_stage() {
   record_save
 
   sayf "stage: bootloader entry written for $candidate"
-  sayf "stage: NOTHING was switched live. profile is still $NM_PROFILE -> $(profile_closure)"
+  sayf "stage: NOTHING was switched live. candidate generation selected; profile is $NM_PROFILE -> $(profile_closure)"
   sayf "stage: reboot only when you have chosen to, and only with console/remote access ready:"
   sayf "         ns-maint reboot --yes"
 }
@@ -1559,23 +1702,39 @@ cmd_abort() {
 # survive this.
 cmd_gc() {
   require_privileged
-  local keep=3
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --keep)
-      keep="$2"
-      shift 2
+    --keep | --keep=*)
+      die "gc: --keep is not supported; this command never deletes generation links. All system generations and recovery roots are retained."
       ;;
     -h | --help)
-      say "usage: ns-maint gc [--keep N]"
+      say "usage: ns-maint gc (all generations are retained)"
       return 0
       ;;
     *) die "gc: unknown argument '$1'" ;;
     esac
   done
-  say "gc: running nix-collect-garbage --keep $keep (generations are NOT deleted;"
-  say "gc: ns-maint recovery roots in $NM_GCROOTS are honoured):"
-  "$NM_NIX_STORE" --gc --keep "$keep"
+  lock_acquire
+  record_load
+  if is_pending_phase "${RECORD[phase]}"; then
+    die "gc: transaction ${RECORD[txid]} is pending (${RECORD[phase]}); refusing collection"
+  fi
+  local label closure
+  for label in running booted profile; do
+    case "$label" in
+      running) closure="$(current_closure)" ;;
+      booted) closure="$(booted_closure)" ;;
+      profile) closure="$(profile_closure)" ;;
+    esac
+    valid_store_path "$closure" || die "gc: cannot protect the $label closure; refusing collection"
+    gc_protect "$label" "$closure"
+  done
+  for label in candidate old_running old_profile_closure; do
+    closure="${RECORD[$label]}"
+    [[ -z "$closure" ]] || gc_protect "gc-$label" "$closure"
+  done
+  say "gc: collecting unreferenced store paths; all generation links and recovery roots are retained."
+  "$NM_NIX_STORE" --gc
 }
 
 # ── verify-installation ─────────────────────────────────────────────────────
@@ -1636,8 +1795,7 @@ usage: ns-maint <command> [options]
 
   confirm   <txid> [--assume-new-connection]
             Bind the operator's yes to one transaction id, after checking local
-            health AND that a NEW sshd session was accepted since the switch was
-            armed. An old, still-open SSH socket proves nothing.
+            health AND that a NEW sshd session was accepted after APPLY completed. An old, still-open SSH socket proves nothing.
 
   abort     [<txid>]
             Operator-initiated restore. Live, never a reboot.
@@ -1655,7 +1813,8 @@ usage: ns-maint <command> [options]
 
   reboot    --yes           The only reboot in this tool. Never implicit.
 
-  gc        [--keep N]      Collection with generation retention. Never -d.
+  gc                       Collect unreferenced paths; keep every generation.
+                           --keep is refused; no generation deletion.
 
   roots                      List pinned recovery closures.
   verify-installation        Check the invariants the rest of the tool assumes.

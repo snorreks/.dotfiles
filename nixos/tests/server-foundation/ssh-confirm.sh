@@ -74,7 +74,7 @@ t_start "a NEW session on port 22 after the switch confirms the transaction"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 accepted_line "$((armed + 5))" "$PEER22" "$PORT22"
 SSH_CONNECTION="$PEER22 $PORT22 127.0.0.1 22" ns_maint confirm "$id" >"$TMP/log/confirm.out" 2>&1
 is_eq "the transaction is confirmed" "confirmed" "$(phase)"
@@ -87,7 +87,7 @@ t_start "a NEW session on port 2222 — the phone's listener — also confirms"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 # The SAME unit, a different local port. If the check were per-listener this is
 # where it would break, and the available "fix" would be to stop checking.
 accepted_line "$((armed + 5))" "$PEER2222" "$PORT2222"
@@ -104,12 +104,12 @@ t_start "a session accepted BEFORE the switch does not confirm anything"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 # The pre-existing socket's session. Same peer, same unit, wrong timestamp — the
 # exact shape that makes "I am still connected" worthless as evidence.
 accepted_line "$((armed - 30))" "$PEER22" "$PORT22"
 out="$(SSH_CONNECTION="$PEER22 $PORT22 127.0.0.1 22" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-isnt 0 "$rc" "a stale session must not confirm"
+isnt "a stale session must not confirm" 0 "$rc"
 is_eq "the transaction is untouched" "awaiting-confirm" "$(phase)"
 has "and it says why" "$out" "no NEW sshd session"
 has "including what to do about it" "$out" "Open a second connection"
@@ -121,12 +121,12 @@ t_start "a session from a DIFFERENT peer does not confirm this one"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 # Somebody else's session, from the same unit, after the switch. The check must
 # be about this peer, not about "did anybody connect".
 accepted_line "$((armed + 5))" "100.99.99.99" "40000"
 out="$(SSH_CONNECTION="$PEER22 $PORT22 127.0.0.1 22" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-isnt 0 "$rc" "another peer's session is not evidence for this one"
+isnt "another peer's session is not evidence for this one" 0 "$rc"
 is_eq "the transaction is untouched" "awaiting-confirm" "$(phase)"
 t_done
 fixture_free
@@ -136,10 +136,10 @@ t_start "the same peer on a different source port does not confirm"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 accepted_line "$((armed + 5))" "$PEER22" "$((PORT22 + 1))"
 out="$(SSH_CONNECTION="$PEER22 $PORT22 127.0.0.1 22" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-isnt 0 "$rc" "a different source port is a different connection"
+isnt "a different source port is a different connection" 0 "$rc"
 t_done
 fixture_free
 
@@ -148,12 +148,12 @@ t_start "a tailnet peer gets the Tailscale SSH explanation, not a dead end"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 # No sshd record at all, and the peer is inside the tailnet CGNAT range — i.e.
 # the operator is on Tailscale SSH, where the acceptance is recorded by
 # tailscaled and this check will never find it.
 out="$(SSH_CONNECTION="100.71.67.69 54321 100.71.67.69 22" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-isnt 0 "$rc" "still refused — the check is not loosened"
+isnt "still refused — the check is not loosened" 0 "$rc"
 is_eq "the transaction is untouched" "awaiting-confirm" "$(phase)"
 has "it explains where Tailscale SSH records acceptance" "$out" "recorded by"
 has "it names the unit that will have it" "$out" "tailscaled"
@@ -169,7 +169,7 @@ fixture_new
 prepare_and_activate 300
 id="$(txid)"
 out="$(SSH_CONNECTION="203.0.113.7 40000 203.0.113.7 22" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-isnt 0 "$rc" "still refused"
+isnt "still refused" 0 "$rc"
 hasnt "no Tailscale SSH paragraph for a public address" "$out" "is a tailnet address"
 t_done
 fixture_free
@@ -195,7 +195,7 @@ fixture_new
 prepare_and_activate 300
 id="$(txid)"
 out="$(SSH_CONNECTION="" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-isnt 0 "$rc" "with nothing to verify, refuse"
+isnt "with nothing to verify, refuse" 0 "$rc"
 has "and it says what the console operator can do" "$out" "--assume-new-connection"
 t_done
 fixture_free
@@ -205,12 +205,31 @@ t_start "confirmation never reboots, on any of these paths"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-armed="$(rec_field armed_at)"
+armed="$(rec_field activated_at)"
 accepted_line "$((armed + 5))" "$PEER2222" "$PORT2222"
 SSH_CONNECTION="$PEER2222 $PORT2222 127.0.0.1 2222" ns_maint confirm "$id" >/dev/null 2>&1
 assert_no_reboot
 t_done
 fixture_free
+
+for negative in during-apply port-prefix regex-peer; do
+  t_start "reject misleading SSH evidence: $negative"
+  fixture_new
+  prepare_and_activate 300
+  id="$(txid)"
+  completed="$(rec_field activated_at)"
+  case "$negative" in
+    during-apply) accepted_line "$completed" "$PEER22" "$PORT22" ;;
+    port-prefix) accepted_line "$((completed + 5))" "$PEER22" "${PORT22}9" ;;
+    regex-peer) accepted_line "$((completed + 5))" "127x0x0x1" "$PORT22" ;;
+  esac
+  out="$(SSH_CONNECTION="$PEER22 $PORT22 127.0.0.1 22" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
+  isnt "misleading evidence is refused" 0 "$rc"
+  is_eq "transaction remains pending" awaiting-confirm "$(phase)"
+  assert_no_reboot
+  t_done
+  fixture_free
+done
 
 # ─────────────────────────────────────────────────────────────────────────────
 if [[ "$TESTS_FAILED" -ne 0 ]]; then

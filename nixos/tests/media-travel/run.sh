@@ -24,6 +24,8 @@ SUITES=(
   # Drives the SHIPPED netns-up.sh with stubbed privileged tools and asserts the
   # netfilter calls it makes. No nix, no privileges, no namespace.
   "netns-failclosed.sh"
+  # Native Jellyfin loopback configuration and fail-closed Serve startup.
+  "jellyfin-private.sh"
   # Runs the SHIPPED media-state.sh against a real SQLite database, including
   # the corrupt-database case.
   "state-restore.sh"
@@ -49,6 +51,7 @@ CHECKED=(
   "../../config/system/media/scripts/media-offline-prep.sh"
   "../../config/system/media/scripts/jellyfin-accel-check.sh"
   "netns-failclosed.sh"
+  "jellyfin-private.sh"
   "state-restore.sh"
   "selective-sync.sh"
   "travel-builder.sh"

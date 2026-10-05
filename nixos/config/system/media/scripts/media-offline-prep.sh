@@ -39,6 +39,10 @@ die() {
 
 [[ -d "$CACHE_ROOT" ]] || die "cache root $CACHE_ROOT does not exist"
 [[ -d "$LIBRARY_ROOT" ]] || die "library root $LIBRARY_ROOT does not exist"
+CACHE_ROOT="$(realpath -e -- "$CACHE_ROOT")"
+LIBRARY_ROOT="$(realpath -e -- "$LIBRARY_ROOT")"
+[[ "$CACHE_ROOT" != "$LIBRARY_ROOT" && "$CACHE_ROOT" != "$LIBRARY_ROOT/"* && "$LIBRARY_ROOT" != "$CACHE_ROOT/"* ]] ||
+  die 'cache and library roots must not overlap'
 
 # A relative selector is a path relative to the library; a leading slash is
 # interpreted against the library root too, because the operator is thinking in
@@ -46,7 +50,9 @@ die() {
 selectors=()
 for arg in "$@"; do
   [[ -n "$arg" ]] || continue
-  selectors+=("${arg#/}")
+  rel="${arg#/}"
+  [[ "/$rel/" != */../* && "$rel" != '.' && -n "$rel" ]] || die "unsafe selector: $arg"
+  selectors+=("$rel")
 done
 
 if ((${#selectors[@]} == 0)); then
@@ -71,6 +77,19 @@ for rel in "${selectors[@]}"; do
     missing+=("$rel")
     continue
   fi
+  resolved="$(realpath -e -- "$src")"
+  [[ "$resolved" == "$LIBRARY_ROOT/"* ]] || die "selector escapes the library: $rel"
+  # An offline cache cannot rely on links back to the original filesystem.
+  [[ ! -L "$src" ]] || die "symlink selector is not portable: $rel"
+  [[ -z "$(find "$src" -type l -print -quit)" ]] || die "selection contains symlinks: $rel"
+  dst="$CACHE_ROOT/$rel"
+  resolved_dst="$(realpath -m -- "$dst")"
+  [[ "$resolved_dst" == "$CACHE_ROOT/"* ]] || die "destination escapes the cache: $rel"
+  component="$dst"
+  while [[ "$component" != "$CACHE_ROOT" ]]; do
+    [[ ! -L "$component" ]] || die "destination contains a symlink: $rel"
+    component="$(dirname -- "$component")"
+  done
   if [[ -d "$src" ]]; then
     size="$(du -sb -- "$src" | cut -f1)"
   else
@@ -102,7 +121,7 @@ avail_kb="$(df -Pk -- "$CACHE_ROOT" | awk 'NR==2 {print $4}')"
 need_kb=$(((total_bytes + 1023) / 1024))
 if ((avail_kb < need_kb + MIN_FREE_MB * 1024)); then
   die "not enough room in $CACHE_ROOT.
-  need ${need_kb} MiB + ${MIN_FREE_MB} MiB headroom, have $((avail_kb / 1024)) MiB free.
+  need $(((need_kb + 1023) / 1024)) MiB + ${MIN_FREE_MB} MiB headroom, have $((avail_kb / 1024)) MiB free.
   The headroom is not optional: a full disk mid-copy leaves a cache that looks
   present and is not."
 fi
@@ -123,11 +142,8 @@ for rel in "${selected[@]}"; do
   src="$LIBRARY_ROOT/$rel"
   dst="$CACHE_ROOT/$rel"
   mkdir -p -- "$(dirname -- "$dst")"
-  if [[ -d "$src" ]]; then
-    cp -a -- "$src" "$dst"
-  else
-    cp -a -- "$src" "$dst"
-  fi
+  # -T merges directory CONTENTS on repeat runs rather than nesting src/src.
+  cp -aT -- "$src" "$dst"
   log "copied $rel"
 done
 

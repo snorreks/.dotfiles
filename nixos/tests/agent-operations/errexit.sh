@@ -71,7 +71,8 @@ _t_start "ns-agent-backup: a failing restic must not abort before the retry"
 mkdir -p "$TMP/state"
 printf '%s' "$TMP/repo" >"$TMP/creds/RESTIC_REPOSITORY"
 printf 'p\n' >"$TMP/creds/RESTIC_PASSWORD"
-printf 'sources=["%s"]\nexcludes=[]\nquiesceFile=%s/q.conf\n' "$TMP" "$TMP/state" >"$TMP/backup.conf"
+printf 'sources=["%s"]\nexcludes=[]\nquiesceFile="%s/q.conf"\n' "$TMP" "$TMP/state" >"$TMP/backup.conf"
+: >"$TMP/state/q.conf"
 
 # A restic that always fails, and records each attempt.
 #
@@ -119,7 +120,7 @@ fi
 _t_start "ns-agent-daemon-roots: a dangling root must still print its verdict"
 mkdir -p "$TMP/gcroots"
 ln -sfn "$TMP/does-not-exist" "$TMP/gcroots/ns-ops-dangling"
-out="$(NM_GCROOTS="$TMP/gcroots" NS_OPS_TEST_MODE=1 \
+out="$(NM_GCROOTS="$TMP/gcroots" NS_OPS_TEST_MODE=1 NS_OPS_USER="$(id -un)" \
 	run_like_systemd "$DAEMON_ROOTS" verify 2>&1)"
 rc=$?
 assert_contains "$out" 'DANGLING' 'the dangling root was reported'

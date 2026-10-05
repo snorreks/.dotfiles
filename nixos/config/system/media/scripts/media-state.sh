@@ -1,221 +1,137 @@
 #!/usr/bin/env bash
-# nixos/config/system/media/scripts/media-state.sh
-#
-# Application-consistent export and verification of the media services' own
-# state. Two subcommands:
-#
-#   export   sqlite3 .backup each live database into a durable export tree,
-#            then integrity_check each result. Runs BEFORE the backup.
-#   verify   confirm the exports exist, are non-empty and still pass
-#            integrity_check. Runs AFTER a successful backup.
-#
-# ── Why this lane exports instead of using the backup lane's quiesce ────────
-# The backup module already has a generic `quiesce` table that exports SQLite
-# databases with `.backup` and then runs integrity_check, and using it would
-# have been less code. It is not used, for one reason: the export produced here
-# has to be DURABLE.
-#
-# The quiesce table exports into a staging directory that is created per run and
-# removed afterwards — which is correct for "back this up right now" and wrong
-# for "here is the state to restore", because nothing survives to be verified
-# after the fact. A media library database is worth exactly as much as its last
-# good copy, and a backup whose verification step has nothing to look at is a
-# backup that cannot fail loudly.
-#
-# So this writes to a tree that outlives the run, registers it with
-# agentOps.backup.sources, and `verify` re-checks it afterwards. One mechanism,
-# and the thing being verified is the thing that was shipped.
-#
-# ── Why `.backup` and never `cp` ────────────────────────────────────────────
-# `cp` of a database being written yields a file that passes integrity_check and
-# is still corrupt: SQLite writes pages in place, so a copy taken mid-write is
-# structurally valid and semantically wrong. `.backup` goes through the
-# backup API, which takes a read lock for the duration and produces a
-# transactionally consistent image.
-#
-# Corrupt is also worse than missing here, so a failed export is a HARD failure
-# and an empty export directory is never left behind looking like success.
+# Durable application-consistent media exports. Never copy live SQLite raw.
 set -euo pipefail
-
+umask 0077
 SQLITE="${MEDI_SQLITE:-sqlite3}"
 STATE_DIR="${MEDI_STATE_DIR:-/var/lib/agent-ops/media-exports}"
 HEALTH_DIR="${MEDI_HEALTH_DIR:-/var/lib/agent-ops}"
-LOCK="${MEDI_LOCK:-/run/lock/media-state.lock}"
-
+LOCK="${MEDI_LOCK:-${STATE_DIR}.lock}"
 log() { printf '[media-state] %s\n' "$*" >&2; }
-die() {
-  printf '[media-state] FATAL: %s\n' "$*" >&2
-  exit 1
-}
-
-# `METHOD:PATH` pairs. Method is `sqlite` (backup API + integrity_check) or
-# `plain` (a copy). They are not interchangeable: qBittorrent's state is a flat
-# INI file and one file per torrent, not a database, and running `.backup` on it
-# would fail; while Jellyfin's library index is a live SQLite database where a
-# plain copy is exactly the corruption this script exists to prevent.
-databases=()
-plains=()
-
-collect() {
-  local jellyfin_db="${MEDI_JELLYFIN_DB:-}"
-  local qbit_paths="${MEDI_QBITTORRENT_PATHS:-}"
-  local p
-  [[ -n "$jellyfin_db" && -e "$jellyfin_db" ]] && databases+=("$jellyfin_db")
-  # Colon-separated so several paths can be given without an array, which a
-  # systemd Environment= value cannot carry.
-  if [[ -n "$qbit_paths" ]]; then
-    local IFS=':'
-    for p in $qbit_paths; do
-      [[ -n "$p" && -e "$p" ]] && plains+=("$p")
-    done
+die() { log "FATAL: $*"; exit 1; }
+staging=''
+restart_unit=''
+cleanup() {
+  local status=$?
+  [[ -z "$staging" ]] || rm -rf -- "$staging"
+  if [[ -n "$restart_unit" ]]; then
+    systemctl start "$restart_unit" || status=1
   fi
+  exit "$status"
 }
+trap cleanup EXIT
 
-do_export() {
-  command -v "$SQLITE" >/dev/null 2>&1 ||
-    die "sqlite3 not found; refusing to copy databases raw."
-
-  # One export at a time. Concurrent `.backup` against the same database is
-  # safe but two exports writing the same destination is not.
-  exec 9>"$LOCK"
-  flock 9
-
-  collect
-  if ((${#databases[@]} == 0)); then
-    # Nothing to export is a legitimate state (both services off), not an
-    # error. Say so, so "the export dir is empty" is distinguishable from
-    # "the export silently did not run".
-    log "no media databases present on this machine; nothing to export"
-    return 0
+export_state() {
+  local database="${MEDI_JELLYFIN_DB:-}" paths="${MEDI_QBITTORRENT_PATHS:-}"
+  local unit="${MEDI_QBITTORRENT_UNIT:-}" source label result nonempty=0
+  local plain_paths=()
+  if [[ -n "${MEDI_QBITTORRENT_PATHS_JSON:-}" ]]; then
+    jq -e 'type == "array" and all(.[]; type == "string" and startswith("/") and . != "/" and (index("\u0000") == null))' \
+      <<<"$MEDI_QBITTORRENT_PATHS_JSON" >/dev/null || die 'invalid configured plain-state path list'
+    mapfile -d '' -t plain_paths < <(jq -j '.[] + "\u0000"' <<<"$MEDI_QBITTORRENT_PATHS_JSON")
+  elif [[ -n "$paths" ]]; then
+    # Legacy operator/test interface; Nix-generated lists use JSON instead.
+    IFS=: read -r -a plain_paths <<<"$paths"
   fi
-
-  # Build into a temporary tree and swap it in, so a crash mid-export cannot
-  # leave a half-populated directory that `verify` would pass.
-  local staging
+  [[ -n "$database" || ${#plain_paths[@]} -gt 0 ]] || die 'no configured media state'
+  local previous="$STATE_DIR.previous"
+  if [[ -e "$previous" ]]; then
+    # Recover an interrupted rename, including an empty directory re-created
+    # by tmpfiles at boot. Never silently discard a retained old export.
+    if [[ ! -e "$STATE_DIR" ]]; then
+      mv -- "$previous" "$STATE_DIR"
+    elif [[ -d "$STATE_DIR" && -z "$(find "$STATE_DIR" -mindepth 1 -print -quit)" ]]; then
+      rmdir -- "$STATE_DIR"
+      mv -- "$previous" "$STATE_DIR"
+    else
+      die "previous export retained at $previous; inspect both trees before retrying"
+    fi
+  fi
+  if [[ -n "$unit" ]] && systemctl is-active --quiet "$unit"; then
+    restart_unit="$unit"
+    systemctl stop "$unit" || die "cannot quiesce $unit"
+  fi
+  if [[ -n "$database" ]]; then
+    [[ -s "$database" ]] || die "configured database missing or empty: $database"
+  fi
+  for source in "${plain_paths[@]}"; do
+    [[ "$source" != / && -e "$source" ]] || die "configured state missing or unsafe: $source"
+  done
+  mkdir -p -- "$(dirname -- "$STATE_DIR")"
   staging="$(mktemp -d "$STATE_DIR.new.XXXXXX")"
-  # shellcheck disable=SC2064  # expand $staging NOW, not at trap time
-  trap "rm -rf -- '$staging'" EXIT
-
-  local entry src label dest
-  for entry in "${databases[@]}"; do
-    src="$entry"
-    label="$(basename -- "$src")"
-    dest="$staging/$label"
-    log "exporting sqlite $src -> $label"
-    if ! "$SQLITE" "$src" ".backup '$dest'"; then
-      die "sqlite .backup failed for $src — NOT copying it raw.
-A plain copy of a database being written is corrupt in a way that passes
-integrity_check. Leaving the previous good export in place."
-    fi
-    local result
-    result="$("$SQLITE" "$dest" 'PRAGMA integrity_check;' 2>/dev/null || echo ERROR)"
-    if [[ "$result" != "ok" ]]; then
-      die "the export of $src does not pass integrity_check (got: $result)"
-    fi
-  done
-
-  for entry in "${plains[@]}"; do
-    src="$entry"
-    label="$(basename -- "$src")"
-    # Prefixed so a plain copy can never be mistaken for an exported database
-    # during a restore.
-    dest="$staging/plain-$label"
-    log "copying $src -> plain-$label"
-    cp -a -- "$src" "$dest"
-    if [[ ! -s "$dest" ]]; then
-      die "copy of $src produced an empty file; refusing to record a success."
+  if [[ -n "$database" ]]; then
+    label="$(basename -- "$database")"
+    # Fixed destination name makes verification independent of source extension.
+    "$SQLITE" "$database" ".backup '$staging/library.db'" || die "sqlite .backup failed: not a database or backup error: $label"
+    result="$("$SQLITE" "$staging/library.db" 'PRAGMA integrity_check;')"
+    [[ "$result" == ok ]] || die "integrity_check failed: $result"
+  fi
+  for source in "${plain_paths[@]}"; do
+    label="plain-$(basename -- "$source")"
+    [[ ! -e "$staging/$label" ]] || die "duplicate export label: $label"
+    cp -a -- "$source" "$staging/$label"
+    if [[ -d "$staging/$label" ]]; then
+      if [[ -n "$(find "$staging/$label" -type f -size +0c -print -quit)" ]]; then nonempty=$((nonempty + 1)); fi
+      # A plain-state source may not smuggle raw SQLite into the backup tree.
+      [[ -z "$(find "$staging/$label" \( -name '*.db' -o -name '*.sqlite*' -o -name '*-wal' -o -name '*-journal' \) -print -quit)" ]] || die "raw database in plain state: $source"
+    else
+      [[ -s "$staging/$label" ]] || die "empty state file: $source"
+      nonempty=$((nonempty + 1))
     fi
   done
-
-  rm -rf -- "$STATE_DIR"
-  mv -- "$staging" "$STATE_DIR"
-  trap - EXIT
-  log "export complete: ${#databases[@]} sqlite, ${#plains[@]} plain, in $STATE_DIR"
+  [[ -n "$database" || "$nonempty" -gt 0 ]] || die 'empty state export'
+  [[ ! -e "$STATE_DIR" ]] || mv -- "$STATE_DIR" "$previous"
+  if ! mv -- "$staging" "$STATE_DIR"; then
+    [[ ! -e "$previous" ]] || mv -- "$previous" "$STATE_DIR"
+    die 'publishing export failed; previous export preserved'
+  fi
+  staging=''
+  rm -rf -- "$previous"
+  log 'export complete'
 }
-
-do_verify() {
-  local exports="${1:-$STATE_DIR}"
-  local health="${2:-$HEALTH_DIR}"
-  local record="$health/media-state.json"
-
-  # Created FIRST. The "missing" record below is the one an operator most needs
-  # to see, and writing it into a directory that does not exist yet failed
-  # silently — the missing report and the failure to write it look identical.
-  mkdir -p "$health"
-
-  # A missing export directory means the pre-backup export did not run, which
-  # is a FAILURE of the backup's completeness, not a reason to pass quietly.
+verify_state() {
+  local exports="$1" health="$2" checked=0 plain=0 bad=0 nonempty=0 file result
+  mkdir -p -- "$health"
   if [[ ! -d "$exports" ]]; then
-    log "FAIL: $exports does not exist — the media export did not run"
-    printf '{"mediaExport":"missing"}\n' >"$record"
+    printf '{"mediaExport":"missing"}\n' >"$health/media-state.json"
     return 1
   fi
-
-  local checked=0
-  local bad=0
-  local f result
-  for f in "$exports"/*.db; do
-    [[ -e "$f" ]] || continue
+  for file in "$exports"/*.db; do
+    [[ -e "$file" ]] || continue
     checked=$((checked + 1))
-    result="$("$SQLITE" "$f" 'PRAGMA integrity_check;' 2>/dev/null || echo ERROR)"
-    if [[ "$result" != "ok" ]]; then
-      log "FAIL: $f does not pass integrity_check (got: $result)"
-      bad=$((bad + 1))
-    fi
+    result="$("$SQLITE" "$file" 'PRAGMA integrity_check;' 2>/dev/null || echo ERROR)"
+    [[ "$result" == ok ]] || bad=$((bad + 1))
   done
-
-  # Plain copies get an existence-and-non-empty check. They cannot be
-  # integrity-checked because they are not databases, and skipping them
-  # silently would make the count below mean "verified N databases" when what
-  # was really verified was "N databases and M files were present".
-  local plain=0
-  for f in "$exports"/plain-*; do
-    [[ -e "$f" ]] || continue
-    if [[ ! -s "$f" ]]; then
-      log "FAIL: plain export $f is empty"
-      bad=$((bad + 1))
-    fi
+  for file in "$exports"/plain-*; do
+    [[ -e "$file" ]] || continue
     plain=$((plain + 1))
+    if [[ -d "$file" ]]; then
+      if [[ -n "$(find "$file" -type f -size +0c -print -quit)" ]]; then nonempty=$((nonempty + 1)); fi
+    else
+      if [[ -s "$file" ]]; then nonempty=$((nonempty + 1)); else bad=$((bad + 1)); fi
+    fi
   done
-
-  if ((bad > 0)); then
-    printf '{"mediaExport":"corrupt","checked":%d,"plain":%d,"bad":%d}\n' \
-      "$checked" "$plain" "$bad" >"$record"
-    return 1
-  fi
-
-  # Written even when there was nothing to check: the useful distinction for an
-  # operator is between "verified, and there was nothing to verify" and "never
-  # ran".
-  log "verified $checked database(s) and $plain plain export(s)"
-  printf '{"mediaExport":"ok","checked":%d,"plain":%d}\n' "$checked" "$plain" >"$record"
-  return 0
+  if ((checked + nonempty == 0)); then bad=$((bad + 1)); fi
+  result=ok
+  ((bad == 0)) || result=corrupt
+  printf '{"mediaExport":"%s","checked":%d,"plain":%d,"bad":%d}\n' "$result" "$checked" "$plain" "$bad" >"$health/media-state.json"
+  ((bad == 0))
 }
-
+mkdir -p -- "$(dirname -- "$LOCK")"
+exec 9>"$LOCK"
+flock 9
 case "${1:-}" in
-  export) do_export ;;
+  export) export_state ;;
   verify)
-    shift || true
-    # Accept both "--exports DIR --health-dir DIR" and positional fallbacks, so
-    # a hand-run of this script in a shell is as easy as the systemd call.
-    exports="$STATE_DIR"
-    health="$HEALTH_DIR"
+    shift
+    exports="$STATE_DIR" health="$HEALTH_DIR"
     while (($#)); do
       case "$1" in
-        --exports)
-          exports="$2"
-          shift 2
-          ;;
-        --health-dir)
-          health="$2"
-          shift 2
-          ;;
-        *) shift ;;
+        --exports) exports="$2"; shift 2 ;;
+        --health-dir) health="$2"; shift 2 ;;
+        *) die "unknown verify argument: $1" ;;
       esac
     done
-    do_verify "$exports" "$health"
+    verify_state "$exports" "$health"
     ;;
-  *)
-    die "usage: media-state.sh {export|verify [--exports DIR] [--health-dir DIR]}"
-    ;;
+  *) die 'usage: media-state.sh {export|verify [--exports DIR] [--health-dir DIR]}' ;;
 esac

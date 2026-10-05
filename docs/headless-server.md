@@ -576,10 +576,11 @@ survive collection regardless of how many generations are kept.
 
 ```console
 sudo ns-maint roots        # what is pinned, and what it points at
-sudo ns-maint gc --keep 3  # collection, and NEVER -d
+sudo ns-maint gc           # collection only; every generation link is retained
 ```
 
-`-d` deletes generations. That is the old `ngc -d` alias and the old
+`--keep` is rejected: this command does not prune generations. `-d` deletes
+generations. That is the old `ngc -d` alias and the old
 `programs.nh.clean` timer, both removed: deleting a generation deletes a way
 back, and on an unattended box "can I go back to the last known-good system" has
 to keep working.

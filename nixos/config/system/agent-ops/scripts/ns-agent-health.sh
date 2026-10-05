@@ -79,6 +79,11 @@ done
 timeout_bin() { command -v timeout >/dev/null 2>&1 && printf 'timeout %s' "$CMD_TIMEOUT" || printf ''; }
 TMO=$(timeout_bin)
 
+USER_SYSTEMCTL=(systemctl --user)
+if [[ $EUID == 0 && -n "${AGENT_OPS_HEALTH_USER:-}" ]]; then
+	USER_SYSTEMCTL+=(--machine "${AGENT_OPS_HEALTH_USER}@.host")
+fi
+
 # Run a command with a deadline, capturing stdout. Failure yields the fallback,
 # never an abort of the whole report.
 #
@@ -196,16 +201,30 @@ check_credentials() {
 		return
 	fi
 	local out rc
-	out="$(bounded '' "$loader" --format=json 2>/dev/null)" || out=""
-	if [[ -z "$out" ]]; then
-		CRED_JSON='{"available":false,"reason":"loader produced no output"}'
-		note_warning "credentials: readiness could not be read"
+	# Exit 3 is the loader's normal not-ready result and still carries JSON.
+	out="$($TMO "$loader" --format=json 2>/dev/null)"
+	rc=$?
+	if [[ $rc != 0 && $rc != 3 ]]; then
+		out=""
+	fi
+	# Reconstruct only the readiness schema, never forward arbitrary values.
+	CRED_JSON="$(printf '%s' "$out" | jq -cse '
+		select(length == 1) | .[0]
+		| select(type == "object" and (.ready | type == "boolean") and (.credentials | type == "object"))
+		| {available: true, ready: .ready, credentials: (.credentials | with_entries(
+			select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$"))
+			| .value = {ready: (.value.ready == true), session: (.value.session == true),
+				aliases: [(.value.aliases // [])[] | select(type == "string") | select(test("^[A-Za-z_][A-Za-z0-9_]*$"))]}
+		))}' 2>/dev/null)"
+	if [[ -z "$CRED_JSON" ]]; then
+		CRED_JSON='{"available":false,"ready":false,"reason":"readiness unavailable"}'
+		note_problem "credentials: readiness could not be read"
 		return
 	fi
-	# The loader's own JSON already contains booleans and names only. Pass it
-	# through; there is no value in it to redact, and re-parsing it here would
-	# only create a second place for a value to leak.
-	CRED_JSON="$out"
+	out="$CRED_JSON"
+	if [[ $rc != 0 ]] || ! jq -e '.ready' <<<"$out" >/dev/null; then
+		note_warning "credentials: readiness degraded"
+	fi
 	# 🔴 TOTAL COUNTS EVERY CREDENTIAL, READY COUNTS ONLY THE READY ONES.
 	#
 	# Both used to count `"ready":true` occurrences and CRED_READY was a copy of
@@ -220,7 +239,7 @@ check_credentials() {
 	local n
 	while IFS= read -r n; do
 		[[ -n "$n" ]] && CRED_MISSING+=("$n")
-	done < <(printf '%s' "$out" | sed -n 's/.*"\([A-Za-z_][A-Za-z0-9_]*\)":{"ready":false.*/\1/p')
+	done < <(printf '%s' "$out" | jq -r '.credentials | to_entries[] | select(.value.ready != true) | .key')
 	if ((${#CRED_MISSING[@]} > 0)); then
 		note_warning "credentials: ${#CRED_MISSING[@]} not ready (${CRED_MISSING[*]})"
 	fi
@@ -232,11 +251,17 @@ check_services() {
 	local units=("$@")
 	local first=1
 	SERVICES_JSON="["
-	local u state active
+	local u state active rc
 	for u in "${units[@]}"; do
 		[[ -n "$u" ]] || continue
-		state="$(bounded unknown systemctl --user is-active "$u")"
-		active="$(bounded 0 systemctl --user is-failed "$u")"
+		state="$($TMO "${USER_SYSTEMCTL[@]}" is-active "$u" 2>/dev/null)"
+		rc=$?
+		[[ $rc == 0 || "$state" == inactive || "$state" == failed ]] || state=unknown
+		[[ -n "$state" ]] || state=unknown
+		active="$state"
+		if [[ "$state" != active ]]; then
+			note_problem "required service $u is $state"
+		fi
 		((first)) || SERVICES_JSON+=","
 		first=0
 		SERVICES_JSON+="{\"unit\":$(JSON_SAFE "$u"),\"state\":$(JSON_SAFE "$state"),\"failed\":$([[ "$active" == "failed" ]] && echo true || echo false)}"
@@ -257,12 +282,17 @@ check_disk() {
 			((first)) || DISK_JSON+=","
 			first=0
 			DISK_JSON+="{\"mount\":$(JSON_SAFE "$m"),\"error\":\"df failed or timed out\"}"
+			note_problem "disk $m: df failed or timed out"
 			continue
 		fi
 		size="$(awk '{print $2}' <<<"$line")"
 		used="$(awk '{print $3}' <<<"$line")"
 		avail="$(awk '{print $4}' <<<"$line")"
 		pct="$(awk '{gsub(/%/,"",$5); print $5}' <<<"$line")"
+		if [[ ! "$pct" =~ ^[0-9]+$ ]]; then
+			note_problem "disk $m: invalid df data"
+			pct=0
+		fi
 		if ((10#${pct:-0} >= 90)); then
 			note_problem "disk $m is ${pct}% full"
 		fi
@@ -277,8 +307,15 @@ check_disk() {
 	for m in "${mounts[@]}"; do
 		[[ -d "$m" ]] || continue
 		line="$(bounded '' df -Pi "$m" | tail -n 1)"
-		[[ -n "$line" ]] || continue
+		if [[ -z "$line" ]]; then
+			note_problem "inodes $m: df failed or timed out"
+			continue
+		fi
 		ipct="$(awk '{gsub(/%/,"",$5); print $5}' <<<"$line")"
+		if [[ ! "$ipct" =~ ^[0-9]+$ ]]; then
+			note_problem "inodes $m: invalid df data"
+			continue
+		fi
 		if ((10#${ipct:-0} >= 90)); then
 			note_problem "inodes on $m are ${ipct}% used"
 		fi
@@ -330,8 +367,16 @@ check_maintenance() {
 FAILED_JSON=""
 check_failed_units() {
 	local sys user count_failed
-	sys="$(bounded '' systemctl list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}')"
-	user="$(bounded '' systemctl --user list-units --state=failed --no-legend --plain 2>/dev/null | awk '{print $1}')"
+	if ! sys="$($TMO systemctl list-units --state=failed --no-legend --plain 2>/dev/null)"; then
+		note_problem "system manager: failed-unit query unavailable"
+		sys=""
+	fi
+	if ! user="$($TMO "${USER_SYSTEMCTL[@]}" list-units --state=failed --no-legend --plain 2>/dev/null)"; then
+		note_problem "user manager: failed-unit query unavailable"
+		user=""
+	fi
+	sys="$(awk '{print $1}' <<<"$sys")"
+	user="$(awk '{print $1}' <<<"$user")"
 	# Unquoted on purpose: these are two newline-separated lists of unit names,
 	# and the word split is what flattens them into one list to count.
 	# shellcheck disable=SC2086
@@ -356,18 +401,23 @@ check_failed_units() {
 # ── daemon roots ────────────────────────────────────────────────────────────
 DAEMON_JSON=""
 check_daemon_roots() {
-	local checker="${AGENT_OPS_DAEMON_CHECK:-$HOME/.config/agent-ops/herdr-daemon-check}"
+	local checker="${AGENT_OPS_DAEMON_CHECK-$HOME/.config/agent-ops/herdr-daemon-check}"
 	if [[ ! -x "$checker" ]]; then
 		DAEMON_JSON='{"available":false}'
 		return
 	fi
-	local out
-	out="$(bounded '' "$checker" --json)"
-	[[ -n "$out" ]] || {
-		DAEMON_JSON='{"available":false,"reason":"check produced no output"}'
+	local out rc
+	out="$($TMO "$checker" --json 2>/dev/null)"
+	rc=$?
+	if [[ $rc != 0 && $rc != 1 ]] || ! jq -e 'type == "object" and (.healthy | type == "boolean")' <<<"$out" >/dev/null 2>&1; then
+		DAEMON_JSON='{"available":false,"reason":"check failed or produced invalid output"}'
+		note_problem "herdr daemon readiness unavailable"
 		return
-	}
+	fi
 	DAEMON_JSON="$out"
+	if [[ $rc != 0 ]]; then
+		note_problem "herdr daemon check failed"
+	fi
 	if printf '%s' "$out" | grep -q '"healthy":false'; then
 		note_problem "herdr daemon conflicts: $(printf '%s' "$out" | sed -n 's/.*"conflicts":\[\([^]]*\)\].*/\1/p')"
 	fi
@@ -395,8 +445,18 @@ send_heartbeat() {
 		note_warning "heartbeat endpoint is configured but its token is not"
 		return 0
 	fi
-	local url
-	url="$(cat -- "$url_file")"
+	local url token
+	# A sentinel preserves trailing newlines so injection cannot be hidden by
+	# command substitution's newline stripping.
+	url="$(cat -- "$url_file"; printf '.')"
+	url=${url%.}
+	token="$(cat -- "$tok_file"; printf '.')"
+	token=${token%.}
+	if [[ "$url$token" == *$'\n'* || "$url$token" == *$'\r'* ]]; then
+		HEARTBEAT_STATE="refused-invalid-credential"
+		note_warning "heartbeat credential contains a forbidden newline"
+		return 0
+	fi
 	[[ "$url" == https://* ]] || {
 		HEARTBEAT_STATE="refused-insecure-endpoint"
 		note_warning "heartbeat endpoint is not https; refusing to send credentials to it"
@@ -427,11 +487,16 @@ send_heartbeat() {
 	# confidentiality LoadCredential provides. `curl -H @file` reads the header
 	# from a file instead, and curl redacts it from its own /proc/self/cmdline
 	# view as well.
-	local hdr
-	hdr="$(mktemp)"
-	chmod 0600 "$hdr"
-	trap 'rm -f "$hdr"' RETURN
-	printf 'Authorization: Bearer %s\n' "$(cat -- "$tok_file")" >"$hdr"
+	local hdr curl_config escaped_url
+	hdr="$(mktemp)" || { note_problem "heartbeat: private file unavailable"; return 0; }
+	curl_config="$(mktemp)" || { rm -f "$hdr"; note_problem "heartbeat: private file unavailable"; return 0; }
+	chmod 0600 "$hdr" "$curl_config"
+	trap 'rm -f "$hdr" "$curl_config"' RETURN
+	printf 'Authorization: Bearer %s\n' "$token" >"$hdr"
+	escaped_url=${url//\\/\\\\}
+	escaped_url=${escaped_url//\"/\\\"}
+	escaped_url=${escaped_url//$'\t'/\\t}
+	printf 'url = "%s"\n' "$escaped_url" >"$curl_config"
 
 	# Bounded retries with backoff. Bounded, because an outage is exactly when
 	# this runs and an unbounded retry loop against a dead endpoint is how a
@@ -445,7 +510,7 @@ send_heartbeat() {
 	while ((attempt < max)); do
 		attempt=$((attempt + 1))
 		bounded '' curl -fsS --retry 0 			-H "@$hdr" 			-H 'Content-Type: application/json' \
-			--data "$payload" "$url" >/dev/null 2>&1
+			--config "$curl_config" --data "$payload" >/dev/null 2>&1
 		rc=$BOUNDED_STATUS
 		if ((rc == 0)); then
 			HEARTBEAT_STATE="sent"
@@ -454,7 +519,7 @@ send_heartbeat() {
 		fi
 		((attempt < max)) && sleep $((attempt * 5))
 	done
-	rm -f "$hdr"
+	rm -f "$hdr" "$curl_config"
 	trap - RETURN
 	HEARTBEAT_STATE="unreachable"
 	note_warning "heartbeat endpoint did not answer after ${max} bounded attempts"
@@ -464,7 +529,9 @@ send_heartbeat() {
 # ── run everything ──────────────────────────────────────────────────────────
 check_backup
 check_credentials
-check_services herdr.service herdr-daemon-check.service collie.service
+# Only services selected by the configuration are required (not oneshot checks).
+read -r -a REQUIRED_SERVICES <<<"${AGENT_OPS_HEALTH_REQUIRED_SERVICES:-}"
+check_services "${REQUIRED_SERVICES[@]}"
 check_disk / /home /nix
 check_thermal
 check_maintenance
@@ -479,6 +546,12 @@ elif ((${#WARNINGS[@]} > 0)); then
 fi
 
 send_heartbeat
+# Heartbeat failures can add warnings too; report the final verdict.
+if ((${#PROBLEMS[@]} > 0)); then
+	OVERALL=unhealthy
+elif ((${#WARNINGS[@]} > 0)); then
+	OVERALL=degraded
+fi
 
 problems_json() {
 	local first=1 p
@@ -539,6 +612,6 @@ fi
 
 case "$OVERALL" in
 healthy) exit 0 ;;
-degraded) exit 0 ;;
+degraded) exit 1 ;;
 unhealthy) exit 1 ;;
 esac

@@ -485,7 +485,16 @@
           # and nixos/tests/README.md says the same.
           export NM_REQUIRE_ALL=0
           export NM_SKIP_HOST_EVAL=1
-          bash "$src/tests/run.sh"
+          # This output owns maintenance and foundation only. The full registry
+          # also needs agent/media tools and Cargo, with separate check closures
+          # below; invoking it here silently skipped or failed unrelated lanes.
+          shellcheck -x -P "$src/tests" "$src/config/system/maintenance/ns-maint.sh" "$src/tests/ns-maint-transaction.sh"
+          for suite in ns-maint-transaction.sh kill-switch-targets.sh disk-cleanup-safety.sh \
+            server-foundation/role-policy.sh server-foundation/boot-health.sh \
+            server-foundation/tailscale-reconcile.sh server-foundation/ssh-confirm.sh; do
+            bash "$src/tests/$suite"
+          done
+          printf '%s\n' 'SKIP: full host evaluation is run outside the build sandbox'
 
           touch "$out"
           runHook postInstall
@@ -509,6 +518,7 @@
             nixpkgs.legacyPackages.${system}.bash
             nixpkgs.legacyPackages.${system}.coreutils
             nixpkgs.legacyPackages.${system}.findutils
+            nixpkgs.legacyPackages.${system}.fish
             nixpkgs.legacyPackages.${system}.git
             nixpkgs.legacyPackages.${system}.gnugrep
             nixpkgs.legacyPackages.${system}.nix
@@ -524,6 +534,7 @@
             nixpkgs.legacyPackages.${system}.shellcheck
             nixpkgs.legacyPackages.${system}.sqlite
             nixpkgs.legacyPackages.${system}.restic
+            nixpkgs.legacyPackages.${system}.systemd
             nixpkgs.legacyPackages.${system}.util-linux
             nixpkgs.legacyPackages.${system}.which
           ];
@@ -540,7 +551,7 @@
 
           # No facts are written here: they come from the store path below, so
           # there is nothing for a test's cleanup to delete.
-          AGENT_OPS_HOST_FACTS="${agentOperationsFacts}" \
+          AGENT_OPS_NIXPKGS="${nixpkgs}" AGENT_OPS_HOST_FACTS="${agentOperationsFacts}" \
             bash "$src/tests/agent-operations/run.sh"
 
           touch "$out"
@@ -569,6 +580,7 @@
             nixpkgs.legacyPackages.${system}.gnugrep
             nixpkgs.legacyPackages.${system}.jq
             nixpkgs.legacyPackages.${system}.nix
+            nixpkgs.legacyPackages.${system}.python3
             nixpkgs.legacyPackages.${system}.shellcheck
             nixpkgs.legacyPackages.${system}.sqlite
             nixpkgs.legacyPackages.${system}.util-linux

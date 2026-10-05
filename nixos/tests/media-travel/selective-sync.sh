@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck source-path=SCRIPTDIR
 # nixos/tests/media-travel/selective-sync.sh
 #
 # Audit checklist: "Test selective-sync exclusions/conflicts with isolated
@@ -109,7 +110,6 @@ excluded() {
       # (shellcheck would quote the pattern to avoid accidental globbing; that
       # is precisely the behaviour required here.)
       # shellcheck disable=SC2254
-      # shellcheck disable=SC2254
       case "$rel" in
         $rule) return 0 ;;
       esac
@@ -191,18 +191,41 @@ fi
 
 # ── The module refuses the two folder shapes that cannot be safe ───────────
 SYN="$HERE/../../config/system/media/syncthing.nix"
-if grep -q 'lib.hasPrefix "/var/lib/tailscale"' "$SYN"; then
+if grep -qF '"/var/lib/tailscale"' "$SYN" && grep -qF 'lib.all safeFolder cfg.folders' "$SYN"; then
   ok "the module refuses a Tailscale-state folder at evaluation"
 else
   bad "no assertion refusing a Tailscale-state folder"
 fi
-# -F, because the Nix source contains a literal `f == "$HOME"` and shellcheck
-# reads single-quoted $ as an unexpanded expansion that will confuse a reader.
+# The raw selection is checked, including lexical traversal and actual homes.
 # shellcheck disable=SC2016
-if grep -qF 'f == "$HOME"' "$SYN"; then
+if grep -qF 'path != "/home/${opts.username}"' "$SYN" && grep -qF 'builtins.elem ".."' "$SYN"; then
   ok "the module refuses a whole-home folder at evaluation"
 else
   bad "no assertion refusing a whole-home folder"
 fi
+
+# Offline preparation is scoped and repeatable, not an arbitrary file copier.
+PREP="$HERE/../../config/system/media/scripts/media-offline-prep.sh"
+LIBRARY="$FIXTURE_TMP/library"
+CACHE="$FIXTURE_TMP/cache"
+OUTSIDE="$FIXTURE_TMP/outside"
+mkdir -p "$LIBRARY/Films/Example" "$CACHE" "$OUTSIDE"
+printf 'fixture movie\n' >"$LIBRARY/Films/Example/movie.mkv"
+printf 'private canary\n' >"$OUTSIDE/private.txt"
+prep() { MEDI_LIBRARY_ROOT="$LIBRARY" MEDI_TRAVEL_CACHE="$CACHE" MEDI_MIN_FREE_MB=0 bash "$PREP" "$@" >"$FIXTURE_TMP/prep.out" 2>&1; }
+if prep 'Films/Example' && prep 'Films/Example' && [[ -f "$CACHE/Films/Example/movie.mkv" && ! -e "$CACHE/Films/Example/Example" ]]; then
+  ok 'repeating an offline directory selection does not nest directories'
+else
+  bad 'offline directory copy is not repeat-safe' "$(cat "$FIXTURE_TMP/prep.out")"
+fi
+if prep '../outside/private.txt'; then bad 'offline selector escaped its root'; else ok 'offline traversal is refused'; fi
+ln -s "$OUTSIDE" "$LIBRARY/escape"
+if prep 'escape/private.txt'; then bad 'source symlink escaped the library'; else ok 'source symlink escape is refused'; fi
+ln -s "$OUTSIDE" "$CACHE/escape"
+mkdir -p "$LIBRARY/escape-dest"
+printf 'safe\n' >"$LIBRARY/escape-dest/item"
+ln -s "$OUTSIDE" "$CACHE/escape-dest"
+if prep 'escape-dest/item'; then bad 'destination symlink escaped the cache'; else ok 'destination symlink escape is refused'; fi
+if [[ ! -e "$OUTSIDE/item" ]]; then ok 'no out-of-cache file was written'; else bad 'outside destination was changed'; fi
 
 summary "selective-sync"

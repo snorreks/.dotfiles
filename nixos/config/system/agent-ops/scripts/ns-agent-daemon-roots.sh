@@ -76,6 +76,13 @@ die() {
 	exit 2
 }
 
+# Root has no implicit target: its user manager is not the operator's.
+if [[ -z "${NS_OPS_USER:-}" ]]; then
+	[[ "$(id -u)" != 0 ]] || die "root must set NS_OPS_USER to the target user."
+	NS_OPS_USER="$(id -un)"
+fi
+NS_OPS_UID="$(id -u "$NS_OPS_USER")" || die "cannot resolve target user '$NS_OPS_USER'."
+
 usage() {
 	cat >&2 <<EOF
 usage: $PROGRAM_NAME <command> [options]
@@ -85,6 +92,8 @@ usage: $PROGRAM_NAME <command> [options]
   verify              re-resolve each pinned root; nonzero if any is missing
   gc-check            run nix-store --gc --dry-run, then verify the roots survived
   release <name>      remove one pin
+
+  NS_OPS_USER         target user (required for root; defaults to self otherwise)
 
   --unit NAME         systemd user unit to take the main pid from
                        (default: \$NS_OPS_UNIT or herdr.service)
@@ -110,6 +119,38 @@ UNIT=${NS_OPS_UNIT:-herdr.service}
 PID_FILE=""
 EXPLICIT_PID=""
 ROOT_NAME=""
+UNITS=()
+
+user_systemctl() {
+	if [[ "$(id -u)" == 0 ]]; then
+		"$SYSTEMCTL_BIN" --user --machine "$NS_OPS_USER@.host" "$@"
+	else
+		"$SYSTEMCTL_BIN" --user "$@"
+	fi
+}
+
+# UID and start ticks are checked before discovery, and again around pinning.
+# A numeric PID by itself is not a process identity.
+process_identity() {
+	local pid="$1" stat uid
+	uid="$(awk '/^Uid:/ {print $2}' "$PROC_ROOT/$pid/status" 2>/dev/null)" || return 1
+	[[ "$uid" == "$NS_OPS_UID" ]] || return 1
+	stat="$(cat "$PROC_ROOT/$pid/stat" 2>/dev/null)" || return 1
+	stat="${stat##*) }"
+	local -a fields
+	read -r -a fields <<<"$stat"
+	[[ "${fields[19]:-}" =~ ^[0-9]+$ ]] || return 1
+	printf '%s:%s' "$uid" "${fields[19]}"
+}
+
+is_herdr_server() {
+	local pid="$1"
+	local -a args=()
+	mapfile -d '' -t args <"$PROC_ROOT/$pid/cmdline" 2>/dev/null || return 1
+	# The actual packaged invocation is exactly `herdr server`. Status/stop
+	# clients and another user's daemon must never replace its root.
+	[[ "${#args[@]}" == 2 && "${args[0]##*/}" == herdr && "${args[1]}" == server ]]
+}
 
 resolve_pid() {
 	if [[ -n "$EXPLICIT_PID" ]]; then
@@ -126,9 +167,10 @@ resolve_pid() {
 	fi
 	command -v "$SYSTEMCTL_BIN" >/dev/null 2>&1 || return 1
 	local p
-	p="$("$SYSTEMCTL_BIN" --user show "$UNIT" -p MainPID --value 2>/dev/null || true)"
+	p="$(user_systemctl show "$UNIT" -p MainPID --value 2>/dev/null)" || return 1
 	p="${p//[[:space:]]/}"
-	[[ "$p" =~ ^[0-9]+$ && "$p" != "0" ]] || return 1
+	[[ "$p" =~ ^[0-9]+$ ]] || return 1
+	[[ "$p" != 0 ]] || return 2 # Confirmed stopped, not a failed query.
 	printf '%s' "$p"
 }
 
@@ -136,20 +178,23 @@ resolve_pid() {
 # exactly the manually-started-server case and refusing to pin it would leave
 # the most at-risk daemon unprotected.
 resolve_pid_from_proc() {
-	local d comm argv
+	local d executable found=''
+	local -a args=()
 	for d in "$PROC_ROOT"/[0-9]*; do
-		[[ -r "$d/comm" && -r "$d/cmdline" ]] || continue
-		comm="$(cat "$d/comm" 2>/dev/null || true)"
-		[[ "$comm" == "herdr" ]] || continue
-		argv="$(tr '\0' ' ' <"$d/cmdline" 2>/dev/null || true)"
-		case " $argv " in
-		*" server "*)
-			printf '%s' "${d##*/}"
-			return 0
-			;;
-		esac
+		process_identity "${d##*/}" >/dev/null || continue
+		if [[ "$UNIT" == herdr.service ]]; then
+			is_herdr_server "${d##*/}" || continue
+		else
+			mapfile -d '' -t args <"$d/cmdline" 2>/dev/null || continue
+			executable="${args[0]:-}"
+			[[ "${executable##*/}" == "${UNIT%.service}" ]] || continue
+		fi
+		# Multiple manual servers are ambiguous, not permission to pick one.
+		[[ -z "$found" ]] || return 1
+		found="${d##*/}"
 	done
-	return 1
+	[[ -n "$found" ]] || return 1
+	printf '%s' "$found"
 }
 
 # The ACTUAL executable. readlink -f through /proc/PID/exe, which resolves the
@@ -215,17 +260,31 @@ closure_count() {
 cmd_pin() {
 	require_privileged || exit $?
 
-	local pid exe store_path
-	if ! pid="$(resolve_pid)" && ! pid="$(resolve_pid_from_proc)"; then
-		sayf "no running herdr server found (unit $UNIT MainPID, and no 'herdr server' in $PROC_ROOT)."
-		sayf "Nothing to pin. A daemon that is not running cannot lose its closure."
-		return 0
+	local pid exe store_path identity discovery_rc=0
+	pid="$(resolve_pid)" || discovery_rc=$?
+	if ((discovery_rc != 0)); then
+		# A stopped herdr unit may still have a manually launched server.
+		# Other units use /proc only when the manager could not answer.
+		if [[ -n "$EXPLICIT_PID" || -n "$PID_FILE" ]] ||
+			{ ((discovery_rc == 2)) && [[ "$UNIT" != herdr.service ]]; } ||
+			! pid="$(resolve_pid_from_proc)"; then
+			sayf "cannot determine a running PID for $UNIT; no root created (discovery status $discovery_rc)."
+			return 1
+		fi
 	fi
 	[[ "$pid" =~ ^[0-9]+$ ]] || {
 		sayf "refusing to pin: pid '$pid' is not a number."
 		return 1
 	}
 
+	identity="$(process_identity "$pid")" || {
+		sayf "refusing pid $pid: owner or process identity could not be verified."
+		return 1
+	}
+	if [[ "$UNIT" == herdr.service ]] && ! is_herdr_server "$pid"; then
+		sayf "refusing pid $pid: not the herdr server invocation."
+		return 1
+	fi
 	if ! exe="$(daemon_exe "$pid")"; then
 		sayf "cannot read $PROC_ROOT/$pid/exe."
 		return 1
@@ -256,7 +315,15 @@ cmd_pin() {
 		sayf "root name '$name' must be [A-Za-z0-9_.-]+"
 		return 2
 	}
-	pin_root "$name" "$store_path"
+	[[ "$(process_identity "$pid")" == "$identity" && "$(daemon_exe "$pid")" == "$exe" ]] || {
+		sayf "refusing pid $pid: process changed while querying its closure."
+		return 1
+	}
+	pin_root "$name" "$store_path" || return 1
+	[[ "$(process_identity "$pid")" == "$identity" && "$(daemon_exe "$pid")" == "$exe" ]] || {
+		sayf "pid $pid changed while pinning; retry before collecting."
+		return 1
+	}
 
 	# The root is only useful if it points at the store path containing the running binary.
 	verify_one "$name" "$store_path"
@@ -327,7 +394,10 @@ cmd_gc_check() {
 	say "--- roots before ---"
 	printf '%s\n' "$before"
 	say "--- nix-store --gc --dry-run ---"
-	"$NS_OPS_NIX_STORE" --gc --dry-run 2>&1 | tail -n 20 || true
+	if ! "$NS_OPS_NIX_STORE" --gc --dry-run 2>&1 | tail -n 20; then
+		sayf "collector dry run failed; retention is not verified."
+		return 1
+	fi
 	say "--- roots after dry-run ---"
 	cmd_verify
 	rc=$?
@@ -366,10 +436,10 @@ REST_ARG1=${1:-}
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--unit)
-		UNIT="$2"
+		UNITS+=("$2")
 		shift 2
 		;;
-	--unit=*) UNIT="${1#--unit=}"; shift ;;
+	--unit=*) UNITS+=("${1#--unit=}"); shift ;;
 	--pid-file)
 		PID_FILE="$2"
 		shift 2
@@ -392,7 +462,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$CMD" in
-pin) cmd_pin ;;
+pin)
+	((${#UNITS[@]})) || UNITS=("$UNIT")
+	rc=0
+	for UNIT in "${UNITS[@]}"; do cmd_pin || rc=1; done
+	exit "$rc"
+	;;
 list) cmd_list ;;
 verify) cmd_verify ;;
 gc-check) cmd_gc_check ;;

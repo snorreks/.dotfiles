@@ -69,7 +69,7 @@
   # may not be at a keyboard. Deleting a generation deletes a recovery target,
   # and on an unattended host "which generation did we come up from, and can I
   # go back to it" is a question you want to still be able to answer. Retention
-  # is now explicit (`ns-maint gc --keep N`, which never passes -d) and the
+  # is now conservative (`ns-maint gc` keeps every generation, never -d) and the
   # closures that actually matter — the booted one, the running one, and a
   # prepared-but-unactivated candidate — are pinned with GC roots by
   # config/system/maintenance.nix, which survive collection regardless of how

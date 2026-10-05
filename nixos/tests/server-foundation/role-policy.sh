@@ -20,7 +20,7 @@ set -o nounset -o pipefail
 # `checks` sandbox there is no nix.conf and no HOME configuration to supply it,
 # so the suite sets it for itself rather than depending on the caller's
 # environment. Set, not prepended: whatever the caller already enabled is kept.
-export NIX_CONFIG="${NIX_CONFIG:-}experimental-features = nix-command"
+export NIX_CONFIG="${NIX_CONFIG:-}"$'\n'"experimental-features = nix-command"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The nixos/ directory itself: this suite lives at nixos/tests/server-foundation/.
@@ -415,14 +415,12 @@ in
 }
 NIX
 )"
-if [[ "$out" == *'"serverCount":4'* && "$out" == *'"serverMax":4'* && \
+if [[ "$out" == *'"serverCount":3'* && "$out" == *'"serverMax":3'* && \
       "$out" == *'"desktopCount":2'* && "$out" == *'"desktopMax":2'* && \
       "$out" == *'"ownerSame":true'* && "$out" == *'"loopbackFirst":true'* && \
       "$out" == *'9.9.9.9'* && "$out" == *'1.1.1.1'* ]]; then
   :
-  # maxnames == length(nameservers) is the whole invariant: resolv.conf caps how
-  # many nameservers are consulted and silently discards the rest, which is how
-  # a rescue list becomes decoration.
+  # Both rescue addresses must fit inside glibc's hard MAXNS=3.
 else
   fail "the DNS owner/rescue contract is not satisfied — got $out"
 fi

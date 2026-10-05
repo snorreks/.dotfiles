@@ -53,6 +53,16 @@
   ...
 }: let
   cfg = config.agentOps.resources;
+  mkPolicyClass = defaults: lib.mkOption {
+    default = {};
+    type = lib.types.submodule {
+      options = {
+        cpuWeight = lib.mkOption {type = lib.types.ints.between 1 10000; default = defaults.cpuWeight;};
+        ioWeight = lib.mkOption {type = lib.types.ints.between 1 10000; default = defaults.ioWeight;};
+        ioLatencyTargetSec = lib.mkOption {type = lib.types.str; default = defaults.ioLatencyTargetSec;};
+      };
+    };
+  };
 
   # ── The weight-class generators ────────────────────────────────────────────
   #
@@ -64,7 +74,7 @@
   #
   # systemd applies a unit's resource settings to that unit's own cgroup. A
   # placeholder service that runs `true` and exits is weighted and then gone; a
-  # real workload placed in `agentOpsBuild.slice` inherits the SLICE's settings
+  # real workload placed in `<parent>-build.slice` inherits the SLICE's settings
   # and nothing else. Weights on the service therefore bounded nothing while
   # looking as though they bounded something.
   mkClassSlice =
@@ -72,7 +82,7 @@
       systemd.user.slices.${name} = {
         inherit description;
         sliceConfig = {
-          Slice = "agent-workload.slice";
+          # Slice parentage comes from hyphenated names, not Slice= here.
           CPUWeight = policy.cpuWeight;
           IOWeight = policy.ioWeight;
           IOAccounting = true;
@@ -88,7 +98,7 @@
         description = "Sample unit proving ${name}.slice exists and is joinable";
         serviceConfig = {
           # `Slice=` is a [Service] directive for a SERVICE unit — unlike a slice
-          # unit, which takes it from sliceConfig. Putting it in either the top
+          # unit, whose hierarchy is encoded in its name. Putting it in either the top
           # level or a non-existent `sliceConfig` fails evaluation.
           Slice = "${name}.slice";
           Type = "oneshot";
@@ -106,18 +116,19 @@ in {
       type = lib.types.bool;
       default = false;
       description = ''
-        Apply the workload admission and resource policy. Off by default so that
+        Apply workload weights and record admission targets. Off by default so that
         enabling it is a decision made after calibration, not a side effect of
         this PR landing.
       '';
     };
 
     policy = lib.mkOption {
-      type = lib.types.attrs;
-      default = {
-        # CPU shares, relative to each other. 1024 is one full CPU's worth of
-        # weight under the default systemd accounting; these are weights, not
-        # percentages, and they only bite when the host is contended.
+      type = lib.types.submodule {
+        options = lib.mapAttrs (_: defaults: mkPolicyClass defaults) {
+        # Relative weights, not CPU counts or percentages. They only affect
+        # sibling cgroups under contention; 1024 does not mean one full CPU.
+        # Record-only: interactive agents inherit their shell/workspace cgroup;
+        # no real agent workload is assigned these weights by this module.
         agent = {
           cpuWeight = 1024;
           ioWeight = 1024;
@@ -149,11 +160,13 @@ in {
           ioWeight = 2048;
           ioLatencyTargetSec = "10ms";
         };
+        };
       };
+      default = {};
       description = ''
-        Per-workload weights. A weight of 0 is treated as "no limit", NOT as
-        "no CPU": systemd's semantics, and confusing the two would silently
-        create a workload that cannot run at all.
+        Per-workload relative CPU/IO weights, from 1 through 10000. Zero is
+        invalid, not unlimited. Latency targets are recorded for calibration,
+        not enforced by this module.
       '';
     };
 
@@ -216,11 +229,25 @@ in {
       # `description` is the one directive that legitimately sits at the top
       # level; everything else goes in the section it belongs to.
 
-      # The parent slice for every bounded workload.
+      assertions = [{
+        assertion = builtins.match "[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*" cfg.slice != null
+          && !(builtins.elem cfg.slice ["system" "user" "init" "agentOpsManagement"]);
+        message = "agentOps.resources.slice must be a dedicated valid user slice name without .slice";
+      } {
+        assertion = lib.all (name: let policy = cfg.policy.${name} or {}; in
+          lib.all (key: let weight = policy.${key} or 0; in
+            builtins.isInt weight && weight >= 1 && weight <= 10000
+          ) ["cpuWeight" "ioWeight"]
+        ) ["agent" "build" "inference" "transcode" "download" "management"];
+        message = "agentOps.resources requires CPU/IO weights between 1 and 10000 for every class";
+      }];
+
+      # User scopes must opt into these slices. System workload services below
+      # receive real weights; these sample units are not workload admission.
       systemd.user.slices.${cfg.slice} = {
         description = "Bounded workloads: builds, inference, transcoding, downloads";
         sliceConfig = {
-          Slice = "user.slice";
+          # The hyphenated slice name determines its parent automatically.
           # Weight for IO scheduling only; CPU accounting stays on the default
           # hierarchy so `systemd-cgtop` numbers remain comparable.
           IOWeight = cfg.policy.build.ioWeight;
@@ -230,15 +257,15 @@ in {
         };
       };
 
-      # Management: the things that must stay responsive. Never a kill target —
-      # nixos/tests/kill-switch-targets.sh already asserts that management
-      # processes and their descendants are never swept.
+      # An empty calibration sample, NOT protection for real operator/agent
+      # processes. Process-target safety in kill-switch-targets.sh is separate
+      # from cgroup membership and cannot establish OOM protection here.
       systemd.user.slices.agentOpsManagement = {
-        description = "Management: the things that must stay responsive";
+        description = "Empty management calibration slice (no agent membership)";
         sliceConfig = {
-          Slice = "${cfg.slice}.slice";
+          CPUWeight = cfg.policy.management.cpuWeight;
           IOWeight = cfg.policy.management.ioWeight;
-          # Protect the cgroup itself from being OOM-killed by a workload beside it.
+          # Applies to this empty sample only, not to the operator's session.
           ManagedOOMSwap = "kill";
           ManagedOOMMemoryPressure = "kill";
           ManagedOOMPreference = "avoid";
@@ -248,9 +275,9 @@ in {
         };
       };
 
-      # The management class the sampler reports from.
+      # Explicit no-op sample; it does not admit, launch or classify agents.
       systemd.user.services.agentOpsManager = {
-        description = "Weight class for interactive agent processes";
+        description = "Unapplied interactive-agent calibration sample";
         serviceConfig = {
           Slice = "agentOpsManagement.slice";
           Type = "oneshot";
@@ -276,6 +303,8 @@ in {
         slice=${cfg.slice}
         # 🔴 CONFIGURED, NOT ENFORCED. See the `admission` option description.
         admission.enforced=false
+        policy.agent.applied=false
+        management.sampleOnly=true
         maxConcurrentInference=${toString cfg.admission.maxConcurrentInference}
         maxConcurrentTranscode=${toString cfg.admission.maxConcurrentTranscode}
         maxConcurrentDownloads=${toString cfg.admission.maxConcurrentDownloads}
@@ -324,13 +353,41 @@ in {
 
     # One merge element per class: these are function calls, which cannot be
     # statements inside an attribute set.
-    (lib.mkIf cfg.enable (mkClassSlice "agentOpsBuild" "Weight class for nix builds" cfg.policy.build))
-    (lib.mkIf cfg.enable (mkClassSample "agentOpsBuild" cfg.policy.build))
-    (lib.mkIf cfg.enable (mkClassSlice "agentOpsInference" "Weight class for model inference" cfg.policy.inference))
-    (lib.mkIf cfg.enable (mkClassSample "agentOpsInference" cfg.policy.inference))
-    (lib.mkIf cfg.enable (mkClassSlice "agentOpsTranscode" "Weight class for transcoding" cfg.policy.transcode))
-    (lib.mkIf cfg.enable (mkClassSample "agentOpsTranscode" cfg.policy.transcode))
-    (lib.mkIf cfg.enable (mkClassSlice "agentOpsDownload" "Weight class for downloads and sync" cfg.policy.download))
-    (lib.mkIf cfg.enable (mkClassSample "agentOpsDownload" cfg.policy.download))
+    (lib.mkIf cfg.enable (mkClassSlice "${cfg.slice}-build" "Weight class for nix builds" cfg.policy.build))
+    (lib.mkIf cfg.enable (mkClassSample "${cfg.slice}-build" cfg.policy.build))
+    (lib.mkIf cfg.enable (mkClassSlice "${cfg.slice}-inference" "Weight class for model inference" cfg.policy.inference))
+    (lib.mkIf cfg.enable (mkClassSample "${cfg.slice}-inference" cfg.policy.inference))
+    (lib.mkIf cfg.enable (mkClassSlice "${cfg.slice}-transcode" "Weight class for transcoding" cfg.policy.transcode))
+    (lib.mkIf cfg.enable (mkClassSample "${cfg.slice}-transcode" cfg.policy.transcode))
+    (lib.mkIf cfg.enable (mkClassSlice "${cfg.slice}-download" "Weight class for downloads and sync" cfg.policy.download))
+    (lib.mkIf cfg.enable (mkClassSample "${cfg.slice}-download" cfg.policy.download))
+
+    # Apply weights to real services, not only `true` sample units. Children
+    # inherit these cgroups; no arbitrary PID moves or agent termination.
+    (lib.mkIf cfg.enable {
+      systemd.services.nix-daemon.serviceConfig = {
+        CPUWeight = cfg.policy.build.cpuWeight;
+        IOWeight = cfg.policy.build.ioWeight;
+        IOSchedulingClass = "idle";
+      };
+    })
+    (lib.mkIf (cfg.enable && config.services.openssh.enable) {
+      systemd.services.sshd.serviceConfig = {CPUWeight = cfg.policy.management.cpuWeight; IOWeight = cfg.policy.management.ioWeight;};
+    })
+    (lib.mkIf (cfg.enable && config.services.tailscale.enable) {
+      systemd.services.tailscaled.serviceConfig = {CPUWeight = cfg.policy.management.cpuWeight; IOWeight = cfg.policy.management.ioWeight;};
+    })
+    (lib.mkIf (cfg.enable && config.services.ollama.enable) {
+      systemd.services.ollama.serviceConfig = {CPUWeight = cfg.policy.inference.cpuWeight; IOWeight = cfg.policy.inference.ioWeight;};
+    })
+    (lib.mkIf (cfg.enable && config.services.jellyfin.enable) {
+      systemd.services.jellyfin.serviceConfig = {CPUWeight = cfg.policy.transcode.cpuWeight; IOWeight = cfg.policy.transcode.ioWeight;};
+    })
+    (lib.mkIf (cfg.enable && opts.media.torrents.enable) {
+      systemd.services.qbittorrent.serviceConfig = {CPUWeight = cfg.policy.download.cpuWeight; IOWeight = cfg.policy.download.ioWeight;};
+    })
+    (lib.mkIf (cfg.enable && config.services.syncthing.enable) {
+      systemd.services.syncthing.serviceConfig = {CPUWeight = cfg.policy.download.cpuWeight; IOWeight = cfg.policy.download.ioWeight;};
+    })
   ];
 }

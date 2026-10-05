@@ -28,6 +28,12 @@ source "$HERE/lib/fixture.sh"
 SUITE_NAME="health-redaction"
 
 fixture_new
+export AGENT_OPS_HEALTH_USER=fixture-owner
+export AGENT_OPS_HEALTH_REQUIRED_SERVICES='herdr.service collie.service'
+# Keep all storage probes in the fixture too.
+fake df <<'FAKE'
+printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on' 'fixture 1000 100 900 10% /'
+FAKE
 
 # ── the canary ──────────────────────────────────────────────────────────────
 CANARY='CANARY-9f3a7c21-DO-NOT-LEAK'
@@ -63,7 +69,7 @@ printf '#!%s\n' "$(command -v bash)" >"$LOADER"
 cat >>"$LOADER" <<'LOADEREOF'
 if [ "$1" = "--format=json" ] || [ "$2" = "--format=json" ]; then
   printf '%s\n' '{"manifest":"/etc/agent-ops/secrets.manifest","credentials":{"LEAKY_KEY":{"ready":true,"session":true,"aliases":[]},"OPENROUTER_API_KEY":{"ready":false,"session":true,"aliases":[]}},"ready":false}'
-  exit 0
+  exit "${FAKE_LOADER_EXIT:-0}"
 fi
 exit 0
 LOADEREOF
@@ -95,15 +101,18 @@ fake curl <<'FAKE'
 # so logging "$*" verbatim makes `grep -c` count payload LINES and turns a
 # 3-attempt retry into a bogus "15 attempts".
 printf 'curl %s\n' "$(printf '%s' "$*" | tr '\n' ' ')" >>"${TMP}/curl-calls"
-# Record ONLY the JSON body. The URL and the Authorization header are supposed
-# to be sent — that is how authentication works — so asserting that the whole
-# curl invocation is canary-free would be asserting that the endpoint cannot be
-# reached. What must be canary-free is the PAYLOAD: it carries machine state,
-# not credentials.
+# Secrets must be sent through private files, never through process argv.
 prev=""
 for a in "$@"; do
 	case "$prev" in
 	--data | --data-binary | --data-raw) printf '%s\n' "$a" >>"${TMP}/payloads" ;;
+	--config)
+		stat -c '%a' "$a" >>"${TMP}/curl-config-modes"
+		cp "$a" "${TMP}/last-curl-config"
+		;;
+	-H)
+		if [[ "$a" == @* ]]; then stat -c '%a' "${a#@}" >>"${TMP}/curl-header-modes"; fi
+		;;
 	esac
 	prev="$a"
 done
@@ -121,6 +130,13 @@ health_json() { timeout "${HEALTH_WALL_CLOCK:-60}" bash "$HEALTH" "$@" 2>/dev/nu
 
 _t_start "failed-unit counts expand to JSON numbers"
 fake systemctl <<'FAKE'
+printf '%s\n' "$*" >>"$TMP/systemctl-calls"
+if [[ "${FAKE_BUS_FAIL:-0}" == 1 ]]; then exit 1; fi
+if [[ "$*" == *is-active* ]]; then
+    printf '%s\n' "${FAKE_REQUIRED_STATE:-active}"
+    [[ "${FAKE_REQUIRED_STATE:-active}" == active ]]
+    exit $?
+fi
 if [[ "$*" == *list-units* ]]; then
     if [[ "${FAKE_FAILED_UNITS:-0}" == 1 ]]; then
         printf '%s\n' 'example.service loaded failed failed Example'
@@ -341,6 +357,66 @@ assert_contains "$out" 'bounded attempts' 'with the bound stated in the message'
 assert_no_file "$TMP/never" 'the retry loop terminates'
 
 # ═══════════════════════════════════════════════════════════════════════════
+_t_start "failed collectors and required services cannot report green"
+out="$(FAKE_LOADER_EXIT=3 health_json --json --no-heartbeat)"
+assert_eq false "$(jq -r '.credentials.ready' <<<"$out")" 'exit 3 preserves readiness JSON'
+assert_eq 2 "$(jq -r '.credentials.credentials | length' <<<"$out")" 'exit 3 preserves all names'
+assert_contains "$out" 'degraded' 'not-ready credentials degrade health'
+out="$(FAKE_LOADER_EXIT=1 health_json --json --no-heartbeat)"
+assert_eq false "$(jq -r '.credentials.available' <<<"$out")" 'unexpected loader failure marks readiness unavailable'
+assert_eq unhealthy "$(jq -r '.overall' <<<"$out")" 'loader failure cannot green'
+out="$(FAKE_BUS_FAIL=1 health_json --json --no-heartbeat)"
+assert_eq unhealthy "$(jq -r '.overall' <<<"$out")" 'bus failure cannot green'
+assert_contains "$out" 'user manager: failed-unit query unavailable' 'missing user bus is a problem'
+for state in inactive failed; do
+    out="$(FAKE_REQUIRED_STATE=$state health_json --json --no-heartbeat)"
+    assert_contains "$out" "required service herdr.service is $state" 'required service inactivity is a problem'
+    assert_eq unhealthy "$(jq -r '.overall' <<<"$out")" 'inactive required units cannot green'
+done
+if [[ $EUID == 0 ]]; then
+    assert_contains "$(<"$TMP/systemctl-calls")" '--user --machine fixture-owner@.host' 'root targets the owner user manager'
+fi
+out="$(AGENT_OPS_HEALTH_REQUIRED_SERVICES='' FAKE_REQUIRED_STATE=inactive health_json --json --no-heartbeat)"
+assert_eq 0 "$(jq -r '.services | length' <<<"$out")" 'disabled services are not required'
+
+_t_start "readiness accepts only whitelisted fields"
+cp "$LOADER" "$TMP/original-loader"
+printf '#!%s\n' "$(command -v bash)" >"$LOADER"
+printf 'printf '\''%%s\\n'\'' '\''{"ready":false,"value":"%s","credentials":{"SAFE_KEY":{"ready":false,"session":true,"aliases":["SAFE_ALIAS"],"value":"%s"}}}'\''\nexit 3\n' "$CANARY" "$CANARY" >>"$LOADER"
+out="$(health_json --json --no-heartbeat)"
+assert_not_contains "$out" "$CANARY" 'unknown loader fields cannot leak values'
+assert_eq SAFE_ALIAS "$(jq -r '.credentials.credentials.SAFE_KEY.aliases[0]' <<<"$out")" 'safe readiness aliases survive'
+printf '#!%s\nsleep 3600\n' "$(command -v bash)" >"$LOADER"
+out="$(CMD_TIMEOUT=1 health_json --json --no-heartbeat)"
+assert_eq unhealthy "$(jq -r '.overall' <<<"$out")" 'readiness timeout cannot green'
+assert_eq false "$(jq -r '.credentials.available' <<<"$out")" 'readiness timeout is marked missing'
+printf '#!%s\nprintf '\''not-json\\n'\''\n' "$(command -v bash)" >"$LOADER"
+out="$(health_json --json --no-heartbeat)"
+assert_eq unhealthy "$(jq -r '.overall' <<<"$out")" 'invalid readiness JSON cannot green'
+cp "$TMP/original-loader" "$LOADER"
+out="$(HOME="$TMP/not-the-owner-home" health_json --json --no-heartbeat)"
+assert_eq 2 "$(jq -r '.credentials.credentials | length' <<<"$out")" 'explicit owner loader path ignores root HOME'
+
+_t_start "curl argv contains neither URL nor token"
+: >"$CURL_CALLS"
+printf '%s' "https://heartbeat.invalid/$CANARY/quote\"back\\slash" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_URL"
+health --json >/dev/null
+assert_not_contains "$(<"$CURL_CALLS")" "$CANARY" 'credential canaries are absent from curl argv'
+assert_contains "$(<"$TMP/last-curl-config")" 'quote\"back\\slash' 'curl config escapes quotes and backslashes'
+assert_eq 600 "$(sort -u "$TMP/curl-config-modes")" 'curl URL config is private'
+assert_eq 600 "$(sort -u "$TMP/curl-header-modes")" 'token header is private'
+: >"$CURL_CALLS"
+printf 'https://heartbeat.invalid/%s\nurl = "https://injected.invalid"\n' "$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_URL"
+out="$(health --json)"
+assert_contains "$out" 'refused-invalid-credential' 'URL newline injection is refused'
+assert_eq 0 "$(grep -c . "$CURL_CALLS")" 'injected URL is never passed to curl'
+printf '%s' "https://heartbeat.invalid/$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_URL"
+printf 'bearer-%s\n' "$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_TOKEN"
+out="$(health --json)"
+assert_contains "$out" 'refused-invalid-credential' 'token newline injection is refused'
+printf 'bearer-%s' "$CANARY" >"$CRED_DIR/AGENT_OPS_HEARTBEAT_TOKEN"
+
+# ═══════════════════════════════════════════════════════════════════════════
 _t_start "responsiveness: the report finishes even when collectors are broken"
 # A df that hangs, a systemctl that hangs, an endpoint that hangs.
 fake df <<'FAKE'
@@ -380,6 +456,7 @@ else
 	_fail "the report completed despite three hung collectors (exit $rc)"
 fi
 assert_contains "$out" 'df failed or timed out' 'a hung df is reported as missing, not as zero'
+assert_eq unhealthy "$(jq -r '.overall' <<<"$out")" 'df timeout cannot green'
 assert_contains "$out" '"problems"' 'and the rest of the report is still produced'
 
 # With the fakes un-hung it is fast again.
@@ -398,6 +475,7 @@ _t_start "herdr daemon conflicts surface as problems"
 cat >"$AGENT_OPS_DAEMON_CHECK" <<'FAKE'
 #!INTERPRETED_BY_THE_FIXTURE
 printf '%s\n' '{"unit":"herdr.service","daemonOwnership":"manual","compatibility":"cli-newer","unitState":"ok","pid":1,"exe":"/nix/store/x-herdr/bin/herdr","conflicts":["daemon-owned-by-manual","client-server-cli-newer"],"healthy":false}'
+exit 1
 FAKE
 chmod +x "$AGENT_OPS_DAEMON_CHECK"
 # /usr/bin/env does not exist in a nix build sandbox, so a fake

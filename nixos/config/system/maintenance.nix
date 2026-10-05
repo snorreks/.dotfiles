@@ -68,7 +68,7 @@
 
   # Defined in package.nix rather than inline so the NixOS VM test can install
   # the SAME derivation the Legion does. See that file's header.
-  nsMaint = pkgs.callPackage ./maintenance/package.nix {};
+  nsMaint = pkgs.callPackage ./maintenance/package.nix {deploymentConfig = nsEnv;};
 
   nsMaintExe = lib.getExe nsMaint;
 
@@ -177,10 +177,8 @@ in {
   config = {
     environment.systemPackages = [nsMaint];
 
-    # Exported system-wide so the operator's own `ns-maint activate` and the three
-    # units agree on the same paths, host and deadline without either having to
-    # carry a duplicated list.
-    environment.variables = nsEnv;
+    # nsEnv is compiled into the store executable, not taken from the caller's
+    # environment: sudo and transient activation use the same trusted settings.
 
     # The state directory. Root-owned and not group/other-writable: a
     # non-privileged caller that could write record.env could forge a
@@ -253,8 +251,9 @@ in {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${nsMaintExe} tick";
-        # Bounded so a wedged tick cannot pile up behind itself.
-        TimeoutStartSec = 120;
+        # Allow all three bounded restoration steps (10min each), plus
+        # bookkeeping, before the outer watchdog terminates the worker.
+        TimeoutStartSec = "31min";
       };
     };
 
@@ -281,8 +280,6 @@ in {
     # One shared map, used by all three units and exported system-wide. A second,
     # hand-maintained copy of these values is how a unit ends up watching a
     # different state directory from the one the operator inspects.
-    systemd.services.ns-maint-verify.environment = nsEnv;
-    systemd.services.ns-maint-reconcile.environment = nsEnv;
-    systemd.services.ns-maint-deadline.environment = nsEnv;
+    # No manager or shell NM_* injection is required.
   };
 }

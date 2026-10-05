@@ -104,6 +104,18 @@
 
   herdr = inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default;
 
+  # Scoped managed-child credentials: pinned src/app/agents.rs:start_agent
+  # builds [interactive_agent_executable(kind)], and platform/mod.rs's
+  # interactive_unix_shell_command submits quoted `pi ...` / `claude ...`
+  # (not command/exec). Thus fish/functions/{pi,claude}.fish HERDR_ENV branches
+  # ARE the actual spawn hook, including panes of an existing plain server.
+  # They invoke secret-env --ready only for the real executable child; absent
+  # optional keys allow OAuth/auth-store/local use, malformed keys fail loudly.
+  # ANTHROPIC_API_KEY remains excluded by sessionVariable=false. Pinned Pi
+  # pi-ai/dist/auth/resolve.js resolves stored OAuth/API auth before env fallback.
+  # LoadCredential only delivers files. No server/client ambient keys, restart,
+  # manifest hook or global PATH shim. Other agent kinds are not integrated;
+  # their launchers can explicitly use fish's generic __ns_agent_exec helper.
   envSecrets = import ./env-secrets.nix;
 
   # Credential names a spawned agent needs, i.e. everything in env-secrets.nix

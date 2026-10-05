@@ -74,6 +74,7 @@
       pkgs.coreutils
       pkgs.findutils
       pkgs.gnugrep
+      pkgs.jq
       pkgs.restic
       pkgs.sqlite
       pkgs.util-linux
@@ -121,13 +122,19 @@ in {
     stateDir = lib.mkOption {
       type = lib.types.str;
       default = "/var/lib/agent-ops/backup";
-      description = "Where the last-run record and quiesce scratch live.";
+      description = "Backup directory itself: last-run.env, quiesce.conf and per-run quiesce scratch live directly here (no /backup suffix is added).";
     };
 
     sources = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = defaultSources;
       description = "Absolute paths to back up. Defaults to the reviewed state manifest.";
+    };
+
+    additionalSources = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Additional integration paths, appended to the manifest or operator-selected sources and deduplicated.";
     };
 
     excludes = lib.mkOption {
@@ -150,8 +157,10 @@ in {
       type = lib.types.str;
       default = "8000000";
       description = ''
-        restic --limit-upload in bytes/s. Bounded because this host's uplink is
-        the same one the tailnet that reaches it runs over; an unbounded backup
+        Upload limit in integer bytes/s (0 is unlimited), converted to KiB/s
+        by rounding down with a minimum nonzero limit of 1 KiB/s. Bounded
+        because this host's uplink is the same one the tailnet that reaches it
+        runs over; an unbounded backup
         is a self-inflicted outage for the thing the box exists to provide.
       '';
     };
@@ -159,13 +168,7 @@ in {
     limitDownload = lib.mkOption {
       type = lib.types.str;
       default = "20000000";
-      description = "restic --limit-download in bytes/s. Higher than upload: a restore is interactive.";
-    };
-
-    ioMaxConcurrent = lib.mkOption {
-      type = lib.types.str;
-      default = "2";
-      description = "restic --io-max-concurrent. Two on a spinning disk, four on NVMe; measured, not guessed at runtime.";
+      description = "Download limit in integer bytes/s (0 is unlimited), rounded down to KiB/s with a minimum nonzero limit of 1 KiB/s. Higher than upload: a restore is interactive.";
     };
 
     keepDaily = lib.mkOption {
@@ -246,13 +249,12 @@ in {
         # The repository and its password arrive as systemd credentials at run
         # time. A secret here would be in the Nix store, readable by every
         # account on the machine and in `nix-store -q --references` output.
-        sources=${lib.escapeShellArg (builtins.toJSON cfg.sources)}
-        excludes=${lib.escapeShellArg (builtins.toJSON cfg.excludes)}
-        quiesceFile=${lib.escapeShellArg "${stateDir}/quiesce.conf"}
-        quiesceSource=${lib.escapeShellArg (builtins.toJSON (map (e: e.path) cfg.quiesce))}
+        sources=${builtins.toJSON (lib.unique (cfg.sources ++ cfg.additionalSources))}
+        excludes=${builtins.toJSON cfg.excludes}
+        quiesceFile=${builtins.toJSON "${stateDir}/quiesce.conf"}
+        quiesceSource=${builtins.toJSON (map (e: e.path) cfg.quiesce)}
         limitUpload=${cfg.limitUpload}
         limitDownload=${cfg.limitDownload}
-        ioMaxConcurrent=${cfg.ioMaxConcurrent}
         packSize=32
         keepDaily=${toString cfg.keepDaily}
         keepWeekly=${toString cfg.keepWeekly}
@@ -279,6 +281,7 @@ in {
 
       systemd.services.agent-ops-backup = {
         description = "Encrypted offsite backup (restic)";
+        environment.AGENT_OPS_STATE_DIR = stateDir;
         after = ["network-online.target" "agent-ops-quiesce-table.service"];
         # Deliberately NOT requiring network-online: a backup that is skipped
         # because the link is down is exactly right, and the health module
@@ -337,6 +340,7 @@ in {
 
       systemd.services.agent-ops-backup-retention = {
         description = "Apply restic --forget retention without pruning";
+        environment.AGENT_OPS_STATE_DIR = stateDir;
         serviceConfig = {
           Type = "oneshot";
           ExecStart = "${lib.getExe tool} --config /etc/agent-ops/backup.conf prune";
@@ -363,6 +367,7 @@ in {
 
       systemd.services.agent-ops-backup-verify = {
         description = "Prove the newest snapshot restores into scratch";
+        environment.AGENT_OPS_STATE_DIR = stateDir;
         serviceConfig = {
           Type = "oneshot";
           # A separate derivation rather than an inline `sh -c`, so every path in
@@ -398,8 +403,12 @@ in {
     # and inventing a second copy of that path here is how the two drift.
     (lib.mkIf (cfg.enable && cfg.heartbeatHook && cfg.mediaStateHook != null) {
       systemd.services."agent-ops-backup".serviceConfig.ExecStartPost =
-        lib.escapeShellArgs [
-          cfg.mediaStateHook
+        let hook = pkgs.writeShellApplication {
+          name = "agent-ops-media-verify";
+          runtimeInputs = [pkgs.sqlite pkgs.coreutils pkgs.findutils pkgs.util-linux pkgs.jq];
+          text = ''exec ${pkgs.bash}/bin/bash ${lib.escapeShellArg (toString cfg.mediaStateHook)} "$@"'';
+        }; in lib.escapeShellArgs [
+          (lib.getExe hook)
           "verify"
           "--exports"
           "/var/lib/agent-ops/media-exports"

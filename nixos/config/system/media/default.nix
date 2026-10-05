@@ -11,7 +11,8 @@
 # Ownership boundary: this lane reuses the backup, health and resource modules
 # that already exist in config/system/agent-ops/. It does not add a second
 # backup mechanism, a second health collector or a second set of cgroup
-# policies, and it does not touch the host OUTPUT firewall at all.
+# policies. Torrents add only a narrow backend UID rejection, never host NAT,
+# forwarding, or a global firewall policy change.
 {config, pkgs, lib, opts, ...}: let
   jellyfin = opts.media.jellyfin;
   torrents = opts.media.torrents;
@@ -28,15 +29,10 @@
   # was never made.
   mediaState = pkgs.writeShellApplication {
     name = "media-state";
-    runtimeInputs = [pkgs.sqlite pkgs.coreutils pkgs.util-linux];
+    runtimeInputs = [pkgs.sqlite pkgs.coreutils pkgs.util-linux pkgs.findutils pkgs.systemd pkgs.jq];
     text = builtins.readFile ./scripts/media-state.sh;
   };
-  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
-  # its options — which is a decision, not a constant. Reading
-  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
-  # missing" the moment media was enabled with backups off, i.e. in the default
-  # state of every host here. `opts ? agentOps` short-circuits first.
-  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+  backupEnabled = config.agentOps.backup.enable;
 
 in {
   imports = [
@@ -54,9 +50,8 @@ in {
   # scanning a large library are genuinely CPU- and memory-hungry, and the
   # failure mode when they are not bounded is that SSH to a box in a basement
   # stops responding — which, from where you are, is indistinguishable from the
-  # box being down. Second, `ManagedOOMPreference = avoid` on the operator's own
-  # slice means a memory spike in a transcoder is resolved by killing the
-  # transcoder rather than the thing you are using to fix it.
+  # box being down. Per-service memory limits contain those workloads; no empty
+  # "management" slice can guarantee protection for the operator's real session.
   #
   # NVIDIA is untouched. Inference runs as the operator's own process and keeps
   # the discrete GPU; see jellyfin.nix for why Jellyfin is never pointed at it.
@@ -76,9 +71,10 @@ in {
       # A low IOWeight means downloads and library scans yield to the machine's
       # other work at the block layer, without either being stopped.
       IOWeight = 50;
-      # `evacuate` rather than `avoid` on the WORKLOAD. See the note above the
-      # management slice below for why the operator side cannot carry `avoid`.
-      ManagedOOMPreference = "evacuate";
+      # Valid normal candidacy if oomd is enabled elsewhere. "evacuate" is
+      # invalid and was silently ignored by systemd; this is not an OOM priority
+      # guarantee or a reason to skip host load calibration.
+      ManagedOOMPreference = "none";
       ManagedOOMSwap = "kill";
       ManagedOOMMemoryPressure = "kill";
     };
@@ -93,15 +89,9 @@ in {
   # system-managed `user-<uid>.slice`, which cannot be given `avoid` from here
   # without claiming the whole system-managed slice.
   #
-  # The preference is therefore expressed from the side that CAN be configured:
-  # the media workloads are marked `evacuate` above, which is systemd's
-  # supported way to say "these are the ones to kill". Same effect - a
-  # transcoding OOM takes the transcoder, not the session used to fix it -
-  # without claiming protection that was never there.
-  #
-  # Actually protecting the operator's slice would mean a logind drop-in and a
-  # per-slice property: a change to how login sessions are managed, which does
-  # not belong in a media PR.
+  # Media is not exempted from oomd, but its candidates and pressure thresholds
+  # still depend on the host's actual oomd configuration. Protecting the real
+  # operator slice requires separate, measured logind/cgroup policy.
 
   # `Slice` lives under serviceConfig in NixOS' systemd submodule — there is no
   # `sliceConfig` option, and `systemd.services.jellyfin` already exists
@@ -153,7 +143,6 @@ in {
       "jellyfin.service"
       "qbittorrent.service"
     ];
-    wantedBy = ["multi-user.target"];
 
     # `environment`, not `serviceConfig.Environment`: the latter is a systemd
     # unit option, and an attrset there cannot serialise into `Environment=`
@@ -161,16 +150,24 @@ in {
     environment = {
       MEDI_STATE_DIR = exportDir;
       MEDI_JELLYFIN_DB =
-        lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/library.db";
-      MEDI_QBITTORRENT_PATHS =
-        lib.optionalString torrents.enable "${torrents.stateDir}/qBittorrent.conf";
+        lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/jellyfin.db";
+      MEDI_QBITTORRENT_PATHS_JSON = builtins.toJSON (lib.optionals torrents.enable
+        (lib.unique [torrents.stateDir torrents.configDir]));
+      MEDI_QBITTORRENT_UNIT = lib.optionalString torrents.enable "qbittorrent.service";
     };
 
     serviceConfig = {
       Type = "oneshot";
-      RemainAfterExit = true;
+      RemainAfterExit = false;
       ExecStart = "${lib.getExe mediaState} export";
     };
+  };
+
+  # Requires + ordering makes a failed export fail the backup transaction, and
+  # a non-remaining oneshot is refreshed on every timer/manual backup start.
+  systemd.services.agent-ops-backup = lib.mkIf (exportAny && backupEnabled) {
+    requires = ["media-state-export.service"];
+    after = ["media-state-export.service"];
   };
 
   agentOps.backup = lib.mkIf (exportAny && backupEnabled) {
@@ -180,6 +177,6 @@ in {
     heartbeatHook = true;
     mediaStateHook = ./scripts/media-state.sh;
     # Registered with the ordinary backup rather than with a second one.
-    sources = [{paths = [exportDir];}];
+    additionalSources = [exportDir];
   };
 }

@@ -48,12 +48,21 @@
 # devices sharing one node key is a tailnet incident, not a sync.
 {config, pkgs, lib, opts, ...}: let
   cfg = opts.media.syncthing;
-  # `opts.agentOps` only EXISTS when the agent-operations lane has been given
-  # its options — which is a decision, not a constant. Reading
-  # `opts.agentOps.backup.enable` unconditionally threw "attribute 'agentOps'
-  # missing" the moment media was enabled with backups off, i.e. in the default
-  # state of every host here. `opts ? agentOps` short-circuits first.
-  backupEnabled = opts ? agentOps && opts.agentOps.backup.enable;
+  backupEnabled = config.agentOps.backup.enable;
+  sync = config.mediaSync;
+  canonical = path: "/" + lib.concatStringsSep "/"
+    (builtins.filter (part: part != "" && part != ".") (lib.splitString "/" path));
+  folders = map canonical cfg.folders;
+  ownerHome = lib.attrByPath ["users" "users" opts.username "home"] "/home/${opts.username}" config;
+  privateRoots = ["/root" "/var/lib/tailscale" "/var/lib/agent-ops" "/run/secrets" "/run/agenix" "/run/user" "/etc/ssh" cfg.dataDir
+    opts.media.jellyfin.dataDir opts.media.torrents.stateDir opts.media.torrents.configDir]
+    ++ map (suffix: "${ownerHome}/${suffix}") [".ssh" ".pi" ".claude" ".codex" ".config/sops" ".config/agent-ops" ".local/state/sops-nix" ".config/herdr" ".local/state/herdr" ".local/share/herdr"];
+  under = root: path: path == canonical root || lib.hasPrefix ((canonical root) + "/") path;
+  safeFolder = raw: let path = canonical raw; in
+    lib.hasPrefix "/" raw && !(builtins.elem ".." (lib.splitString "/" raw))
+    && path != "/" && path != "/home" && path != "/home/${opts.username}"
+    && builtins.match "/home/[^/]+" path == null
+    && !lib.any (root: under root path || under path root) privateRoots;
 
   # Same as torrents.nix: `package = null` means "whatever nixpkgs ships", and
   # options.nix has no pkgs in scope to resolve it.
@@ -67,6 +76,27 @@
   ignoreRulesPath = "/etc/syncthing/media-ignore.rules";
 
 in {
+  options.mediaSync = {
+    devices = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options.id = lib.mkOption { type = lib.types.str; description = "Explicit trusted Syncthing device ID."; };
+      });
+      default = {};
+      description = "Explicit peer allowlist; no peers are discovered/selected automatically.";
+    };
+    publishGui = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Publish admin GUI over private Serve only after deliberately configuring authentication.";
+    };
+    guiUser = lib.mkOption { type = lib.types.str; default = ""; };
+    guiPasswordFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Runtime password file outside the Nix store. Required for GUI publication.";
+    };
+  };
+  config = {
   # The account. Gated with everything else, because defining it unconditionally
   # would create a system user on machines with Syncthing switched off — and an
   # unconfigured user account is an account, just an inert one.
@@ -82,6 +112,7 @@ in {
   # `media` is the whole point: Syncthing can read the selected folders, and
   # nothing more — not `wheel`, not the operator, no shell.
   users.users.syncthing = lib.mkIf cfg.enable {extraGroups = ["media"];};
+  users.groups.media = lib.mkIf cfg.enable {};
 
   services.syncthing = lib.mkIf cfg.enable {
     enable = true;
@@ -111,11 +142,15 @@ in {
     #
     # `devices` is empty on a single-device setup, and that is correct rather
     # than missing: it is filled in when the travel laptop presents its id.
-    settings.folders = lib.genAttrs cfg.folders (path: {
-      id = "media";
-      path = path;
-      devices = [];
+    settings.devices = sync.devices;
+    settings.gui.user = sync.guiUser;
+    guiPasswordFile = sync.guiPasswordFile;
+    settings.folders = lib.genAttrs folders (path: {
+      id = "media-${builtins.substring 0 24 (builtins.hashString "sha256" path)}";
+      inherit path;
+      devices = lib.attrNames sync.devices;
       rescanIntervalS = 3600;
+      versioning = { type = "simple"; params.keep = "10"; };
     });
 
     # 🔴 nixpkgs opens 8384 (GUI), 22000 (discovery) and 21027 (relay) by
@@ -149,29 +184,44 @@ in {
   #
   # So the rules are now COPIED INTO each configured folder before Syncthing
   # starts, and syncthing requires this unit to have succeeded.
-  systemd.services.syncthing-stignore = lib.mkIf (cfg.enable && cfg.folders != []) {
+  systemd.services.syncthing-stignore = lib.mkIf cfg.enable {
     description = "Install the media ignore rules into each shared folder";
     before = ["syncthing.service"];
     after = ["local-fs.target"];
     wantedBy = ["multi-user.target"];
     serviceConfig = {
       Type = "oneshot";
-      RemainAfterExit = true;
+      RemainAfterExit = false;
       # Each folder is handled separately: one unreadable folder must not leave
       # the others unprotected, and must not be silent either.
-      ExecStart = lib.concatMapStringsSep "\n" (folder:
-        "${pkgs.coreutils}/bin/install -D -m 0644 "
-        + ignoreRulesPath
-        + " ${lib.escapeShellArg (folder + "/.stignore")}") cfg.folders;
+      ExecStart = lib.getExe (pkgs.writeShellApplication {
+        name = "media-sync-guard";
+        runtimeInputs = [pkgs.coreutils];
+        text = ''
+          folders=(${lib.escapeShellArgs folders})
+          for folder in "''${folders[@]}"; do
+            resolved="$(realpath -e -- "$folder")"
+            # Fail closed on symlinks, including a symlinked ancestor. Operators
+            # must select the actual canonical directory, never an alias.
+            [[ "$resolved" == "$folder" ]] || { echo "unsafe sync alias: $folder" >&2; exit 1; }
+            [[ -d "$folder" ]] || exit 1
+            install -m 0644 ${ignoreRulesPath} "$folder/.stignore"
+          done
+        '';
+      });
       TimeoutStartSec = "30s";
     };
   };
 
-  systemd.services.syncthing = {
-    requiredBy = ["syncthing.service"];
+  systemd.services.syncthing = lib.mkIf cfg.enable {
+    requires = ["syncthing-stignore.service"];
+    after = ["syncthing-stignore.service"];
   };
 
-  systemd.services.tailscale-serve-syncthing = lib.mkIf cfg.enable {
+  # Tailnet membership is not admin authentication. Default: SSH tunnel to
+  # loopback only. Do not enable publication before configuring credentials;
+  # Serve exposes the admin UI to every tailnet principal allowed by ACLs.
+  systemd.services.tailscale-serve-syncthing = lib.mkIf (cfg.enable && sync.publishGui) {
     description = "Syncthing admin on the node's private Tailscale HTTPS endpoint";
     after = ["tailscaled.service" "tailscaled-set.service"];
     wants = ["tailscaled.service"];
@@ -261,8 +311,7 @@ in {
     {
       # Checked against what Syncthing is actually configured with, not only
       # the option: those were two different lists until this mapping existed.
-      assertion = !lib.any (f: f == "/" || f == "" || f == "$HOME")
-        (lib.attrNames (lib.mkIf cfg.enable config.services.syncthing.settings.folders));
+      assertion = lib.all safeFolder cfg.folders && lib.length folders == lib.length (lib.unique folders);
       message = ''
         media: opts.media.syncthing.folders contains a whole-home or whole-root
         entry. Select specific directories; a home-directory folder would pull
@@ -272,16 +321,15 @@ in {
     }
 
     {
-      assertion = !lib.any (f: lib.hasPrefix "/var/lib/tailscale" f)
-        (lib.attrNames (lib.mkIf cfg.enable config.services.syncthing.settings.folders));
+      assertion = !sync.publishGui || (sync.guiUser != "" && sync.guiPasswordFile != null);
       message = ''
-        media: opts.media.syncthing.folders must not include Tailscale state.
-        Synchronising it puts one node identity on two devices.
+        media: publishing the Syncthing GUI requires mediaSync.guiUser and
+        mediaSync.guiPasswordFile. Tailnet membership is not authentication.
       '';
     }
 
     {
-      assertion = cfg.serveHttpsPort != 443
+      assertion = !sync.publishGui || cfg.serveHttpsPort != 443
         || !(opts.mobileAgents.collie.enable);
       message = ''
         media: Syncthing's Serve port is 443 and Collie owns it. Give Syncthing
@@ -303,6 +351,7 @@ in {
     '';
 
   agentOps.backup = lib.mkIf (cfg.enable && backupEnabled) {
-    sources = [{paths = [cfg.dataDir];}];
+    additionalSources = [cfg.dataDir];
+  };
   };
 }

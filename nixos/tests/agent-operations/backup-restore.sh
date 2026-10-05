@@ -25,6 +25,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/fixture.sh"
 SUITE_NAME="backup-restore"
 
+# Restores are only accepted strictly below /tmp or /var/tmp, so the fixture
+# root must live there. Inside a Nix build sandbox TMPDIR is /build, while the
+# sandbox's own private /tmp exists; forcing /tmp keeps both runs identical.
+export TMPDIR=/tmp
 fixture_new
 
 RESTIC_BIN="${RESTIC_BIN:-$(command -v restic || true)}"
@@ -37,6 +41,32 @@ if [[ -z "$RESTIC_BIN" ]]; then
 fi
 printf 'using restic: %s\n' "$RESTIC_BIN"
 
+if [[ -n "${NIX_BUILD_TOP:-}" ]]; then
+	# /tmp's namespace-unmapped owner cannot be restored by this builder.
+	# Select its snapshot subtree, restoring ALL fixture payload and metadata
+	# below a privately created target/tmp. Production restore is unchanged;
+	# only the synthetic ancestor /tmp's ownership is outside this proof.
+	export RESTIC_TEST_REAL="$RESTIC_BIN"
+	fake sandbox-restic <<'FAKE'
+if [[ "$1" != restore ]]; then exec "$RESTIC_TEST_REAL" "$@"; fi
+shift
+snapshot="$1"; shift
+args=()
+while (($#)); do
+	case "$1" in
+	--target)
+		mkdir -m 0700 -- "$2/tmp" || exit 1
+		args+=(--target "$2/tmp"); shift 2 ;;
+	--include) args+=(--include "${2#/tmp}"); shift 2 ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+exec "$RESTIC_TEST_REAL" restore "$snapshot:/tmp" "${args[@]}"
+FAKE
+	RESTIC_BIN="$TMP/bin/sandbox-restic"
+	export RESTIC="$RESTIC_BIN"
+fi
+
 SQLITE_BIN="${SQLITE_BIN:-$(command -v sqlite3 || true)}"
 if [[ -z "$SQLITE_BIN" ]]; then
 	printf '\033[33mSKIPPED: sqlite3 is not on PATH (same flake closure).\033[0m\n'
@@ -47,6 +77,8 @@ printf 'using sqlite3: %s\n' "$SQLITE_BIN"
 # ── the fixture world ───────────────────────────────────────────────────────
 export AGENT_OPS_STATE_DIR="$TMP/backup-state"
 mkdir -p "$AGENT_OPS_STATE_DIR"
+# An empty table is valid when no exports are declared; a missing table is not.
+: >"$AGENT_OPS_STATE_DIR/quiesce.conf"
 export RESTIC_REPO="$TMP/repo"
 export RESTIC_PASSWORD_FILE="$TMP/repo-password"
 CONFIG="$TMP/backup.conf"
@@ -75,11 +107,10 @@ export CREDENTIALS_DIRECTORY="$TMP/creds"
 cat >"$CONFIG" <<EOF
 sources=["$SOURCE"]
 excludes=["$SOURCE/.cache", "$SOURCE/movie.mkv"]
-quiesceFile=$AGENT_OPS_STATE_DIR/quiesce.conf
+quiesceFile=$(jq -Rn --arg p "$AGENT_OPS_STATE_DIR/quiesce.conf" '$p')
 quiesceSource=[]
 limitUpload=0
 limitDownload=0
-ioMaxConcurrent=2
 packSize=4
 keepDaily=2
 keepWeekly=1
@@ -152,6 +183,101 @@ out="$(backup status)"
 assert_contains "$out" 'healthy=true' 'status agrees'
 
 # ═══════════════════════════════════════════════════════════════════════════
+_t_start "the quiesce table: fail closed only when exports are declared"
+mv "$AGENT_OPS_STATE_DIR/quiesce.conf" "$TMP/empty-table.away"
+out="$(backup backup)"
+assert_eq '0' "$?" 'with no declared exports a missing table means nothing to quiesce'
+sed "s|^quiesceSource=.*|quiesceSource=[\"$DB\"]|" "$CONFIG" >"$TMP/declared.conf"
+out="$(bash "$BACKUP" --config "$TMP/declared.conf" backup 2>&1)"
+assert_eq '3' "$?" 'with a declared export a missing table fails closed'
+assert_contains "$out" 'refusing raw backup' 'and never falls back to the live database'
+assert_not_contains "$out" 'attempt 1/' 'restic is never invoked after the missing table'
+mv "$TMP/empty-table.away" "$AGENT_OPS_STATE_DIR/quiesce.conf"
+sed "s|^quiesceFile=.*|quiesceFile=$AGENT_OPS_STATE_DIR/quiesce.conf|" "$CONFIG" >"$TMP/raw-path.conf"
+out="$(bash "$BACKUP" --config "$TMP/raw-path.conf" backup 2>&1)"
+assert_eq '0' "$?" 'a bare absolute quiesceFile path (hand-written config) is accepted'
+sed "s|^quiesceFile=.*|quiesceFile=relative/q.conf|" "$CONFIG" >"$TMP/bad-path.conf"
+out="$(bash "$BACKUP" --config "$TMP/bad-path.conf" backup 2>&1)"
+assert_eq '2' "$?" 'a relative quiesceFile is a configuration error'
+
+_t_start "the module-generated JSON config preserves spaces, quotes and commas"
+if command -v nix >/dev/null 2>&1; then
+	ODD="$TMP/space, 'single' \"double\""
+	mkdir -p "$ODD"
+	printf 'included\n' >"$ODD/keep"
+	printf 'excluded\n' >"$ODD/drop, 'quoted'"
+	QTABLE="$TMP/table, 'single' \"double\".conf"
+	GENERATED_VALUES="$(jq -cn --arg source "$ODD" --arg exclude "$ODD/drop, 'quoted'" \
+		--arg state "${QTABLE%/quiesce.conf}" --arg live "$ODD/keep" \
+		'{enable:true, sources:[$source], additionalSources:[$source], excludes:[$exclude],
+		stateDir:$state, quiesce:[{path:$live}], limitUpload:"8000000",
+		limitDownload:"20000000", keepDaily:2, keepWeekly:1, keepMonthly:1,
+		maxAgeSeconds:3600}')"
+	# Evaluate the actual module, with only the lazy interfaces needed for its
+	# config text. No nixpkgs build, activation, credentials or network access.
+	export GENERATED_VALUES BACKUP_MODULE="$LANE_SRC/config/system/agent-ops/backup.nix"
+	nix --extra-experimental-features nix-command eval --impure --raw --expr '
+		let m = import (builtins.toPath (builtins.getEnv "BACKUP_MODULE")) {
+		  config.agentOps.backup = builtins.fromJSON (builtins.getEnv "GENERATED_VALUES");
+		  opts = {}; pkgs = {};
+		  lib = { mkMerge = x: x; mkIf = c: x: if c then x else {};
+		    unique = builtins.foldl'"'"' (acc: e: if builtins.elem e acc then acc else acc ++ [e]) []; };
+		}; in (builtins.head m.config).environment.etc."agent-ops/backup.conf".text
+	' >"$TMP/generated.conf"
+	assert_eq '0' "$?" 'the actual Nix module generates the config'
+	assert_eq '1' "$(grep '^sources=' "$TMP/generated.conf" | cut -d= -f2- | jq 'length')" 'additionalSources are appended and deduplicated'
+	assert_not_contains "$(cat "$TMP/generated.conf")" 'ioMaxConcurrent' 'the unsupported concurrency setting is not generated'
+	# stateDir defines the table location in the generated config.
+	mkdir -p "$QTABLE"
+	printf '%s|none|\n' "$ODD/keep" >"$QTABLE/quiesce.conf"
+	out="$(bash "$BACKUP" --config "$TMP/generated.conf" backup 2>&1)"
+	assert_eq '0' "$?" 'generated config backs up quoted paths and quiesces via a quoted table path'
+	out="$(bash "$BACKUP" --config "$TMP/generated.conf" restore --to "$TMP/generated-restore" 2>&1)"
+	assert_eq '0' "$?" 'generated snapshot restores'
+	assert_eq 'included' "$(find "$TMP/generated-restore" -name keep -exec cat {} \;)" 'quiesced source is preserved exactly once'
+	assert_no_file "$TMP/generated-restore$ODD/drop, 'quoted'" 'quoted comma-containing exclude is honored'
+	mv "$QTABLE/quiesce.conf" "$QTABLE/table.away"
+	out="$(bash "$BACKUP" --config "$TMP/generated.conf" backup 2>&1)"
+	assert_eq '3' "$?" 'missing configured quiesce table fails closed'
+	assert_contains "$out" 'refusing raw backup' 'missing table never falls back to raw data'
+	: >"$QTABLE/quiesce.conf"
+	out="$(bash "$BACKUP" --config "$TMP/generated.conf" backup 2>&1)"
+	assert_eq '3' "$?" 'empty configured quiesce table fails closed'
+	printf '%s|none|\n' "$ODD/drop, 'quoted'" >"$QTABLE/quiesce.conf"
+	out="$(bash "$BACKUP" --config "$TMP/generated.conf" backup 2>&1)"
+	assert_eq '3' "$?" 'table missing a declared source fails closed'
+	# Restore the normal latest snapshot for the remaining restore assertions.
+	backup backup >/dev/null 2>&1
+else
+	printf 'SKIPPED: module-generated config test requires nix eval\n'
+fi
+
+_t_start "real typed modules: integration sources are additive, stateDir reaches every unit"
+# backup-media-eval.nix evaluates the REAL state-manifest + backup + media
+# modules through nixpkgs' eval-config (metadata only: nothing is built or
+# activated). That needs the flake's locked nixpkgs, which a nested evaluation
+# inside a Nix build sandbox cannot fetch, so there it is an EXPLICIT skip; a
+# standalone run with nix available must pass it.
+if [[ -n "${NIX_BUILD_TOP:-}" && -z "${AGENT_OPS_NIXPKGS:-}" ]]; then
+	printf '\033[33mSKIPPED (Nix build sandbox): backup-media-eval.nix needs the\033[0m\n'
+	printf 'flake inputs; run `bash nixos/tests/agent-operations/backup-restore.sh` outside.\n'
+elif ! command -v nix >/dev/null 2>&1; then
+	printf '\033[33mSKIPPED: nix is not on PATH; backup-media-eval.nix not evaluated.\033[0m\n'
+else
+	MEDIA_EVAL_FILE="$LANE_SRC/tests/agent-operations/backup-media-eval.nix"
+	if [[ -n "${AGENT_OPS_NIXPKGS:-}" ]]; then
+		nixpkgs_expression="\"$AGENT_OPS_NIXPKGS\""
+	else
+		nixpkgs_expression="(builtins.getFlake \"path:$LANE_SRC\").inputs.nixpkgs.outPath"
+	fi
+	out="$(timeout 60 nix --extra-experimental-features 'nix-command flakes' eval --impure --json --expr \
+		"import $MEDIA_EVAL_FILE { nixpkgs = $nixpkgs_expression; }" 2>&1)"
+	assert_eq '0' "$?" 'the typed-module union proof evaluates within 60s'
+	assert_contains "$out" '"stateDir":"/var/lib/custom-backup"' 'stateDir propagates to the backup unit'
+	assert_contains "$out" '"operatorSources":["/operator/selected","/var/lib/agent-ops/media-exports","/var/lib/syncthing"]' 'operator sources keep their selection and gain integrations once'
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 _t_start "excludes are honoured, and only because they were listed"
 snap_files="$("$RESTIC_BIN" ls latest 2>/dev/null)"
 assert_contains "$snap_files" 'notes.txt' 'a real source file IS in the snapshot'
@@ -181,6 +307,7 @@ _t_start "restore into SCRATCH"
 SCRATCH="$TMP/scratch"
 out="$(backup restore --to "$SCRATCH")"
 rc=$?
+if [[ "$rc" != 0 ]]; then printf 'fixture restore diagnostic:\n%s\n' "$out" >&2; fi
 assert_eq '0' "$rc" 'a restore into an empty scratch directory succeeds'
 assert_file "$SCRATCH$SOURCE/docs/notes.txt" 'the file came back'
 assert_eq 'hello state' "$(cat "$SCRATCH$SOURCE/docs/notes.txt")" 'with its contents intact'
@@ -192,8 +319,13 @@ assert_contains "$out" 'not empty' 'and says why'
 assert_contains "$out" 'overwrites the live home' 'and names the failure it prevents'
 
 out="$(backup restore --to /)"
-assert_contains "$out" "restore target is" 'restoring into / is refused'
-assert_contains "$out" "empty" 'and says the target ended up empty after trimming' 
+assert_eq '2' "$?" 'restoring into / is refused'
+assert_contains "$out" 'strictly below' 'and says only scratch roots are accepted'
+
+for root in /tmp /var/tmp /tmp/ /home /root /var/lib/agent-ops; do
+	out="$(backup restore --to "$root")"
+	assert_eq '2' "$?" "restoring into $root is refused"
+done
 
 out="$(backup restore --to relative/path)"
 assert_contains "$out" 'absolute path' 'a relative target is refused'
@@ -201,10 +333,77 @@ assert_contains "$out" 'absolute path' 'a relative target is refused'
 out="$(backup restore)"
 assert_contains "$out" 'needs --to' 'a restore with no target is refused'
 
-# HOME is the fixture's, so $HOME must be protected explicitly.
+out="$(backup restore --to)"
+assert_eq '2' "$?" 'a dangling --to is refused'
+
+# Lexical escapes and aliases are refused, never normalised and followed.
+out="$(backup restore --to "$TMP/../../home/escape")"
+assert_contains "$out" 'not canonical' 'a .. escape out of scratch is refused'
+out="$(backup restore --to "$TMP/./dot")"
+assert_contains "$out" 'not canonical' 'a non-canonical spelling is refused'
+out="$(backup restore --to "$TMP/trailing/")"
+assert_contains "$out" 'not canonical' 'a trailing-slash alias is refused'
+assert_no_file "$TMP/trailing" 'and nothing was created for it'
+
+# Symlink escape: a scratch-looking path whose parent or self is a symlink to
+# live data must never be restored into.
+LIVE="$TMP/live-home"
+mkdir -p "$LIVE"
+printf 'live\n' >"$LIVE/precious"
+ln -s "$LIVE" "$TMP/link-parent"
+out="$(backup restore --to "$TMP/link-parent/restore")"
+assert_eq '2' "$?" 'a symlinked parent is refused'
+assert_contains "$out" 'not canonical' 'and named as an alias'
+assert_no_file "$LIVE/restore" 'nothing was created through the symlink'
+mkdir -p "$TMP/empty-real"
+chmod 0700 "$TMP/empty-real"
+ln -s "$TMP/empty-real" "$TMP/link-self"
+out="$(backup restore --to "$TMP/link-self")"
+assert_eq '2' "$?" 'a symlinked target is refused even if it points at an empty dir'
+assert_eq '' "$(find "$TMP/empty-real" -mindepth 1 -print -quit)" 'and the symlink target stays empty'
+assert_eq 'live' "$(cat "$LIVE/precious")" 'live data behind the symlink is untouched'
+
+# Exclusive: missing ancestors are not created, and an existing empty target
+# must be private to the caller.
+out="$(backup restore --to "$TMP/missing-parent/child")"
+assert_eq '2' "$?" 'a target whose parent does not exist is refused'
+assert_no_file "$TMP/missing-parent" 'and no ancestor is created'
+mkdir -p "$TMP/shared-empty"
+chmod 0755 "$TMP/shared-empty"
+out="$(backup restore --to "$TMP/shared-empty")"
+assert_eq '2' "$?" 'an existing empty target readable by others is refused'
+mkdir -p "$TMP/open-parent"
+chmod 0777 "$TMP/open-parent"
+out="$(backup restore --to "$TMP/open-parent/child")"
+assert_eq '2' "$?" 'a target below an other-writable ancestor is refused'
+mkdir -m 0700 "$TMP/private-empty"
+out="$(backup restore --to "$TMP/private-empty")"
+assert_eq '0' "$?" 'an existing empty private directory (mktemp -d style) is accepted'
+printf 'x' >"$TMP/regular-file"
+out="$(backup restore --to "$TMP/regular-file")"
+assert_eq '2' "$?" 'a regular file target is refused'
+
+# Selection arguments can never become restic flags (a second --target wins).
+out="$(backup restore --to "$TMP/flag-inject" --target "$LIVE")"
+assert_eq '2' "$?" 'a flag-shaped PATH argument is refused'
+assert_no_file "$LIVE$SOURCE" 'and nothing was restored into live data'
+out="$(backup restore --to "$TMP/selected" "$SOURCE/docs")"
+assert_eq '0' "$?" 'an absolute PATH selection is accepted'
+assert_file "$TMP/selected$SOURCE/docs/notes.txt" 'the selected path is restored'
+assert_no_file "$TMP/selected$SOURCE/collie.db" 'and unselected paths are not'
+
+# A live home is refused even when it happens to sit below a scratch root.
+FAKEHOME="$TMP/fake-home"
+mkdir -m 0700 "$FAKEHOME"
+out="$(HOME="$FAKEHOME" bash "$BACKUP" --config "$CONFIG" restore --to "$FAKEHOME/restore" 2>&1)"
+assert_eq '2' "$?" 'a target inside $HOME is refused'
+assert_contains "$out" 'inside the live home' 'and says why'
+assert_no_file "$FAKEHOME/restore" 'and nothing is created in the home'
+
 out="$(backup restore --to "$TMP/home-backup")"
 rc=$?
 assert_eq '0' "$rc" 'a scratch dir outside HOME is allowed'
+assert_eq '700' "$(stat -c %a "$TMP/home-backup")" 'and it is created private'
 
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "a database is exported CONSISTENTLY, not copied live"
@@ -432,8 +631,68 @@ snapshot_count() {
 	printf '%s' "${n:-0}"
 }
 
-# An aggressive retention config, used only to make the forget contract
-# observable. Written here rather than by the module, because the point is to
+# A wrapper still runs REAL restic, adding a date only for fixture snapshots.
+# It also captures argv to verify bytes/s -> KiB/s at the actual CLI boundary.
+cat >"$TMP/dated-restic" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" >"$RESTIC_TEST_ARGS"
+if [[ "$1" == backup && -n "${RESTIC_TEST_TIME:-}" ]]; then
+	exec "$RESTIC_BIN" "$@" --time "$RESTIC_TEST_TIME"
+fi
+exec "$RESTIC_BIN" "$@"
+EOF
+sed -i "1c#!$(command -v bash)" "$TMP/dated-restic"
+chmod +x "$TMP/dated-restic"
+export RESTIC_BIN RESTIC_TEST_ARGS="$TMP/restic-args"
+
+_t_start "positive dated retention ignores random staging paths but protects foreign snapshots"
+DATED_REPO="$TMP/dated-repo"
+"$RESTIC_BIN" --repo "$DATED_REPO" init >/dev/null 2>&1
+printf '%s' "$DATED_REPO" >"$TMP/creds/RESTIC_REPOSITORY"
+sed -e 's/^keepDaily=.*/keepDaily=2/' -e 's/^keepWeekly=.*/keepWeekly=0/' -e 's/^keepMonthly=.*/keepMonthly=0/' \
+	-e 's/^limitUpload=.*/limitUpload=8000000/' -e 's/^limitDownload=.*/limitDownload=20000000/' \
+	"$CONFIG" >"$TMP/dated.conf"
+for day in 01 02 03 04; do
+	out="$(RESTIC="$TMP/dated-restic" RESTIC_TEST_TIME="2024-01-${day} 12:00:00" bash "$BACKUP" --config "$TMP/dated.conf" backup 2>&1)"
+	assert_eq '0' "$?" "real dated backup $day succeeds with a fresh staging path"
+done
+dated_before="$("$RESTIC_BIN" --repo "$DATED_REPO" snapshots --json)"
+assert_eq '4' "$(jq '[.[].paths] | unique | length' <<<"$dated_before")" 'every dated backup really has a different randomized staging source'
+args="$(cat "$RESTIC_TEST_ARGS")"
+assert_contains "$args" $'--limit-upload\n7812' '8000000 bytes/s becomes 7812 KiB/s'
+assert_contains "$args" $'--limit-download\n19531' '20000000 bytes/s becomes 19531 KiB/s'
+assert_contains "$out" '8000000 B/s' 'public reporting remains in bytes/s'
+"$RESTIC_BIN" --repo "$DATED_REPO" backup --host foreign-host --tag agent-ops-backup "$SOURCE" >/dev/null 2>&1
+"$RESTIC_BIN" --repo "$DATED_REPO" backup --host "$(uname -n)" --tag foreign-tag "$SOURCE" >/dev/null 2>&1
+out="$(bash "$BACKUP" --config "$TMP/dated.conf" prune 2>&1)"
+assert_eq '0' "$?" 'normal positive retention succeeds'
+dated_json="$("$RESTIC_BIN" --repo "$DATED_REPO" snapshots --json)"
+assert_eq '2' "$(jq --arg host "$(uname -n)" '[.[] | select(.hostname == $host and (.tags | index("agent-ops-backup")))] | length' <<<"$dated_json")" 'positive daily retention keeps two snapshots despite distinct staging paths'
+assert_eq '4' "$(jq 'length' <<<"$dated_json")" 'both foreign host and foreign tag snapshots survive'
+matching_times="$(jq -r '.[] | select(.hostname != "foreign-host" and (.tags | index("agent-ops-backup"))) | .time' <<<"$dated_json")"
+assert_contains "$matching_times" '2024-01-04' 'newest dated matching snapshot survives'
+assert_contains "$matching_times" '2024-01-03' 'second newest dated matching snapshot survives'
+assert_not_contains "$matching_times" '2024-01-01' 'oldest dated matching snapshot is forgotten'
+
+_t_start "age selects the newest matching snapshot, never a foreign fresh one"
+out="$(bash "$BACKUP" --config "$CONFIG" check 2>&1)"
+assert_eq '3' "$?" 'old matching snapshots stay stale despite fresh foreign host and tag snapshots'
+assert_contains "$out" 'TOO OLD' 'foreign snapshots cannot make health fresh'
+out="$(bash "$BACKUP" --config "$CONFIG" backup 2>&1)"
+assert_eq '0' "$?" 'a fresh matching snapshot is created alongside the old ones'
+out="$(bash "$BACKUP" --config "$CONFIG" check 2>&1)"
+assert_eq '0' "$?" 'old plus fresh matching snapshots pass using the newest, not the first'
+
+for pair in '1 1' '1024 1' '0 0'; do
+	read -r bytes kib <<<"$pair"
+	sed "s/^limitDownload=.*/limitDownload=$bytes/" "$CONFIG" >"$TMP/limit.conf"
+	out="$(RESTIC="$TMP/dated-restic" bash "$BACKUP" --config "$TMP/limit.conf" restore --to "$TMP/limit-$bytes" 2>&1)"
+	assert_eq '0' "$?" "restore works with public download limit $bytes"
+	assert_contains "$(cat "$RESTIC_TEST_ARGS")" "$(printf '%s\n%s' --limit-download "$kib")" "download limit $bytes converts to $kib KiB/s"
+done
+printf '%s' "$RESTIC_REPO" >"$TMP/creds/RESTIC_REPOSITORY"
+
+# The all-zero policy separately exercises the explicit destructive test aid. Written here rather than by the module, because the point is to
 # drive the SCRIPT, not the generated config.
 # ALL THREE keep values go to zero. Zeroing only keep-daily is not enough: a
 # snapshot taken today is also within "this week" and "this month", so
@@ -459,9 +718,8 @@ fi
 # With a normal keep-daily/keep-weekly/keep-monthly policy, snapshots taken
 # minutes apart are all "today", so `forget` legitimately keeps them and the
 # assertion could not tell "the tag matched" from "the tag matched nothing".
-# Removing ALL snapshots matching the tag is the only policy that distinguishes
-# the two: if the tag on the `backup` side and the tag on the `forget` side
-# disagree, nothing is removed and the count does not move.
+# Here, removing ALL matching snapshots exercises the all-zero policy; the
+# positive dated policy above separately proves normal retention grouping.
 out="$(bash "$BACKUP" --config "$TMP/aggressive.conf" prune --forget-all 2>&1)"
 rc=$?
 assert_eq '0' "$rc" 'prune --forget-all succeeds'

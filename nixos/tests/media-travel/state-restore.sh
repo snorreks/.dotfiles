@@ -29,8 +29,8 @@ printf '=== state-restore ===\n'
 # Resolved explicitly rather than assumed on PATH: the suite is expected to run
 # inside the flake check sandbox, where sqlite3 is in the build inputs rather
 # than on the developer's PATH.
-SQLITE="${MEDI_SQLITE:-sqlite3}"
-if ! command -v "$SQLITE" >/dev/null 2>&1; then
+SQLITE="$(command -v "${MEDI_SQLITE:-sqlite3}" || true)"
+if [[ -z "$SQLITE" ]]; then
   # find, not ls: a store path is fine today, but ls parsing is what breaks
   # first on a path with an unexpected character in it.
   SQLITE="$(find /nix/store -maxdepth 3 -path '*-sqlite-*/bin/sqlite3' -type f 2>/dev/null | sort | tail -1)"
@@ -43,7 +43,7 @@ fi
 
 STATE="$FIXTURE_TMP/exports"
 HEALTH="$FIXTURE_TMP/health"
-LIB="$FIXTURE_TMP/library.db"
+LIB="$FIXTURE_TMP/jellyfin.db"
 QBIT="$FIXTURE_TMP/qBittorrent.conf"
 mkdir -p "$STATE" "$HEALTH"
 
@@ -135,11 +135,90 @@ else
   ok "verify fails on an empty plain export"
 fi
 
+# ── Fresh, qbit-only, missing-state and quiesce regressions ─────────────────
+rm -rf "$STATE"
+mkdir -p "$STATE"
+if MEDI_SQLITE="$SQLITE" bash "$MEDIA_SCRIPTS/media-state.sh" verify \
+  --exports "$STATE" --health-dir "$HEALTH" >/dev/null 2>&1; then
+  bad "verify accepted an empty export tree"
+else
+  ok "verify refuses a fresh empty export tree"
+fi
+if MEDI_JELLYFIN_DB='' MEDI_QBITTORRENT_PATHS='' bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1; then
+  bad "export accepted no configured state"
+else
+  ok "export refuses absent configured state"
+fi
+if MEDI_JELLYFIN_DB='' bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1 \
+  && MEDI_SQLITE="$SQLITE" bash "$MEDIA_SCRIPTS/media-state.sh" verify --exports "$STATE" --health-dir "$HEALTH" >/dev/null 2>&1; then
+  ok "qbit-only state is exported without a Jellyfin database"
+else
+  bad "qbit-only export failed"
+fi
+if MEDI_JELLYFIN_DB='' MEDI_QBITTORRENT_PATHS="$FIXTURE_TMP/missing" \
+  bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1; then
+  bad "export accepted missing configured state"
+else
+  ok "export refuses missing configured state"
+fi
+if [[ -s "$STATE/plain-qBittorrent.conf" ]]; then
+  ok "missing-state refusal preserves the good qbit export"
+else
+  bad "missing-state refusal lost the good export"
+fi
+# A fake systemctl exercises ordering and restart without touching services.
+mkdir -p "$FIXTURE_TMP/bin"
+# shellcheck disable=SC2016 # Expanded only inside the fake systemctl.
+printf '#!%s\nprintf "%%s\\n" "$*" >>"$MEDI_TEST_CALLS"\n' "$(command -v bash)" >"$FIXTURE_TMP/bin/systemctl"
+chmod +x "$FIXTURE_TMP/bin/systemctl"
+export MEDI_TEST_CALLS="$FIXTURE_TMP/systemctl.log"
+if PATH="$FIXTURE_TMP/bin:$PATH" MEDI_JELLYFIN_DB='' MEDI_QBITTORRENT_UNIT=fixture.service \
+  bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1 \
+  && [[ "$(tail -2 "$MEDI_TEST_CALLS")" == $'stop fixture.service\nstart fixture.service' ]]; then
+  ok "plain export quiesces and restarts only the previously active unit"
+else
+  bad "plain export did not quiesce/restart the fixture unit"
+fi
+: >"$MEDI_TEST_CALLS"
+if PATH="$FIXTURE_TMP/bin:$PATH" MEDI_JELLYFIN_DB='' MEDI_QBITTORRENT_UNIT=fixture.service \
+  MEDI_QBITTORRENT_PATHS="$FIXTURE_TMP/missing" bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1; then
+  bad "quiesced missing-state export unexpectedly passed"
+elif [[ "$(tail -1 "$MEDI_TEST_CALLS")" == 'start fixture.service' ]]; then
+  ok "failed export restarts the previously active fixture unit"
+else
+  bad "failed export left the fixture unit stopped"
+fi
+
 # ── 5. No usage output means the script is not silently permissive ─────────
 if MEDI_SQLITE="$SQLITE" bash "$MEDIA_SCRIPTS/media-state.sh" bogus >/dev/null 2>&1; then
   bad "an unknown subcommand was accepted"
 else
   ok "an unknown subcommand is refused"
+fi
+
+# A fresh daemon can have no torrents yet; its nonempty config is still valid
+# restorable state. Include both trees without colon/newline path splitting.
+mkdir -p "$FIXTURE_TMP/qbit-empty" "$FIXTURE_TMP/qbit:config"
+printf '[Preferences]\nWebUI\\Address=10.77.0.2\n' >"$FIXTURE_TMP/qbit:config/qBittorrent.conf"
+path_json="$(jq -cn --arg a "$FIXTURE_TMP/qbit-empty" --arg b "$FIXTURE_TMP/qbit:config" '[$a,$b]')"
+if MEDI_JELLYFIN_DB='' MEDI_QBITTORRENT_PATHS_JSON="$path_json" \
+  bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1 \
+  && MEDI_SQLITE="$SQLITE" bash "$MEDIA_SCRIPTS/media-state.sh" verify --exports "$STATE" --health-dir "$HEALTH" >/dev/null 2>&1 \
+  && [[ -s "$STATE/plain-qbit:config/qBittorrent.conf" && -d "$STATE/plain-qbit-empty" ]]; then
+  ok 'fresh empty torrent data and nonempty config are both preserved via JSON paths'
+else
+  bad 'fresh torrent/config export lost state or split a colon-containing path'
+fi
+# An interrupted publish retains an old tree instead of removing it first.
+mv "$STATE" "$STATE.previous"
+mkdir -p "$STATE"
+if MEDI_JELLYFIN_DB='' MEDI_QBITTORRENT_PATHS_JSON='["/nonexistent-audit-fixture"]' \
+  bash "$MEDIA_SCRIPTS/media-state.sh" export >/dev/null 2>&1; then
+  bad 'interrupted-publish fixture unexpectedly exported missing state'
+elif [[ -s "$STATE/plain-qbit:config/qBittorrent.conf" && ! -e "$STATE.previous" ]]; then
+  ok 'interrupted publish recovers the previous tree even after tmpfiles creates an empty target'
+else
+  bad 'interrupted publish lost the retained previous export'
 fi
 
 summary "state-restore"

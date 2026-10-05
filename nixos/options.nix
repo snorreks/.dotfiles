@@ -511,7 +511,7 @@ rec {
     torrents = {
       enable = false;
 
-      package = null; # null -> pkgs.qbittorrent
+      package = null; # null -> pkgs.qbittorrent-nox
 
       # The namespace everything is confined to. Named rather than generated so
       # that `ip netns list` and the audit script agree without configuration.
@@ -542,12 +542,15 @@ rec {
 
       tunnel = {
         interface = "wg0";
+        # Nonsecret IPv4 CIDR and numeric resolver inside the provider tunnel.
+        # wg strip intentionally omits these; empty values refuse startup.
+        address = "";
+        resolver = "";
 
-        # 🔴 NUMERIC IP:PORT, REQUIRED, AND VALIDATED. A hostname endpoint
-        # needs a DNS query to leave the namespace before the tunnel exists,
-        # which is exactly the bootstrap leak the namespace prevents. Empty
-        # here means "not configured", and netns-up.sh refuses to build a
-        # namespace without it.
+        # NUMERIC IP:PORT, REQUIRED AND VALIDATED. Pin the peer instead of
+        # allowing DNS to change endpoint selection. The encrypted UDP socket
+        # uses host routing; the namespace has no plaintext bootstrap route.
+        # Empty means not configured and namespace setup refuses to proceed.
         endpoint = "";
 
         # Where the `wg-quick strip` output lives in sops-nix. There is no
