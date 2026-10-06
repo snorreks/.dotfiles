@@ -1,22 +1,11 @@
 # nixos/config/home/env-secrets.nix
 #
-# Single source of truth for "simple" (plain string) secrets. Each entry
-# here flows into three places automatically:
-#   - sops.secrets.<name>              (sops.nix)
-#   - the "secrets-env" sops template  (sops.nix)  -> ~/.config/sops/secrets-env
-#   - home.sessionVariables             (variables.nix)
-#
-# Run `add_env_secret` to append an entry here and encrypt its value in
-# secrets.yaml in one step, instead of editing this file by hand.
-#
-# Fields per entry:
-#   name            - sops secret name / primary env var name (required)
-#   aliases         - extra env var names that resolve to the same value
-#   sessionVariable - set to false to keep it out of the environment entirely:
-#                     no Home Manager session variable and no line in the
-#                     secrets-env template (so ~/.profile, fish, and
-#                     sops-import-environment never export it). The value is
-#                     still a sops secret, readable at /run/secrets/<name>.
+# Simple SOPS credentials. sops.nix generates a names-only manifest from this
+# list. Interactive fish exports all ready session credentials for CLI tools;
+# secret-env also supports explicit credentials and scoped child processes.
+# aliases add environment variable names for the same value.
+# sessionVariable = false keeps a key out of automatic loading (Anthropic OAuth).
+# Run add_env_secret to register and encrypt a new credential.
 [
   {
     name = "ANTHROPIC_API_KEY";

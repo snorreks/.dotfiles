@@ -149,7 +149,20 @@ in {
   # and never when it is already correct.
   systemd.services.tailscale-reconcile = {
     description = "Converge tailscaled preferences and the private Serve mapping";
-    path = [pkgs.jq];
+    # `path` REPLACES the search path (NixOS re-adds coreutils/findutils/
+    # grep/sed/systemd on top, which is why those work and jq has to be named
+    # here). The tailscale CLI has to be named too: reconcile.sh drives
+    # `tailscale status`/`set`/`serve` by name through NM_TAILSCALE, and without
+    # this package on PATH every one of those calls fails with
+    # "command not found" — which the script then reports as
+    # "BackendState=unknown: the node is not authenticated, run 'tailscale up'"
+    # on a node that is perfectly logged in. An unreviewed `tailscale up` on an
+    # unattended box can leave it waiting on an interactive auth URL forever, so
+    # a PATH that lies about why it failed is not a cosmetic bug.
+    path = [
+      pkgs.jq
+      config.services.tailscale.package
+    ];
     after = ["tailscaled.service" "tailscaled-set.service"];
     wants = ["tailscaled.service"];
     wantedBy = ["multi-user.target"];

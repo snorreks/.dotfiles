@@ -16,15 +16,15 @@
   # depend on that pane having run the new interactiveShellInit/shellInit.
   # Other launchers can opt in with a real executable; no global PATH shim.
   childLauncher = pkgs.writeTextDir "__ns_agent_exec.fish" ''
-      function __ns_agent_exec --description 'ready credentials scoped to one actual child'
-          set -l loader "$HOME/.config/agent-ops/secret-env"
-          if set -q SECRET_ENV
-              set loader "$SECRET_ENV"
-          end
-          command "$loader" --ready --exec $argv
-          return $status
-      end
-    '';
+    function __ns_agent_exec --description 'ready credentials scoped to one actual child'
+        set -l loader "$HOME/.config/agent-ops/secret-env"
+        if set -q SECRET_ENV
+            set loader "$SECRET_ENV"
+        end
+        command "$loader" --ready --exec $argv
+        return $status
+    end
+  '';
 in {
   home.file = {
     # Copy all function files from ./functions to ~/.config/fish/functions
@@ -158,43 +158,16 @@ in {
     };
 
     interactiveShellInit = ''
-      # ── Credentials: values as data, never as sourced text ────────────────
-      #
-      # 🔴 The parser that used to live here is GONE, along with the template it
-      # read. It was:
-      #
-      #     set -l kv (string match -r '^export\s+([^=]+)=(.*)\$' -- $line)
-      #
-      # `\$` inside fish single quotes is a backslash followed by a dollar, so
-      # the pattern demanded that every secret line END with a literal "$" — it
-      # matched essentially nothing, and nothing noticed because ~/.profile was
-      # sourcing the same broken template. It also could not have worked: the
-      # template was line-oriented (`while read -l line`), so a multiline value
-      # would have been truncated, and `string trim -c '"'` would have eaten a
-      # legitimate quote from the end of a value.
-      #
-      # What replaces it never parses a value at all. `ns-secrets` reads the
-      # decrypted files as bytes and sets them as fish VARIABLES, which is fish's
-      # own representation and cannot be re-parsed as code:
-      #
-      #   ns-secrets                       # load ready credentials into this shell
-      #   ns-secrets check                 # readiness, no values
-      #   ns-secrets run <cmd> [args...]   # strict: require all session keys
-      # For OAuth/local-friendly selection: secret-env --ready --exec <cmd>.
-      # For an explicitly required API key: secret-env --name KEY --exec <cmd>.
-      #   ns-secrets exec <cmd>            # replace this shell with cmd + creds
-      #
-      # Nothing here is automatic. A credential arrives when a process asks for
-      # it by name, which is what "scoped to the intended agent processes"
-      # means in practice — as opposed to `systemctl --user import-environment`,
-      # which put all of them into all of them.
+      # CLI credentials are read as data. Interactive agents and other CLI
+      # children inherit all ready session credentials, including aliases.
+      # Run ns-secrets to refresh an already-open shell, or check readiness.
       set -gx SECRET_ENV "$HOME/.config/agent-ops/secret-env"
       set -gx SECRET_ENV_MANIFEST "$HOME/.config/agent-ops/secrets.manifest"
       # Path lookup, aliases and byte handling belong to the loader alone.
 
-      function ns-secrets --description 'load SOPS credentials as data, or check/scope them'
+      function ns-secrets --description 'refresh CLI credentials, check readiness, or run a command'
           if test (count $argv) -eq 0
-              # Explicit convenience action only; skip unready credentials.
+              # Refresh every ready session credential; skip unready ones.
               # NUL records preserve embedded/trailing newlines and include
               # aliases. Split only the first '='; never source/eval values.
               for name in (command $SECRET_ENV --list)
@@ -229,46 +202,20 @@ in {
       end
 
       # Readiness only, never values, and never fatal: a credential that is not
-      # decrypted yet must not stop an interactive shell from opening. Agents
-      # that need one ask for it by name and get a clear refusal instead.
+      # decrypted yet must not stop a shell from opening. Load each ready key.
       if status is-interactive
+          ns-secrets
           if not command $SECRET_ENV --check >/dev/null 2>&1
               set -g __ns_secrets_unready 1
           end
       end
 
       set fish_greeting # Disable greeting
-      ${lib.optionalString serverHost ''        # ── Server OS updates ───────────────────────────────────────────────
-        #
-        # On a host nobody is sitting at, the desktop one-liners
-        # (`nh os switch [--update]`, `nh os switch #host-fast`) hide three
-        # decisions that must not be made implicitly:
-        #
-        #   1. "--update" moves EVERY flake input. Unreviewed, on the machine
-        #      that is your only way in.
-        #   2. "switch" activates. The old nswitch-safe armed a dead-man timer
-        #      BEFORE building and rolled back with `systemctl reboot`, so a slow
-        #      build rebooted the server and a failed activation was assumed to
-        #      have changed nothing. See config/system/maintenance.nix.
-        #   3. '#host-fast' is not a faster host, it is a host WITHOUT
-        #      ollama-cuda. Activating it removes Ollama from the running
-        #      system, including the models resident in the 4090's VRAM.
-        #
-        # So each verb here names exactly one step. Nothing here reboots; the
-        # only reboot is `ns-maint reboot --yes`, a separate command on purpose.
-        #
-        # Published so the emergency scripts can tell they are on an unattended
-        # host without having to be told on the command line while the machine
-        # is already misbehaving. kill-switch.sh reads it (management processes
-        # and their descendants are never targets, bare shared runtimes are not
-        # either); kill-switch-cleanup.sh reads it (dropping the page cache and
-        # cycling swap make a remote box briefly LESS responsive, so it refuses).
+      ${lib.optionalString serverHost ''        # Build before arming the rollback deadline. Activation runs in a
+        # detached system service; the CLI waits for the result, then tells
+        # you how to confirm after checking access from another session.
         set -gx NS_SERVER_MODE 1
 
-        # NOTE on quoting: the messages below use single-quoted fish strings.
-        # Double quotes work too, but every backslash would then have to be
-        # doubled to survive both Nix and fish, which is exactly where this went
-        # wrong once already.
         function nswitch --description 'build, then activate the OS as a guarded no-reboot transaction'
             if test (count $argv) -gt 0
                 echo 'nswitch: no arguments on this host.' >&2
@@ -289,17 +236,10 @@ in {
             sudo ns-maint activate --timeout 20m
         end
 
-        function nswitchu --description 'update exactly ONE named flake input, then build and activate'
-            if test (count $argv) -eq 0
-                echo 'nswitchu no longer means "--update every input and switch".' >&2
-                echo 'It means "update the one input you are about to review".' >&2
-                echo >&2
-                echo '  nswitchu nixpkgs        # update that input, rebuild, activate' >&2
-                echo >&2
-                echo 'It rewrites nixos/flake.lock, so review that diff before you' >&2
-                echo 'confirm the transaction. Moving the whole input set in one' >&2
-                echo 'unreviewed step is the failure this host cannot recover from.' >&2
-                return 1
+        function nswitchu --description 'update one flake input, build, and wait for activation'
+            if test (count $argv) -ne 1
+                echo 'Usage: nswitchu nixpkgs (or another single flake input)' >&2
+                return 2
             end
             sudo ns-maint prepare --update-input $argv[1]; or return $status
             sudo ns-maint activate --timeout 20m

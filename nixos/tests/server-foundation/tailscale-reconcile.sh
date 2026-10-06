@@ -85,8 +85,14 @@ echo "tailscale $*" >>"$TMP/calls"
 case "${1:-}" in
   status)
     if [[ "${2:-}" == "--json" ]]; then
-      printf '{"BackendState":"%s","Self":{"DNSName":"%s"}}\n' \
-        "$(cat "$TMP/state/backend")" "$(cat "$TMP/state/dnsname")"
+      # FAKE_STATUS_EMPTY models a tailscaled that is running but has not
+      # published any state yet: real JSON, no BackendState key at all.
+      if [[ -n "${FAKE_STATUS_EMPTY:-}" ]]; then
+        printf '{"Version":"fake","Self":{"DNSName":"%s"}}\n' "$(cat "$TMP/state/dnsname")"
+      else
+        printf '{"BackendState":"%s","Self":{"DNSName":"%s"}}\n' \
+          "$(cat "$TMP/state/backend")" "$(cat "$TMP/state/dnsname")"
+      fi
     else
       printf '%s\n' "$(cat "$TMP/state/backend")"
     fi
@@ -359,6 +365,43 @@ out="$(run_reconcile)" && rc=0 || rc=$?
 assert_eq "exit status" 0 "$rc"
 assert_eq "no preferences written" "" "$(prefs)"
 assert_contains "it says tailscaled will sort it out" "$out" "tailscaled will sort it out"
+teardown
+t_done
+
+# ─────────────────────────────────────────────────────────────────────────────
+t_start "an unreadable node is not reported as a logged-out node"
+setup
+# The real failure this catches: `path = [ pkgs.jq ]` on the unit left the
+# tailscale CLI off PATH, so every call was "command not found", and the empty
+# answer was reported as BackendState=unknown — i.e. "the node is not
+# authenticated, run 'tailscale up'", on a node that was logged in and serving.
+# The advice is actively dangerous unattended, so it must not be printed unless
+# tailscaled actually said so.
+printf 'Running\n' >"$TMP/state/backend"
+out="$(NM_TAILSCALE=tailscale-not-on-this-path \
+  PATH="$TMP/bin:$PATH" \
+  NM_TS_SERVE_HTTPS_PORT=0 NM_TS_SERVE_TARGET_PORT=0 \
+  bash "$RECONCILE" 2>&1)" && rc=0 || rc=$?
+assert_ne_zero "exit status" "$rc"
+assert_contains "it names the packaging fault" "$out" "not on this unit's PATH"
+assert_contains "it points at the real setting" "$out" "config/system/server.nix"
+assert_not_contains "and it does NOT claim the node is logged out" "$out" "run 'tailscale up'"
+assert_not_contains "nor that it needs a browser login" "$out" "browser login"
+assert_eq "nothing was written to the node" "" "$(prefs)"
+assert_eq "the CLI was never invoked at all" "" "$(calls)"
+teardown
+t_done
+
+# ─────────────────────────────────────────────────────────────────────────────
+t_start "a tailscaled that answers nothing is not reported as a logged-out node"
+setup
+# Distinct from the missing-CLI case and from NeedsLogin: tailscaled is running
+# but has not published a BackendState. 'tailscale up' is the wrong advice.
+out="$(FAKE_STATUS_EMPTY=1 run_reconcile)" && rc=0 || rc=$?
+assert_ne_zero "exit status" "$rc"
+assert_contains "it says tailscaled is not answering" "$out" "not answering"
+assert_contains "it says not to run tailscale up" "$out" "do NOT run 'tailscale up'"
+assert_not_contains "and it does NOT claim a browser login" "$out" "browser login"
 teardown
 t_done
 

@@ -69,20 +69,27 @@ desk".
 
 ## 2. Credentials
 
-### The three delivery paths, and only these
+### CLI and service credentials
 
 | Path | How | Scope |
 |---|---|---|
-| **On demand** (default) | `ns-secrets run <cmd>` | one process |
+| **Interactive fish** (default) | loaded automatically at shell startup | shell and every CLI child |
 | **Systemd credential** | `LoadCredential=NAME:path` | that service and its children |
-| **Explicit session scope** | `ns-secrets` | the current interactive shell |
+| **Refresh or scoped command** | `ns-secrets` / `ns-secrets run <cmd>` | current shell / one child |
 
 ```console
 ns-secrets check                 # readiness; names and booleans only
-ns-secrets                       # load ready credentials into this shell
+ns-secrets                       # refresh credentials in an already-open shell
 ns-secrets run pi                # run ONE command with them, scoped
 ~/.config/agent-ops/secret-env --exec curl https://api.example.com
 ```
+
+Fresh interactive fish shells export all ready credentials marked
+`sessionVariable = true`, including provider keys and aliases such as `GH_TOKEN`.
+Any agent or tool launched from that shell inherits them. Missing or malformed
+credentials are skipped so opening a shell never depends on successful decryption;
+use `ns-secrets check` to diagnose them. Existing shells can run `ns-secrets` to
+refresh. Secret bytes are assigned as data, never sourced or evaluated.
 
 ### What was removed, and why it was wrong
 

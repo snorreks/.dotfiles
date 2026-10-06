@@ -471,6 +471,7 @@
             # is exactly why the policy was written as a builtins-only module,
             # and why this suite can run in here at all.
             nixpkgs.legacyPackages.${system}.nix
+            nixpkgs.legacyPackages.${system}.jq
             nixpkgs.legacyPackages.${system}.shellcheck
             nixpkgs.legacyPackages.${system}.util-linux
             nixpkgs.legacyPackages.${system}.which
@@ -509,8 +510,8 @@
           # This output owns maintenance and foundation only. The full registry
           # also needs agent/media tools and Cargo, with separate check closures
           # below; invoking it here silently skipped or failed unrelated lanes.
-          shellcheck -x -P "$src/tests" "$src/config/system/maintenance/ns-maint.sh" "$src/tests/ns-maint-transaction.sh"
-          for suite in ns-maint-transaction.sh kill-switch-targets.sh disk-cleanup-safety.sh \
+          shellcheck -x -P "$src/tests" "$src/config/system/maintenance/ns-maint.sh" "$src/config/home/updates/nupdate.sh" "$src/tests/ns-maint-transaction.sh" "$src/tests/nupdate-workflow.sh"
+          for suite in ns-maint-transaction.sh nupdate-workflow.sh kill-switch-targets.sh disk-cleanup-safety.sh \
             server-foundation/role-policy.sh server-foundation/boot-health.sh \
             server-foundation/tailscale-reconcile.sh server-foundation/ssh-confirm.sh; do
             bash "$src/tests/$suite"

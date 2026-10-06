@@ -330,73 +330,24 @@ ssh legion                   # a NEW session, not the one the activate ran in
 sudo ns-maint confirm tx-20261003T120000Z-a1b2c3
 ```
 
-`confirm` checks three things and refuses if any fails:
+`confirm` checks that the transaction ID matches, the confirmation deadline has
+not expired, and both the running system and system profile match the candidate.
+Confirmation is your explicit decision after checking the machine from another
+connection. It works over Tailscale SSH, OpenSSH, or a local console; it does not
+parse login journals. Failed services are shown as warnings and recorded, so you
+can judge them without an unrelated service forcing a rollback.
 
-- **the transaction id matches.** A confirmation for an older update cannot
-  bless a newer one. This is the whole point of printing the id.
-- **local health evidence**: the profile resolves to the candidate,
-  `/run/current-system` is the candidate, and `systemctl --failed` is empty. The
-  evidence is stored in the record, so a later reader can see what was true when
-  you said yes.
-- **a NEW connection was accepted by sshd since the switch was armed.** It reads
-  `SSH_CONNECTION` to identify your peer, then asks the sshd journal whether a
-  session from that peer was accepted *after* the arming time. A socket that was
-  already open when the network unit was rewritten proves nothing about whether
-  a fresh client can get in — that is the check the old workflow was missing.
-
-From a local console there is no `SSH_CONNECTION`; pass
-`--assume-new-connection` once you have actually checked reachability from
-another device. The record notes that the evidence was asserted rather than
-verified.
-
-#### Making that check work over `sudo`
-
-`confirm` must run as root, and `sudo`'s `env_reset` — on by default — strips
-`SSH_CONNECTION` on the way. Without it there is no peer to check, and the tool
-refuses with "this is not an SSH session", from a session that obviously is one.
-The only ways out of that are `--assume-new-connection` (the flag for "I could
-not verify this") or weakening the check, and neither is acceptable.
-
-So `security.sudo.extraConfig` keeps `SSH_CONNECTION`, `SSH_CLIENT` and
-`SSH_TTY` across the privileged wrapper. They are facts about the session you are
-already in, set by sshd before sudo runs, and they grant nothing by themselves —
-keeping them means the verification can actually happen instead of being
-bypassed.
-
-#### Which listener the evidence comes from
-
-The check reads the `sshd.service` journal, and that one unit covers **both**
-OpenSSH listeners this host has. `services.openssh.ports = [ 22 2222 ]` runs both
-from the same `sshd.service`, and journald records their sessions under it
-(`sshd-session[NNN]: Accepted publickey for … from … port …`) — verified on the
-Legion with both ports listening at once. A confirmation made from the phone's
-2222 session is therefore evidence in exactly the same way one made over 22 is.
-
-What it does **not** cover is Tailscale SSH, which answers on tailnet port 22
-before the OS sshd ever sees the connection and is recorded by `tailscaled`
-instead. If you are on a tailnet address, the refusal says so and names the two
-ports to use instead:
-
-```console
-# over Tailscale SSH — expected, and it says why
-ns-maint: confirm: no NEW sshd session from 100.71.67.69:54321 was accepted …
-ns-maint:          100.71.67.69 is a tailnet address, which is the case to read this:
-ns-maint:          if you got here over Tailscale SSH, its acceptance is recorded by
-ns-maint:          tailscaled, not by sshd.service, so this check will never find it …
-
-# what works
-ssh -p 22 legion        # or -p 2222 from the phone
-```
-
-No second journal source was added for that case on purpose. Reading
-`tailscaled`'s log instead would mean trusting a line format that is not part of
-any interface, is not guaranteed to be emitted at the default verbosity, and
-changes between releases — a check that silently finds nothing is worse than one
-that refuses and explains itself.
+`activate` waits for the detached system service to finish, then prints a
+copyable `sudo ns-maint confirm <txid>` command. Losing the waiting client does
+not stop the activation service. Reconnect and run `sudo ns-maint status` to see
+the result. An unprivileged status command reports inaccessible state rather
+than claiming that there is no transaction.
 
 ### When nothing is confirmed
 
-A persistent systemd timer runs `ns-maint tick` every 30 seconds. If the
+A persistent systemd timer runs `ns-maint tick` every 30 seconds. Expired
+transactions are restored by a detached system service, so replacing the timer
+service during rollback cannot kill the restoration. If the
 deadline passes with the transaction still pending, it restores the old closure
 **live**:
 
