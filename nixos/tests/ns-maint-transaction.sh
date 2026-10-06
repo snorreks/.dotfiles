@@ -81,6 +81,40 @@ assert_no_reboot
 t_done
 fixture_free
 
+t_start "ticks skip existing restore workers, including activating oneshots"
+fixture_new
+prepare_and_activate 300
+sed -i 's/^deadline=.*/deadline=1/' "$NM_DIR/record.env"
+before="$(cat "$NM_DIR/record.env")"
+for state in active activating; do
+  export FAKE_RESTORE_UNIT_STATE="$state"
+  out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+  assert_eq 0 "$rc" "$state restore worker makes tick a successful no-op"
+  assert_not_contains "$(fake_calls)" "systemd-run --unit=ns-maint-restore-" "$state worker is not submitted twice"
+  assert_eq "$before" "$(cat "$NM_DIR/record.env")" "$state worker leaves the pending record unchanged"
+done
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "failed restore submissions defer successfully and a later tick retries"
+fixture_new
+prepare_and_activate 300
+sed -i 's/^deadline=.*/deadline=1/' "$NM_DIR/record.env"
+before="$(cat "$NM_DIR/record.env")"
+export FAKE_SYSTEMD_RUN_EXIT=1
+out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "submission failure cannot fail the watchdog"
+assert_contains "$(fake_calls)" "systemd-run --unit=ns-maint-restore-$(txid)" "the failed submission was attempted"
+assert_eq "$before" "$(cat "$NM_DIR/record.env")" "failed submission preserves the transaction for retry"
+export FAKE_SYSTEMD_RUN_EXIT=0
+out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "a later tick submits successfully"
+assert_eq restored "$(phase)" "the later worker completes restoration"
+assert_no_reboot
+t_done
+fixture_free
+
 # End detached deadline restoration regression tests.
 
 t_start "restore timeout rejects invalid and nonpositive durations"
@@ -256,6 +290,7 @@ t_start "a contended tick or reconcile cannot fail an activation"
 fixture_new
 prepare_and_activate 300
 first="$(txid)"
+armed_deadline="$(rec_field deadline)"
 mkdir -p "$NM_DIR"
 exec 8>"$NM_DIR/lock"
 flock -n 8
@@ -276,7 +311,7 @@ exec 8>&-
 # skipped classification must be indistinguishable from a clean no-op.
 assert_eq "awaiting-confirm" "$(phase)" "the record is unchanged by a deferred tick or reconcile"
 assert_eq "$first" "$(txid)" "same transaction, same id"
-assert_eq "$(rec_field deadline)" "$(rec_field deadline)" "and the deadline it was armed with"
+assert_eq "$armed_deadline" "$(rec_field deadline)" "and the deadline it was armed with"
 
 # The operator-facing half of the contract is unchanged: a mutating command
 # still refuses with a retryable status rather than proceeding unlocked.

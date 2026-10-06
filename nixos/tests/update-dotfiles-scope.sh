@@ -159,7 +159,7 @@ fi
 
 # The loaded definition must be this repository's. `NM_DOTFILES_REPO` is the
 # first thing the rewritten function sets; the old implementation never had it.
-if ! fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
+if ! XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
   grep -q 'NM_DOTFILES_REPO'; then
   echo "update-dotfiles-scope: FATAL — $FUNC is not the rewritten function." >&2
   echo "  Refusing to run against the installed copy." >&2
@@ -170,14 +170,14 @@ fi
 # deliberately *quotes* the old `sudo chown -R sonny:users ~/.dotfiles` in its
 # header to explain what it replaced, so a naive grep over the whole body would
 # match the documentation of the very thing this test forbids.
-if fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
+if XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
   grep -v '^[[:space:]]*#' | grep -q 'chown[[:space:]].*-R'; then
   echo "update-dotfiles-scope: FATAL — $FUNC still runs 'chown ... -R'." >&2
   exit 90
 fi
 
 # No blanket staging or a push to master, checked the same way.
-if fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
+if XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
   grep -v '^[[:space:]]*#' | grep -qE 'add[[:space:]]+(-A|\.)|push[[:space:]].*origin[[:space:]]+master'; then
   echo "update-dotfiles-scope: FATAL — $FUNC still does a blanket add or pushes to master." >&2
   exit 90

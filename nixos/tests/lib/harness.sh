@@ -252,6 +252,8 @@ fixture_new() {
   export FAKE_FAILED_UNITS=""
   export FAKE_SSHD_LOG="$TMP/log/sshd"
   export FAKE_SYSTEMD_RUN_MODE=foreground
+  export FAKE_SYSTEMD_RUN_EXIT=0
+  export FAKE_RESTORE_UNIT_STATE=""
   : >"$TMP/log/switch"
   : >"$TMP/log/sshd"
 }
@@ -473,6 +475,16 @@ FAKE
   cat >"$b/systemctl" <<'FAKE'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"${TMP}/log/calls"
+if [[ "$*" == *ns-maint-restore-* ]]; then
+  case "$1" in
+  show)
+    if [[ -n "${FAKE_RESTORE_UNIT_STATE:-}" ]]; then echo loaded; else echo not-found; fi
+    exit 0 ;;
+  is-active)
+    [[ "${FAKE_RESTORE_UNIT_STATE:-}" == active ]] && exit 0
+    exit 3 ;;
+  esac
+fi
 if [[ "$*" == *"--failed"* ]]; then
   printf '%s' "${FAKE_FAILED_UNITS:-}"
   exit 0
@@ -487,6 +499,7 @@ FAKE
 #!/usr/bin/env bash
 # Fake systemd-run: a detached worker survives a terminated waiting client.
 echo "systemd-run $*" >>"${TMP}/log/calls"
+[[ "${FAKE_SYSTEMD_RUN_EXIT:-0}" -eq 0 ]] || exit "$FAKE_SYSTEMD_RUN_EXIT"
 unit=""
 wait_for_unit=0
 cmd=()
