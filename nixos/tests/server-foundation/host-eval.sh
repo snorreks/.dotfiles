@@ -370,27 +370,11 @@ assert_eq "it retries on a schedule" '"5min"' "$out"
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
-t_start "sudo is configured to keep the variables the new-connection check reads"
-# `ns-maint confirm` must run as root, and sudo's env_reset strips SSH_CONNECTION
-# on the way — which turns every confirmation from an SSH session into "this is
-# not an SSH session". The fix has to be keeping those variables, not weakening
-# the check; the other answer is --assume-new-connection, which is precisely the
-# flag that means "I could not verify this".
+t_start "confirmation has no SSH journal configuration dependency"
+out="$(cfg legion 'builtins.hasAttr "confirmSSHUnit" system.config.maintenance')"
+assert_eq "SSH journal option is removed" 'false' "$out"
 out="$(cfg legion 'system.config.security.sudo.extraConfig')"
-for var in SSH_CONNECTION SSH_CLIENT SSH_TTY; do
-  case "$out" in
-    *env_keep*"$var"* | *"env_keep"*"$var"*) : ;;
-    *) _fail "sudo must keep $var across the privileged wrapper (got: $out)" ;;
-  esac
-done
-t_done
-
-# ─────────────────────────────────────────────────────────────────────────────
-t_start "the confirm unit is the one BOTH OpenSSH listeners log to"
-out="$(cfg legion 'let p = builtins.head (builtins.filter (p: (p.name or "") == "ns-maint") system.config.environment.systemPackages); in builtins.elem "export NM_SSH_UNIT=sshd.service" (builtins.filter builtins.isString (builtins.split "\n" p.text))')"
-assert_eq "the trusted executable embeds sshd.service, which covers 22 and 2222" 'true' "$out"
-out="$(cfg legion 'system.config.maintenance.confirmSSHUnit')"
-assert_eq "and the option behind it says the same" '"sshd.service"' "$out"
+assert_not_contains "no maintenance-specific SSH environment forwarding" "$out" "SSH_CONNECTION"
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────

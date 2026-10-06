@@ -44,6 +44,9 @@
 #
 # Environment (all overridable so the tests can drive every branch):
 #   NM_TAILSCALE             tailscale binary           (default: tailscale)
+#                             Must be resolvable on PATH, or the script says
+#                             so and stops: an unreadable node is not a
+#                             logged-out node.
 #   NM_TS_DESIRED_SSH        "true"/"false"             node-level SSH
 #   NM_TS_ACCEPT_DNS         "true"/"false"             MagicDNS acceptance
 #   NM_TS_EXIT_NODE          "true"/"false"             advertise an exit node
@@ -77,6 +80,21 @@ fail() {
 # control plane". Anything other than Running means either logged out (a human
 # has to visit an admin URL — not something this job can or should do) or
 # still starting up (which is the case this script exists for).
+#
+# "I could not ask" and "the answer was no" are DIFFERENT and are kept apart
+# here. They used to collapse into one empty string, so a unit whose PATH did
+# not contain the tailscale CLI reported "the node is not authenticated, run
+# 'tailscale up'" about a node that was logged in the whole time — and an
+# unattended `tailscale up` is exactly the interactive hang this script exists
+# to avoid. An empty answer is only reported as an empty answer.
+if ! command -v "$NM_TAILSCALE" >/dev/null 2>&1; then
+  fail "the tailscale CLI ('$NM_TAILSCALE') is not on this unit's PATH, so the
+         node's state cannot be read at all. This is a packaging fault, not a
+         node fault: nothing below was attempted, nothing was changed, and
+         'tailscale up' would NOT help. Check 'path' in
+         config/system/server.nix for systemd.services.tailscale-reconcile."
+fi
+
 backend_state() {
   "$NM_TAILSCALE" status --json 2>/dev/null |
     sed -n 's/.*"BackendState":[[:space:]]*"\([^"]*\)".*/\1/p' |
@@ -84,7 +102,7 @@ backend_state() {
 }
 
 state="$(backend_state)"
-log "BackendState=${state:-unknown}"
+log "BackendState=${state:-<none reported>}"
 
 if [[ "$NM_TS_WAIT_SECONDS" -gt 0 ]]; then
   waited=0
@@ -100,12 +118,25 @@ case "$state" in
   Running)
     :
     ;;
-  NeedsLogin | NoState | "" | unknown)
-    fail "the node is not authenticated (BackendState=${state:-unknown}).
+  NeedsLogin | NoState)
+    fail "the node is not authenticated (BackendState=$state).
          A browser login is required — run 'tailscale up' from a console, or
          use the admin console. This job will not: an unattended 'tailscale up'
          can leave the node waiting on an interactive prompt forever, and the
          timer will retry once the credentials are in place."
+    ;;
+  "")
+    # The CLI ran but reported no BackendState at all: tailscaled is not
+    # answering (still starting, or wedged). Named separately from the
+    # logged-out case above, because 'tailscale up' is the wrong advice here —
+    # nothing about this node needs a browser.
+    fail "'$NM_TAILSCALE status --json' returned no BackendState, so tailscaled
+         is not answering. This is a starting-up or wedged-daemon condition,
+         not a logged-out one: do NOT run 'tailscale up'. The timer retries."
+    ;;
+  unknown)
+    fail "BackendState=unknown. tailscaled reports an explicit state this
+         version of the script does not recognise; leaving the node alone."
     ;;
   Stopped | Starting)
     log "node is $state; tailscaled will sort it out, nothing to change."

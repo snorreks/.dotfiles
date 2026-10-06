@@ -29,6 +29,7 @@
 # the picture; it is run with `nix build`, and run.sh says so when asked.
 
 maintenance	tests/ns-maint-transaction.sh	fast	shell
+maintenance	tests/nupdate-workflow.sh	fast	shell
 maintenance	tests/kill-switch-targets.sh	fast	shell
 maintenance	tests/disk-cleanup-safety.sh	fast	shell
 

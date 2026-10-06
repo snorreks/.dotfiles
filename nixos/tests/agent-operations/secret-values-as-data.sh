@@ -169,12 +169,46 @@ assert_eq '0' "$?" 'fish preserves the remaining trailing newline'
 cmp -s "$TMP/expected-value" "$TMP/fish-alias"
 assert_eq '0' "$?" 'fish aliases preserve identical bytes'
 
+_t_start "interactive fish automatically exports ready credentials to arbitrary CLI children"
+python3 - "$LANE_SRC/config/home/fish/default.nix" "$TMP/cli-init.fish" <<'PYTHON'
+import pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+start = text.index('      function ns-secrets ')
+end = text.index('      set fish_greeting', start)
+pathlib.Path(sys.argv[2]).write_text(text[start:end])
+PYTHON
+cat >"$TMP/cli-child.sh" <<'CHILD'
+test "$GH_TOKEN" = aliased-value && test -n "$QUOTED_KEY" && test -n "$INJECT_KEY" && test -z "${ANTHROPIC_API_KEY+x}" && test -z "${NUL_KEY+x}"
+CHILD
+SECRET_ENV="$TMP/bin/loader" fish --no-config --interactive -c '
+    source "$TMP/cli-init.fish"
+    command bash "$TMP/cli-child.sh"
+' >"$TMP/cli-init.out" 2>&1
+assert_eq '0' "$?" 'ordinary CLI children inherit ready keys and aliases without ns-secrets'
+assert_no_file "$CANARY_CMD" 'automatic loading never executes command substitutions'
+assert_no_file "$CANARY_BTICK" 'automatic loading never executes backticks'
+
+_t_start "the sops-nix home-manager symlink path is searched"
+# This is the layout on a real host: sops-nix decrypts into
+# $XDG_RUNTIME_DIR/secrets.d/<id> and symlinks the CURRENT generation at
+# $XDG_CONFIG_HOME/sops-nix/secrets. A credential found ONLY there must be
+# found — the loader missed this path entirely and reported every credential
+# ABSENT on a correctly-decrypted machine.
+mkdir -p "$XDG_CONFIG_HOME/sops-nix/secrets"
+printf 'config-dir-value' >"$XDG_CONFIG_HOME/sops-nix/secrets/CONFIG_DIR_KEY"
+printf 'CONFIG_DIR_KEY||true\n' >>"$MANIFEST"
+out="$(bash "$SECRET_ENV" --name CONFIG_DIR_KEY --exec "$TMP/bin/showenv" 2>/dev/null | grep -a '^CONFIG_DIR_KEY=')"
+assert_eq 'CONFIG_DIR_KEY=config-dir-value' "$out" \
+	'a credential only in the sops-nix symlink dir is found'
+out="$(bash "$SECRET_ENV" --name CONFIG_DIR_KEY --check 2>/dev/null)"
+assert_contains "$out" 'ready' 'and --check reports it ready'
+
 _t_start "actual managed fish children load ready keys, not server/client/pane shells"
 python3 - "$LANE_SRC/config/home/fish/default.nix" "$TMP/__ns_agent_exec.fish" <<'PY'
 import pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
-start = text.index('      function __ns_agent_exec ')
-end = text.index("\n    '';", start)
+start = text.index('function __ns_agent_exec ')
+end = text.index("'';", start)
 pathlib.Path(sys.argv[2]).write_text(text[start:end])
 PY
 export MANAGED_FUNCTIONS="$LANE_SRC/config/home/fish/functions"

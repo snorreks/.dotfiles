@@ -39,8 +39,16 @@
 # Values come from files only, searched in this order:
 #
 #   1. $CREDENTIALS_DIRECTORY        systemd LoadCredential= (preferred)
-#   2. $XDG_RUNTIME_DIR/sops-nix/secrets
-#   3. ~/.local/state/sops-nix/secrets
+#   2. $XDG_CONFIG_HOME/sops-nix/secrets
+#   3. $XDG_RUNTIME_DIR/sops-nix/secrets
+#   4. $XDG_STATE_HOME/sops-nix/secrets
+#
+# (2) is where the sops-nix home-manager module symlinks the CURRENT generation
+# of decrypted secrets (its defaultSymlinkPath, pointing into
+# $XDG_RUNTIME_DIR/secrets.d/<id>). It is the stable path: the symlink is
+# recreated on every activation, so a caller never has to know the generation
+# id. (3) and (4) are the same module's locations under other XDG
+# configurations and older sops-nix layouts; they cost nothing when absent.
 #
 # Every one of those is a decrypted-at-rest file owned by the service that was
 # given the credential, so scoping is done by systemd, not by hoping.
@@ -256,6 +264,7 @@ fi
 # somewhere else.
 declare -a SEARCH_DIRS=()
 [[ -n "${CREDENTIALS_DIRECTORY:-}" ]] && SEARCH_DIRS+=("$CREDENTIALS_DIRECTORY")
+SEARCH_DIRS+=("${XDG_CONFIG_HOME:-$HOME/.config}/sops-nix/secrets")
 [[ -n "${XDG_RUNTIME_DIR:-}" ]] && SEARCH_DIRS+=("$XDG_RUNTIME_DIR/sops-nix/secrets")
 SEARCH_DIRS+=("${XDG_STATE_HOME:-$HOME/.local/state}/sops-nix/secrets")
 

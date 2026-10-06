@@ -158,6 +158,6 @@ in {
   # 🔴 There is deliberately NO sops-import-environment.service and NO ~/.profile
   # hook any more. Both existed only to run the eval template; both are the
   # "desktop-global import" that put every credential into every process. The
-  # fish function `ns-secrets` (config/home/fish/default.nix) reads values as
-  # data instead, and `secret-env.sh --check` is the readiness answer.
+  # fish function `ns-secrets` reads values as data and runs automatically in
+  # interactive shells. `secret-env.sh --check` reports readiness.
 }

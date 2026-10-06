@@ -58,12 +58,12 @@ in {
 
       # ── Window Gaps (Padding Around Windows) ─────────────────────────
       # Inner Gaps (spacing between adjacent tiled windows)
-      gap_inner_horizontal = 2; # Horizontal inner gap
-      gap_inner_vertical = 2; # Vertical inner gap
+      gap_inner_horizontal = 1; # Horizontal inner gap
+      gap_inner_vertical = 1; # Vertical inner gap
 
       # Outer Gaps (spacing between windows and screen edges/Waybar)
-      gap_outer_horizontal = 4; # Horizontal outer gap
-      gap_outer_vertical = 4; # Vertical outer gap
+      gap_outer_horizontal = 2; # Horizontal outer gap
+      gap_outer_vertical = 2; # Vertical outer gap
 
       # Smart Gaps: Automatically removes gaps when only 1 window is visible
       smart_gaps = 1;

@@ -80,7 +80,6 @@
       NM_HOST = opts.hostname;
       NM_FLAKE = opts.flakeDir;
       NM_DEFAULT_TIMEOUT = cfg.deadlineTimeout;
-      NM_SSH_UNIT = cfg.confirmSSHUnit;
       # The ESP preflight in `ns-maint stage` (see esp_preflight in ns-maint.sh).
       # Exported with the rest so the operator's own invocation and the units
       # agree on which partition is being measured and what floor applies.
@@ -120,31 +119,6 @@ in {
         without --timeout. Long enough for a human to open a second connection
         and look, short enough that an unattended machine is not left in an
         armed window overnight.
-      '';
-    };
-
-    confirmSSHUnit = lib.mkOption {
-      type = lib.types.str;
-      default = "sshd.service";
-      description = ''
-        The systemd unit whose journal is asked whether a NEW session was
-        accepted after the switch was armed. Renamed only if a host moves sshd
-        out of its socket-activated unit.
-
-        One unit covers BOTH OpenSSH listeners on these hosts, and that is not
-        an assumption: `services.openssh.ports = [ 22 2222 ]` runs both
-        listeners from the same sshd.service, and journald records their
-        sessions under it (`sshd-session[NNN]: Accepted publickey for … from …
-        port …`) — checked on the Legion with both ports listening at once. A
-        confirmation made over the phone's 2222 session is therefore evidence in
-        exactly the same way one made over 22 is.
-
-        What this does NOT cover is Tailscale SSH, which answers on tailnet port
-        22 before the OS sshd ever sees the connection and is recorded by
-        tailscaled instead. Confirm from an OpenSSH session (22 or 2222). The
-        refusal message says so when the peer is a tailnet address, because
-        "no evidence found" from Tailscale SSH otherwise reads like a failed
-        update.
       '';
     };
 
@@ -238,6 +212,26 @@ in {
         ExecStart = "${nsMaintExe} reconcile";
         # A failure here is reported, not retried in a loop.
         Restart = "no";
+        # Exit 0 on lock contention is deliberate and is the thing that stops an
+        # activation from failing itself, so it must not be turned back into a
+        # failure here either:
+        #
+        # This unit is WantedBy=multi-user.target and has no RemainAfterExit, so
+        # it is inactive after every run. switch-to-configuration starts all
+        # active targets on every activation, and starting a target re-pulls its
+        # Wants= units — which restarts THIS unit. When the activation was driven
+        # by ns-maint, ns-maint is holding its own lock for the whole activation,
+        # so `reconcile` finds the lock busy. It exits 0 (see lock_acquire
+        # --defer) so the unit succeeds, but SuccessExitStatus makes that
+        # explicit at the systemd layer and independent of the script's behaviour.
+        #
+        # Without this, the observed sequence is: reconcile exits 75 ->
+        # switch-to-configuration exits 4 -> ns-maint rolls the activation back ->
+        # the rollback re-activates the old closure -> the same unit is restarted
+        # -> the same 75 -> "RESTORATION DID NOT COMPLETE". That is a deadlock
+        # between the activation and its own watchdog, and it blocks every
+        # configuration change on the host.
+        SuccessExitStatus = 75;
       };
     };
 
@@ -251,9 +245,18 @@ in {
       serviceConfig = {
         Type = "oneshot";
         ExecStart = "${nsMaintExe} tick";
-        # Allow all three bounded restoration steps (10min each), plus
-        # bookkeeping, before the outer watchdog terminates the worker.
-        TimeoutStartSec = "31min";
+        # tick only submits work; the detached restore service carries the
+        # 31min outer bound and survives replacement of this watchdog.
+        TimeoutStartSec = "30s";
+        # Same reasoning as ns-maint-reconcile above, and the same observed
+        # failure: an activation holds ns-maint's lock, the timer's tick fires
+        # inside that window, exits 75, and switch-to-configuration reports the
+        # watchdog's own contention as a failed unit. The journal of the failed
+        # transaction shows exactly that pair:
+        #   ns-maint-deadline.service: Main process exited, code=exited, status=75
+        #   warning: the following units failed: ns-maint-deadline.service,
+        #                              ns-maint-reconcile.service
+        SuccessExitStatus = 75;
       };
     };
 

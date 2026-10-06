@@ -113,9 +113,9 @@
   # optional keys allow OAuth/auth-store/local use, malformed keys fail loudly.
   # ANTHROPIC_API_KEY remains excluded by sessionVariable=false. Pinned Pi
   # pi-ai/dist/auth/resolve.js resolves stored OAuth/API auth before env fallback.
-  # LoadCredential only delivers files. No server/client ambient keys, restart,
-  # manifest hook or global PATH shim. Other agent kinds are not integrated;
-  # their launchers can explicitly use fish's generic __ns_agent_exec helper.
+  # Interactive fish panes load ready CLI credentials for every agent kind.
+  # Existing plain panes can refresh with ns-secrets; these two launchers also
+  # refresh credentials per child without restarting the server.
   envSecrets = import ./env-secrets.nix;
 
   # Credential names a spawned agent needs, i.e. everything in env-secrets.nix
@@ -124,7 +124,11 @@
   agentCredentialNames =
     map (s: s.name) (builtins.filter (s: s.sessionVariable or true) envSecrets);
 
-  secretDir = "${config.xdg.runtimeDir}/sops-nix/secrets";
+  # The sops-nix home-manager module's defaultSymlinkPath: a symlink at
+  # ~/.config/sops-nix/secrets to the current generation's decrypted dir
+  # ($XDG_RUNTIME_DIR/secrets.d/<id>). Stable across activations, unlike the
+  # generation id itself. LoadCredential needs a real path, and this is it.
+  secretDir = "${config.xdg.configHome}/sops-nix/secrets";
 in {
   # Declared as a Home Manager option, NOT a NixOS one. Home Manager user modules
   # receive the HM submodule's own `config`, so a NixOS option declared in

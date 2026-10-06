@@ -241,6 +241,7 @@ fixture_new() {
   export FAKE_SWITCH_SLEEP=0
   export FAKE_PROFILE_SET_EXIT=0
   export FAKE_PROFILE_RESTORE_EXIT=0
+  unset FAKE_STOP_DEADLINE_PID_FILE
   export FAKE_SWITCH_OLD_SLEEP=0
   export NM_RESTORE_TIMEOUT=3
   export FAKE_SWITCH_IGNORE_TERM=0
@@ -251,6 +252,8 @@ fixture_new() {
   export FAKE_FAILED_UNITS=""
   export FAKE_SSHD_LOG="$TMP/log/sshd"
   export FAKE_SYSTEMD_RUN_MODE=foreground
+  export FAKE_SYSTEMD_RUN_EXIT=0
+  export FAKE_RESTORE_UNIT_STATE=""
   : >"$TMP/log/switch"
   : >"$TMP/log/sshd"
 }
@@ -349,9 +352,38 @@ write_fakes() {
 # FAKE_BUILD_EXIT models a build failure. Neither can produce a side effect the
 # tool is not supposed to produce on those paths, which is exactly what the
 # build-timeout test asserts.
+#
+# `flake update` is NOT a stub that accepts anything. The real command treats
+# every POSITIONAL argument as an input name and selects the flake with
+# --flake, so a fake that accepted any argv would have passed while the real
+# nix failed with "invalid flake input attribute path element". This fake
+# enforces the same shape: the flake must arrive via --flake, and at least one
+# positional input must remain.
 echo "nix $*" >>"${TMP}/log/calls"
 if [[ "$*" == *"flake update"* ]]; then
-  echo "flake-update $*" >>"${TMP}/log/calls"
+  had_flake=0
+  inputs=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+    flake) shift ;;
+    update) shift ;;
+    --flake) had_flake=1; shift 2 ;;
+    --extra-experimental-features | --offline | --no-link | --print-out-paths)
+      shift 2
+      ;;
+    -*) shift ;;
+    *) inputs+=("$1"); shift ;;
+    esac
+  done
+  if [[ "$had_flake" -ne 1 ]]; then
+    echo "error: the flake must be selected with --flake, not given positionally" >>"${TMP}/log/calls"
+    exit 1
+  fi
+  if [[ "${#inputs[@]}" -eq 0 ]]; then
+    echo "error: 'nix flake update' would recreate the whole lock file" >>"${TMP}/log/calls"
+    exit 1
+  fi
+  echo "flake-update inputs=${inputs[*]}" >>"${TMP}/log/calls"
   exit 0
 fi
 if [[ "${FAKE_BUILD_SLEEP:-0}" -gt 0 ]]; then
@@ -443,6 +475,16 @@ FAKE
   cat >"$b/systemctl" <<'FAKE'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"${TMP}/log/calls"
+if [[ "$*" == *ns-maint-restore-* ]]; then
+  case "$1" in
+  show)
+    if [[ -n "${FAKE_RESTORE_UNIT_STATE:-}" ]]; then echo loaded; else echo not-found; fi
+    exit 0 ;;
+  is-active)
+    [[ "${FAKE_RESTORE_UNIT_STATE:-}" == active ]] && exit 0
+    exit 3 ;;
+  esac
+fi
 if [[ "$*" == *"--failed"* ]]; then
   printf '%s' "${FAKE_FAILED_UNITS:-}"
   exit 0
@@ -455,15 +497,16 @@ FAKE
 
   cat >"$b/systemd-run" <<'FAKE'
 #!/usr/bin/env bash
-# Fake `systemd-run`. In background mode it returns immediately and runs the
-# command detached — which is the property the disconnect test depends on: the
-# caller gets its prompt back before activation has finished.
+# Fake systemd-run: a detached worker survives a terminated waiting client.
 echo "systemd-run $*" >>"${TMP}/log/calls"
+[[ "${FAKE_SYSTEMD_RUN_EXIT:-0}" -eq 0 ]] || exit "$FAKE_SYSTEMD_RUN_EXIT"
 unit=""
+wait_for_unit=0
 cmd=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --wait=*) exit 2 ;;
+  --wait) wait_for_unit=1 ;;
   --unit=*) unit="${1#--unit=}" ;;
   --* | -*) ;;
   *) cmd+=("$1") ;;
@@ -472,6 +515,11 @@ while [[ $# -gt 0 ]]; do
 done
 if [[ "${FAKE_SYSTEMD_RUN_MODE:-foreground}" == "background" ]]; then
   ( "${cmd[@]}" >>"${TMP}/log/unit.out" 2>&1 ) &
+  worker=$!
+  if [[ "$wait_for_unit" -eq 1 ]]; then
+    wait "$worker"
+    exit $?
+  fi
   disown 2>/dev/null || true
   exit 0
 fi
@@ -547,6 +595,12 @@ case "$closure" in
   exit "$rc"
   ;;
 esac
+if [[ -n "${FAKE_STOP_DEADLINE_PID_FILE:-}" ]]; then
+  sleep 1
+  if [[ -r "$FAKE_STOP_DEADLINE_PID_FILE" ]]; then
+    kill "$(cat "$FAKE_STOP_DEADLINE_PID_FILE")" 2>/dev/null || true
+  fi
+fi
 [[ "${FAKE_SWITCH_OLD_SLEEP:-0}" -eq 0 ]] || sleep "$FAKE_SWITCH_OLD_SLEEP"
 if [[ "$mode" == "boot" ]]; then
   exit "${FAKE_SWITCH_OLD_BOOT_EXIT:-0}"

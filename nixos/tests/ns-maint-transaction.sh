@@ -24,6 +24,99 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 printf '\n\033[1mns-maint maintenance transaction — failure injection\033[0m\n'
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Detached deadline restoration regression tests.
+t_start "deadline restoration survives stopping the watchdog service"
+fixture_new
+prepare_and_activate 300
+sed -i 's/^deadline=.*/deadline=1/' "$NM_DIR/record.env"
+export FAKE_SYSTEMD_RUN_MODE=background
+export FAKE_STOP_DEADLINE_PID_FILE="$TMP/deadline.pid"
+bash "$NS_MAINT_SCRIPT" tick >"$TMP/log/tick.out" 2>&1 &
+deadline_pid=$!
+printf '%s\n' "$deadline_pid" >"$FAKE_STOP_DEADLINE_PID_FILE"
+wait "$deadline_pid" 2>/dev/null || true
+limit=$(( $(date +%s) + 10 ))
+while [[ "$(phase)" != restored && "$(date +%s)" -lt "$limit" ]]; do sleep 0.1; done
+assert_eq restored "$(phase)" "a self-stopped watchdog cannot interrupt the restore worker"
+assert_contains "$(fake_calls)" "--unit=ns-maint-restore-$(txid)" "restoration runs in its own service"
+assert_contains "$(fake_calls)" "--property=TimeoutStartSec=31min" "worker keeps the outer restoration bound"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "queued restore workers recheck superseded records"
+for change in wrong-txid confirmed cleared-deadline future-deadline; do
+  fixture_new
+  prepare_and_activate 300
+  id="$(txid)"
+  sed -i 's/^deadline=.*/deadline=1/' "$NM_DIR/record.env"
+  case "$change" in
+    wrong-txid) id=tx-19990101T000000Z-aaaaaa ;;
+    confirmed) sed -i 's/^phase=.*/phase=confirmed/' "$NM_DIR/record.env" ;;
+    cleared-deadline) sed -i 's/^deadline=.*/deadline=/' "$NM_DIR/record.env" ;;
+    future-deadline) sed -i "s/^deadline=.*/deadline=$(( $(date +%s) + 300 ))/" "$NM_DIR/record.env" ;;
+  esac
+  before="$(cat "$NM_DIR/record.env")"
+  out="$(ns_maint __run-restore "$id" 2>&1)" && rc=0 || rc=$?
+  assert_eq 0 "$rc" "$change worker is a harmless no-op"
+  assert_eq "$before" "$(cat "$NM_DIR/record.env")" "$change record stays unchanged"
+  assert_not_contains "$(switch_calls)" "test $FAKE_RUNNING" "$change does not restore"
+  fixture_free
+done
+t_done
+t_start "a contended restore worker defers and a later tick retries interrupted restoration"
+fixture_new
+prepare_and_activate 300
+sed -i -e 's/^deadline=.*/deadline=1/' -e 's/^phase=.*/phase=restoring/' "$NM_DIR/record.env"
+before="$(cat "$NM_DIR/record.env")"
+exec {held_restore_lock}>"$NM_DIR/lock"
+flock "$held_restore_lock"
+out="$(ns_maint __run-restore "$(txid)" 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "a contended worker defers successfully"
+assert_eq "$before" "$(cat "$NM_DIR/record.env")" "contention cannot change the record"
+exec {held_restore_lock}>&-
+ns_maint tick >"$TMP/log/tick.out" 2>&1
+assert_eq restored "$(phase)" "a later tick retries and completes interrupted restoration"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "ticks skip existing restore workers, including activating oneshots"
+fixture_new
+prepare_and_activate 300
+sed -i 's/^deadline=.*/deadline=1/' "$NM_DIR/record.env"
+before="$(cat "$NM_DIR/record.env")"
+for state in active activating; do
+  export FAKE_RESTORE_UNIT_STATE="$state"
+  out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+  assert_eq 0 "$rc" "$state restore worker makes tick a successful no-op"
+  assert_not_contains "$(fake_calls)" "systemd-run --unit=ns-maint-restore-" "$state worker is not submitted twice"
+  assert_eq "$before" "$(cat "$NM_DIR/record.env")" "$state worker leaves the pending record unchanged"
+done
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "failed restore submissions defer successfully and a later tick retries"
+fixture_new
+prepare_and_activate 300
+sed -i 's/^deadline=.*/deadline=1/' "$NM_DIR/record.env"
+before="$(cat "$NM_DIR/record.env")"
+export FAKE_SYSTEMD_RUN_EXIT=1
+out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "submission failure cannot fail the watchdog"
+assert_contains "$(fake_calls)" "systemd-run --unit=ns-maint-restore-$(txid)" "the failed submission was attempted"
+assert_eq "$before" "$(cat "$NM_DIR/record.env")" "failed submission preserves the transaction for retry"
+export FAKE_SYSTEMD_RUN_EXIT=0
+out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "a later tick submits successfully"
+assert_eq restored "$(phase)" "the later worker completes restoration"
+assert_no_reboot
+t_done
+fixture_free
+
+# End detached deadline restoration regression tests.
+
 t_start "restore timeout rejects invalid and nonpositive durations"
 fixture_new
 for duration in invalid 0 0min -1; do
@@ -98,16 +191,23 @@ FAKE_SWITCH_SLEEP=2
 export FAKE_SYSTEMD_RUN_MODE FAKE_SWITCH_SLEEP
 ns_maint prepare >/dev/null 2>&1
 
-# Abandon the caller: run activate, do not wait for it, and let it go. The
-# fake systemd-run detaches the unit, exactly as the real one does.
-ns_maint activate --timeout 300 >"$TMP/log/activate.out" 2>&1
-assert_eq "armed" "$(phase)" "activate returned before the (deliberately slow) activation finished"
+# Terminate the waiting CLI after its system service has started.
+bash "$NS_MAINT_SCRIPT" activate --timeout 300 >"$TMP/log/activate.out" 2>&1 &
+caller=$!
+deadline=$(( $(date +%s) + 10 ))
+while [[ "$(phase)" != "activating" && "$(date +%s)" -lt "$deadline" ]]; do
+  sleep 0.05
+done
+assert_eq "activating" "$(phase)" "the client is waiting while the worker activates"
+kill "$caller" 2>/dev/null && rc=0 || rc=$?
+assert_eq 0 "$rc" "the waiting client is still alive and can be disconnected"
+wait "$caller" 2>/dev/null || true
 
 assert_contains "$(fake_calls)" "systemd-run --unit=ns-maint-activate-" \
   "activation was handed to a transient SYSTEM unit, not run inline"
 assert_contains "$(cat "$TMP/log/activate.out")" "system service" "the caller is told where it is running"
 
-# Now kill the "caller": nothing below waits on it. The unit finishes on its own.
+# The detached worker finishes after the waiting CLI has exited.
 deadline=$(( $(date +%s) + 30 ))
 while [[ "$(phase)" == "armed" || "$(phase)" == "activating" ]] && [[ "$(date +%s)" -lt "$deadline" ]]; do
   sleep 0.2
@@ -153,6 +253,126 @@ t_done
 fixture_free
 
 # ─────────────────────────────────────────────────────────────────────────────
+# THE ACTIVATION DEADLOCK. Read this before changing anything about the exit code
+# of tick/reconcile.
+#
+# On 2026-10-06 every ns-maint-driven activation on this host failed and rolled
+# itself back:
+#
+#   ns-maint-reconcile.service: Main process exited, code=exited, status=75
+#   warning: the following units failed: ns-maint-reconcile.service
+#   switching to system configuration ... failed (status 4)
+#   ns-maint: activation ... FAILED (exit 4). ... Restoring the previous closure.
+#   ns-maint: RESTORATION DID NOT COMPLETE ... switch-to-configuration test
+#             failed with exit 4
+#
+# The chain: ns-maint holds its exclusive lock for the whole activation.
+# ns-maint-reconcile.service is WantedBy=multi-user.target with no
+# RemainAfterExit, so it is inactive after every run and switch-to-configuration
+# restarts it on EVERY activation (starting an active target re-pulls its Wants=
+# units). The restarted reconcile cannot take the lock ns-maint is holding,
+# exits 75, and switch-to-configuration turns any failed unit into exit 4 —
+# which ns-maint reads as "activation failed". The rollback re-activates the old
+# closure, which restarts the same unit, which fails the same way, so the
+# restoration cannot complete either.
+#
+# It is tempting to read this as "only activations that change the ns-maint
+# derivation are affected", because a changed derivation changes the unit
+# definition. It is not: the unit definitions in the failing pair were
+# byte-identical, and every plain `nixos-rebuild` activation of the same closure
+# succeeded in the same window. The trigger is being an ns-maint activation at
+# all, so a fix aimed only at restartIfChanged would fix nothing.
+#
+# The property under test is therefore: while the lock is held, tick and
+# reconcile exit 0. A watchdog that can fail the activation it is watching is the
+# bug; a watchdog that defers 30 seconds is not.
+t_start "a contended tick or reconcile cannot fail an activation"
+fixture_new
+prepare_and_activate 300
+first="$(txid)"
+armed_deadline="$(rec_field deadline)"
+mkdir -p "$NM_DIR"
+exec 8>"$NM_DIR/lock"
+flock -n 8
+
+# tick: the deadline watchdog. Deferring costs one tick interval.
+out="$(ns_maint tick 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "a contended tick exits 0, so its unit cannot fail an activation"
+assert_contains "$out" "deferring" "and says it deferred rather than silently doing nothing"
+
+# reconcile: the cold-boot classifier. Deferring costs a boot.
+out="$(ns_maint reconcile 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "a contended reconcile exits 0, so its unit cannot fail an activation"
+assert_contains "$out" "deferring" "and says so"
+assert_contains "$out" "next boot" "and names when it will actually run"
+
+exec 8>&-
+# Neither deferral may have touched the record: both are classifiers, and a
+# skipped classification must be indistinguishable from a clean no-op.
+assert_eq "awaiting-confirm" "$(phase)" "the record is unchanged by a deferred tick or reconcile"
+assert_eq "$first" "$(txid)" "same transaction, same id"
+assert_eq "$armed_deadline" "$(rec_field deadline)" "and the deadline it was armed with"
+
+# The operator-facing half of the contract is unchanged: a mutating command
+# still refuses with a retryable status rather than proceeding unlocked.
+exec 8>"$NM_DIR/lock"
+flock -n 8
+out="$(ns_maint confirm "$(txid)" 2>&1)" && rc=0 || rc=$?
+exec 8>&-
+assert_eq 75 "$rc" "a mutating command still exits 75, not 0 — deferring is for classifiers only"
+assert_contains "$out" "another ns-maint operation holds the lock" "and says why"
+assert_no_reboot
+t_done
+fixture_free
+
+# The same invariant from the other side: activation itself, holding the lock the
+# whole way, must not see either unit fail. This is the shape that deadlocked.
+t_start "activation holds the lock without the watchdog units being able to fail it"
+fixture_new
+# A switch slow enough that the deadline timer would fire inside the window —
+# the real timer is 30s and a real activation takes ~30s, so this is not a
+# contrived interleaving, it is the ordinary case.
+FAKE_SWITCH_SLEEP=3
+export FAKE_SWITCH_SLEEP
+ns_maint prepare >/dev/null 2>&1
+ns_maint activate --timeout 300 >"$TMP/log/activate.out" 2>&1 &
+activation_pid=$!
+# Wait until the activation is inside switch-to-configuration, i.e. holding the
+# lock, rather than guessing with a sleep.
+for _ in $(seq 1 100); do
+  [[ "$(switch_calls)" == *"$FAKE_CANDIDATE"* ]] && break
+  sleep 0.05
+done
+# These two are what systemd runs when it restarts the Wants= units of
+# multi-user.target during that activation.
+ns_maint tick >"$TMP/log/tick-midflight.out" 2>&1 && rc=0 || rc=$?
+tick_rc="$rc"
+ns_maint reconcile >"$TMP/log/reconcile-midflight.out" 2>&1 && rc=0 || rc=$?
+reconcile_rc="$rc"
+wait "$activation_pid"
+
+assert_eq 0 "$tick_rc" "the watchdog tick run mid-activation does not fail"
+assert_eq 0 "$reconcile_rc" "the reconcile run mid-activation does not fail"
+assert_eq "awaiting-confirm" "$(phase)" "the activation completes instead of rolling back"
+assert_contains "$(switch_calls)" "switch $FAKE_CANDIDATE" "and the candidate really was activated"
+assert_not_contains "$(switch_calls)" "test $FAKE_RUNNING" "no rollback was attempted at all"
+assert_no_reboot
+t_done
+fixture_free
+
+# ─────────────────────────────────────────────────────────────────────────────
+t_start "activation waits for completion before offering sudo confirmation"
+fixture_new
+prepare_and_activate 300
+out="$(cat "$TMP/log/activate.out")"
+assert_contains "$(fake_calls)" "--wait" "client waits for the system service"
+assert_not_contains "$(fake_calls)" "--no-block" "client does not return during activation"
+assert_contains "$out" "sudo ns-maint confirm $(txid)" "copyable confirmation uses sudo"
+assert_contains "$out" "activation completed" "completion is explicit"
+assert_no_reboot
+t_done
+fixture_free
+
 t_start "a stale confirmation cannot confirm a newer transaction"
 fixture_new
 prepare_and_activate 300
@@ -411,44 +631,30 @@ t_done
 fixture_free
 
 # ─────────────────────────────────────────────────────────────────────────────
-t_start "confirmation requires evidence that a NEW connection got in"
+t_start "confirmation is an operator decision independent of SSH transport"
 fixture_new
 prepare_and_activate 300
 id="$(txid)"
-as_ssh_session "100.64.1.2 51234 100.64.1.9 22"
-# sshd logged this session BEFORE the switch was armed — i.e. this is the socket
-# that was already open, which is the case the old workflow accepted.
-old_ts=$(( $(date +%s) - 600 ))
-sshd_accepts "$old_ts" 51234
-out="$(ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-assert_ne 0 "$rc" "an already-open session cannot confirm"
-assert_contains "$out" "no NEW sshd session" "with the reason"
-assert_contains "$out" "proves nothing about whether a fresh client can get in" "and why an old socket proves nothing"
-assert_eq "awaiting-confirm" "$(phase)" "still pending"
-
-# Now a genuinely new connection, accepted after arming.
-new_ts=$(( $(date +%s) + 1 ))
-sshd_accepts "$new_ts" 51234
-ns_maint confirm "$id" >"$TMP/log/confirm.out" 2>&1
-assert_eq "confirmed" "$(phase)" "a new connection confirms"
-assert_contains "$(rec_field confirm_connection)" "after APPLY completed" "and the evidence is stored in the record"
+out="$(SSH_CONNECTION="" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "console confirmation needs no SSH evidence flag"
+assert_eq "confirmed" "$(phase)" "the operator confirms the exact candidate"
+assert_contains "$(rec_field confirm_connection)" "operator confirmed" "operator decision is recorded honestly"
+assert_not_contains "$(fake_calls)" "journalctl -u sshd" "no SSH journal parsing"
 assert_no_reboot
 t_done
 fixture_free
 
-t_start "confirmation refuses when local health evidence is not clean"
+t_start "failed services are reported without blocking operator confirmation"
 fixture_new
-FAKE_FAILED_UNITS="sshd.service loaded failed failed Reload"
+FAKE_FAILED_UNITS="unrelated.service loaded failed failed Reload"
 export FAKE_FAILED_UNITS
 prepare_and_activate 300
-as_ssh_session
-now="$(date +%s)"
-sshd_accepts "$((now + 1))" 51234
 id="$(txid)"
-out="$(ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
-assert_ne 0 "$rc" "a failed unit blocks confirmation"
-assert_contains "$out" "failed systemd unit" "and the failing units are named"
-assert_eq "awaiting-confirm" "$(phase)" "the transaction is not confirmed"
+out="$(SSH_CONNECTION="" ns_maint confirm "$id" 2>&1)" && rc=0 || rc=$?
+assert_eq 0 "$rc" "failed service does not override operator decision"
+assert_contains "$out" "failed systemd unit" "the warning remains visible"
+assert_eq "1" "$(rec_field health_failed_units)" "health evidence remains recorded"
+assert_eq "confirmed" "$(phase)" "the transaction is confirmed"
 assert_no_reboot
 t_done
 fixture_free
@@ -514,9 +720,32 @@ assert_ne 0 "$rc" "--update-all is refused"
 assert_contains "$out" "--update-input nixpkgs" "and the named-input form is suggested"
 assert_not_contains "$(fake_calls)" "flake update" "no flake was touched"
 out="$(ns_maint prepare --update-input nixpkgs 2>&1)"
-assert_contains "$(fake_calls)" "flake update $TMP/flake nixpkgs" "one named input is updated"
+assert_contains "$(fake_calls)" "flake update --flake $TMP/flake nixpkgs" "one named input is updated, with the flake selected by --flake"
+assert_contains "$(fake_calls)" "flake-update inputs=nixpkgs" "the fake nix saw exactly the one input named"
 assert_not_contains "$(fake_calls)" "--all" "and nothing asked for a blanket update"
 assert_no_reboot
+t_done
+fixture_free
+
+t_start "an input name that is really an option is refused before nix sees it"
+fixture_new
+out="$(ns_maint prepare --update-input --all 2>&1)" && rc=0 || rc=$?
+assert_ne 0 "$rc" "an option-shaped input name is refused"
+assert_contains "$out" "not a flake input name" "with the reason"
+assert_not_contains "$(fake_calls)" "flake update" "nix was never invoked at all"
+assert_no_reboot
+t_done
+fixture_free
+
+t_start "inaccessible state is an error rather than a fictitious idle transaction"
+fixture_new
+prepare_and_activate 300
+chmod 000 "$NM_DIR"
+out="$(ns_maint status 2>&1)" && rc=0 || rc=$?
+chmod 700 "$NM_DIR"
+assert_ne 0 "$rc" "status refuses inaccessible state"
+assert_contains "$out" "sudo ns-maint status" "status explains how to read it"
+assert_not_contains "$out" "no transaction has ever run" "status does not invent an empty record"
 t_done
 fixture_free
 
@@ -649,8 +878,14 @@ for ((attempt=0; attempt<30; attempt++)); do
   [[ "$(switch_calls)" == *"$FAKE_CANDIDATE"* ]] && break
   sleep 0.05
 done
+# The watchdog defers rather than interleaving: it must not interleave (the
+# record below still says the activation's own deadline did the restoring) and
+# it must not fail either, because this tick runs while the activation holds
+# the lock and a nonzero exit here is a failed unit that rolls the activation
+# back. See "a contended tick or reconcile cannot fail an activation".
 ns_maint tick >"$TMP/log/tick.out" 2>&1 && rc=0 || rc=$?
-assert_eq 75 "$rc" "the watchdog cannot interleave with activation"
+assert_eq 0 "$rc" "the watchdog cannot interleave with activation, and cannot fail it either"
+assert_contains "$(cat "$TMP/log/tick.out")" "deferring" "it reports that it deferred"
 wait "$activation_pid"
 assert_eq restored "$(phase)" "a hung activation restores without waiting for the watchdog"
 assert_contains "$(rec_field note)" "deadline-expired" "the deadline is recorded as the restore reason"

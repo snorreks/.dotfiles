@@ -66,11 +66,9 @@ NM_NIX_STORE="${NM_NIX_STORE:-nix-store}"
 NM_ENV="${NM_ENV:-nix-env}"
 NM_SYSTEMCTL="${NM_SYSTEMCTL:-systemctl}"
 NM_SYSTEMD_RUN="${NM_SYSTEMD_RUN:-systemd-run}"
-NM_JOURNALCTL="${NM_JOURNALCTL:-journalctl}"
 NM_SUDO="${NM_SUDO:-sudo}"
 NM_SWITCH_TO_CONFIGURATION="${NM_SWITCH_TO_CONFIGURATION:-}"
 NM_REBOOT_CMD="${NM_REBOOT_CMD:-systemctl reboot}"
-NM_SSH_UNIT="${NM_SSH_UNIT:-sshd.service}"
 # Deadline watchdog period, and the default confirmation window. Both are
 # overridable so tests do not have to wait minutes.
 NM_TICK_SECONDS="${NM_TICK_SECONDS:-30}"
@@ -154,26 +152,6 @@ valid_phase() {
   return 1
 }
 valid_integer() { [[ "$1" =~ ^-?[0-9]+$ ]]; }
-
-# Is this an address inside the Tailscale CGNAT range, 100.64.0.0/10?
-#
-# Used for one thing: to tell the operator, when the new-connection check finds
-# no evidence, that they are almost certainly on Tailscale SSH rather than on
-# OpenSSH. That distinction is not a detail — see the message it produces.
-#
-# Deliberately IPv4-only and deliberately conservative: a CGNAT address can be
-# something else entirely, so this says "this LOOKS like a tailnet address", and
-# a false positive only adds an explanatory paragraph to an error the operator
-# was already getting. It must never gate a decision.
-tailnet_address() {
-  local ip="$1"
-  [[ "$ip" =~ ^100\.([0-9]{1,3})\. ]] || return 1
-  local second="${BASH_REMATCH[1]}"
-  # 100.64.0.0/10 — the second octet is 64..127. Leading zeros and anything
-  # above 255 are rejected rather than arithmetically normalised.
-  [[ "$second" =~ ^0*(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])$ ]] || return 1
-  return 0
-}
 
 # ── EFI space ────────────────────────────────────────────────────────────────
 #
@@ -282,6 +260,12 @@ record_file_exists() { [[ -f "$RECORD_FILE" ]]; }
 
 record_load() {
   record_defaults
+  if [[ -d "$NM_DIR" && ( ! -r "$NM_DIR" || ! -x "$NM_DIR" ) ]]; then
+    die "maintenance state is inaccessible; run sudo ns-maint status."
+  fi
+  if [[ -e "$RECORD_FILE" && ! -r "$RECORD_FILE" ]]; then
+    die "maintenance record is unreadable; run sudo ns-maint status."
+  fi
   if ! record_file_exists; then
     return 0
   fi
@@ -384,9 +368,46 @@ record_save() {
 # do_restore while already holding it. flock() locks the open file description,
 # so a second open+flock from the same process would fail — the restore would
 # report "another operation holds the lock" about itself.
+#
+# WHY LOCK CONTENTION IS NOT UNIFORMLY FATAL
+#
+# lock_acquire exits 75 when the lock is held. That is right for an operator
+# running a mutating command: 75/TEMPFAIL tells them to retry, and nothing was
+# changed. It is WRONG for `tick` and `reconcile`, which systemd runs on timers
+# and at multi-user.target rather than at an operator's request. Those two are
+# re-triggered by `switch-to-configuration` on every single activation, because
+# starting an active target re-pulls every Wants= unit of that target and both
+# units are oneshots that are therefore always inactive. So an ns-maint-driven
+# activation — which holds this very lock from arm to confirm — restarts
+# `ns-maint reconcile`, which cannot take the lock, which exits 75, which
+# switch-to-configuration reports as a failed unit, which it turns into exit 4,
+# which ns-maint reads as "activation failed" and answers with a full rollback.
+# The rollback re-activates the old closure, which re-triggers the same unit,
+# which fails identically, so the restoration cannot complete either.
+#
+# Nothing is lost by deferring instead: the watchdog fires again on its next
+# tick, and reconcile runs again at the next boot. What is lost by NOT
+# deferring is every activation on this host. Hence the --defer form below,
+# used only by the two commands that are classifiers rather than transactions.
+#
 LOCK_FD=
 LOCK_DEPTH=0
+
+# lock_acquire [--defer] — take the lock.
+#
+# Without --defer, a busy lock exits 75: a command an operator ran by hand must
+# tell them to retry. With --defer it returns 1 instead and the caller decides,
+# and the only two callers that pass it are the commands systemd starts on a
+# timer or at boot. Their whole contract is
+# `if ! lock_acquire --defer; then <report>; return 0; fi` — report the
+# contention, exit successfully, and let the next tick or boot do the work.
 lock_acquire() {
+  local defer=0
+  if [[ "${1-}" == "--defer" ]]; then
+    defer=1
+  elif [[ $# -gt 0 ]]; then
+    die "lock_acquire: unknown argument '$1'"
+  fi
   if [[ "$LOCK_DEPTH" -gt 0 ]]; then
     LOCK_DEPTH=$((LOCK_DEPTH + 1))
     return 0
@@ -395,6 +416,9 @@ lock_acquire() {
   exec {LOCK_FD}>"$LOCK_FILE"
   if ! flock -n "$LOCK_FD"; then
     say "another ns-maint operation holds the lock; retry once it finishes."
+    if [[ "$defer" -eq 1 ]]; then
+      return 1
+    fi
     exit 75
   fi
   LOCK_DEPTH=1
@@ -772,10 +796,26 @@ cmd_prepare() {
   [[ "$offline" -eq 1 ]] && nix_args+=(--offline)
 
   if [[ -n "$update_input" ]]; then
+    # A flake input name is an attribute-path element, not an arbitrary word.
+    # Constraining it here also stops a leading dash from being read as an
+    # OPTION by nix (e.g. --update-input --all would otherwise re-request the
+    # blanket update this command refuses to do).
+    [[ "$update_input" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] ||
+      die "prepare: '--update-input $update_input' is not a flake input name (use e.g. nixpkgs)"
     say "prepare: updating exactly ONE flake input ($update_input) — this rewrites $flake/flake.lock"
     say "prepare: review the lock diff before activating anything."
+    # `nix flake update [option...] inputs...` — every POSITIONAL argument is an
+    # INPUT NAME. The flake itself is selected by --flake. Passing the flake
+    # positionally (the obvious reading of "update <flake> <input>") makes nix
+    # resolve the path as an input attribute and fail with
+    #   error: invalid flake input attribute path element '.dotfiles'
+    # which says nothing about what was wrong.
+    local update_rc=0
     "$NM_NIX" --extra-experimental-features 'nix-command flakes' \
-      flake update "$flake" "$update_input"
+      flake update --flake "$flake" "$update_input" || update_rc=$?
+    if [[ "$update_rc" -ne 0 ]]; then
+      die "prepare: updating input '$update_input' in $flake failed (exit $update_rc). The lock file was NOT updated, nothing was built, and nothing is armed."
+    fi
   fi
 
   say "prepare: building $attr from $flake (nothing is armed; no timeout can fire)"
@@ -943,15 +983,22 @@ cmd_activate() {
   lock_release
 
   local unit="ns-maint-activate-${txid}"
-  "$NM_SYSTEMD_RUN" --unit="$unit" --collect --no-block \
+  say "activate: waiting for $unit to finish (disconnecting does not stop it)."
+  say "activate: log: journalctl -u $unit -f"
+  local activation_rc=0
+  "$NM_SYSTEMD_RUN" --unit="$unit" --collect --wait \
     --description="ns-maint activation $txid" \
     --property=Type=oneshot \
-    "$(self_path)" __run-activation "$txid" "$candidate"
+    "$(self_path)" __run-activation "$txid" "$candidate" || activation_rc=$?
 
-  say ""
-  say "activate: activation is running as $unit"
-  say "activate: watch it with  systemctl status $unit   /   journalctl -u $unit -f"
-  say "activate: then, FROM A NEW SESSION:  ns-maint confirm $txid"
+  record_load
+  if [[ "$activation_rc" -ne 0 || "${RECORD[txid]}" != "$txid" || "${RECORD[phase]}" != "awaiting-confirm" ]]; then
+    sayf "activate: service finished with exit $activation_rc; transaction is ${RECORD[phase]}."
+    sayf "activate: inspect sudo ns-maint status and journalctl -u $unit."
+    return 1
+  fi
+  say "activate: activation completed. Check access from a NEW session, then run:"
+  say "  sudo ns-maint confirm $txid"
 }
 
 parse_duration() {
@@ -1061,7 +1108,7 @@ cmd_run_activation() {
     record_save
     log_event "activation $txid applied, awaiting confirmation"
     sayf "activation $txid applied. Confirm it from a NEW session:"
-    sayf "  ns-maint confirm $txid"
+    sayf "  sudo ns-maint confirm $txid"
     return 0
   fi
 
@@ -1227,18 +1274,17 @@ restore_profile_intent() {
 # ── confirm ─────────────────────────────────────────────────────────────────
 #
 # Requires the exact txid, so a confirmation left over from an earlier update
-# cannot bless a newer one. Requires local health evidence. And requires proof
-# that a NEW connection was established after APPLY completed, because an
-# SSH socket that was already open when the network unit was rewritten tells you
-# nothing about whether a fresh client could get in.
+# cannot bless a newer one. The operator checks access from a new session;
+# closure and profile checks ensure the decision applies to this candidate.
 cmd_confirm() {
-  local txid_arg="" assume=0
+  require_privileged
+  local txid_arg=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
     --txid) txid_arg="$2"; shift ;;
-    --assume-new-connection) assume=1 ;;
+    --assume-new-connection) ;; # Accepted for older operator scripts.
     -h | --help)
-      say "usage: ns-maint confirm <txid> [--assume-new-connection]"
+      say "usage: sudo ns-maint confirm <txid>"
       return 0
       ;;
     --*) die "confirm: unknown option '$1'" ;;
@@ -1262,7 +1308,6 @@ cmd_confirm() {
   [[ "${RECORD[txid]}" == "$txid_arg" ]] || die "confirm: txid mismatch. The pending transaction is '${RECORD[txid]}', you passed '$txid_arg'.
              Refusing: a stale confirmation must never bless a newer transaction."
 
-  require_privileged
   local candidate="${RECORD[candidate]}"
   local profile_now running_now
   profile_now="$(profile_closure)"
@@ -1303,99 +1348,17 @@ cmd_confirm() {
     problems=$((problems + 1))
   }
   if [[ "${RECORD[health_failed_units]}" != "0" ]]; then
-    sayf "health: ${RECORD[health_failed_units]} failed systemd unit(s):"
+    sayf "health: WARNING — ${RECORD[health_failed_units]} failed systemd unit(s); review separately:"
     "$NM_SYSTEMCTL" --failed --no-legend --plain 2>/dev/null | sed 's/^/      /' >&2 || true
-    problems=$((problems + 1))
   fi
+  [[ "$problems" -eq 0 ]] || die "confirm: running system or profile does not match the candidate; refusing confirmation."
 
-  # ── The NEW-connection check ──────────────────────────────────────────────
-  local peer_ip="" peer_port="" evidence="unverified"
-  local ssh_conn="${SSH_CONNECTION:-}"
-  if [[ -n "$ssh_conn" ]]; then
-    # sshd exports "peer_ip peer_port local_ip local_port" for the session this
-    # command is running in, so the peer can be identified without trusting a
-    # flag the operator typed.
-    read -r peer_ip peer_port _ _ <<<"$ssh_conn"
-  fi
-
-  if [[ -n "$peer_ip" ]]; then
-    # Ask sshd itself whether it accepted a session from that peer AFTER the
-    # APPLY completed. A session opened during APPLY proves nothing about
-    # reachability after all service mutations finished.
-    #
-    # NM_SSH_UNIT (sshd.service) covers BOTH OpenSSH listeners this host has —
-    # 22 and 2222 — because they are one unit: systemd runs both from the same
-    # sshd.service and journald records their sessions under it
-    # (`sshd-session[NNN]: Accepted publickey for … from … port …`). Verified on
-    # this host, where both ports were listening at once. So a confirmation made
-    # over the phone's 2222 session is evidence in exactly the same way a
-    # confirmation over 22 is, and neither needs a second unit.
-    local completed="${RECORD[activated_at]}"
-    [[ "${RECORD[phase]}" != "reconciled-booted" ]] || completed="${RECORD[reconciled_at]}"
-    valid_integer "$completed" || die "confirm: no APPLY completion timestamp recorded; reconnect after a fresh activation"
-    local since=$((completed + 1))
-    # Literal field comparisons avoid regex metacharacters and port prefixes.
-    if "$NM_JOURNALCTL" -u "$NM_SSH_UNIT" --since "@$since" --no-pager 2>/dev/null |
-      awk -v peer="$peer_ip" -v port="$peer_port" '
-        /Accepted / { for (i=1; i+4<=NF; i++)
-          if ($i == "from" && $(i+1) == peer && $(i+2) == "port" &&
-              $(i+3) == port && $(i+4) == "ssh2:") found=1 }
-        END { exit !found }'; then
-      evidence="sshd accepted a session from ${peer_ip}:${peer_port} after APPLY completed"
-    else
-      sayf "confirm: no NEW sshd session from ${peer_ip}:${peer_port} was accepted after the"
-      sayf "         APPLY completed (activated_at $completed; evidence must be later)."
-      sayf "         The connection you are using may have been established BEFORE the"
-      sayf "         switch, which proves nothing about whether a fresh client can get in."
-      sayf "         Open a second connection and run this from it, or pass"
-      sayf "         --assume-new-connection if you verified it another way."
-      #
-      # A tailnet peer gets the extra sentence it needs, because the ordinary
-      # advice above cannot work there and following it anyway wastes an
-      # afternoon. Tailscale SSH answers on tailnet port 22 BEFORE the OS sshd
-      # sees the connection, and its acceptance is recorded by tailscaled, not
-      # by the sshd unit this check reads. So a confirmation run over Tailscale
-      # SSH is looking for a record that will never be in that journal.
-      #
-      # No second journal source was added for it on purpose. Reading
-      # tailscaled's log instead would mean trusting a line format that is not
-      # part of any interface, is not guaranteed to be emitted at the default
-      # verbosity, and changes between releases — a check that silently finds
-      # nothing would be worse than one that refuses. The supported answer is to
-      # confirm from an OpenSSH session (port 22 or the phone's 2222), which is
-      # where the evidence is.
-      if tailnet_address "$peer_ip"; then
-        sayf ""
-        sayf "         ${peer_ip} is a tailnet address, which is the case to read this:"
-        sayf "         if you got here over Tailscale SSH, its acceptance is recorded by"
-        sayf "         tailscaled, not by ${NM_SSH_UNIT}, so this check will never find it —"
-        sayf "         that is a property of the listener, not a failed update. Confirm"
-        sayf "         from OpenSSH instead (ssh -p 22, or -p 2222 from the phone); those"
-        sayf "         sessions are both recorded in ${NM_SSH_UNIT}."
-      fi
-      exit 1
-    fi
-  elif [[ "$assume" -eq 1 ]]; then
-    evidence="operator asserted a new connection (--assume-new-connection); not verified by sshd"
-    sayf "confirm: WARNING — new-connection check was ASSERTED, not verified."
-  else
-    sayf "confirm: SSH_CONNECTION is unset, so this is not an SSH session and there is"
-    sayf "         nothing for the new-connection check to verify. From a console,"
-    sayf "         pass --assume-new-connection once you have checked reachability"
-    sayf "         from a different device."
-    exit 1
-  fi
-
-  [[ "$problems" -eq 0 ]] || {
-    RECORD["confirm_peer"]="$peer_ip:$peer_port"
-    RECORD["confirm_connection"]="$evidence"
-    record_save
-    die "confirm: refusing — local health evidence is not clean ($problems problem(s)). See above."
-  }
-
+  # The operator checks access from another device/session. Do not infer that
+  # from transport-specific login logs: Tailscale SSH does not use sshd.
+  local evidence="operator confirmed access and candidate; connection not automatically verified"
   RECORD["phase"]="confirmed"
   RECORD["confirmed_at"]="$(now_epoch)"
-  RECORD["confirm_peer"]="${peer_ip:-}"
+  RECORD["confirm_peer"]=""
   RECORD["confirm_connection"]="$evidence"
   RECORD["note"]="confirmed"
   record_save
@@ -1419,7 +1382,13 @@ cmd_confirm() {
 # has to be the thing that is still there after an unexpected restart. See
 # reconcile() for what happens then.
 cmd_tick() {
-  lock_acquire
+  # --defer, and exit 0 on contention. The timer re-fires every NM_TICK_SECONDS,
+  # so a tick skipped now is a tick that happens in 30 seconds; the alternative
+  # is a watchdog that can fail the activation it is watching.
+  if ! lock_acquire --defer; then
+    sayf "tick: deferring to whoever holds the lock; the timer will fire again."
+    return 0
+  fi
   record_load
 
   if ! is_pending_phase "${RECORD[phase]}"; then
@@ -1431,12 +1400,35 @@ cmd_tick() {
   now="$(now_epoch)"
   [[ "$now" -ge "$deadline" ]] || return 0
 
-  # Confirm and tick race for this same lock. If confirm got here first the
-  # phase is no longer pending and we returned above; if we got here first,
-  # confirm will find a restored/aborted transaction and refuse. Either way
-  # exactly one of them wins, and the record says which.
+  # Restoration changes system units, including this watchdog. A worker in
+  # its own transient service survives the watchdog being stopped or replaced.
   local txid="${RECORD[txid]}"
   sayf "deadline passed for $txid (deadline $deadline, now $now)"
+  lock_release
+  local unit="ns-maint-restore-${txid}" load_state
+  # A oneshot worker remains activating while restoring; is-active misses it.
+  load_state="$("$NM_SYSTEMCTL" show --property=LoadState --value "$unit.service" 2>/dev/null || true)"
+  if [[ -n "$load_state" && "$load_state" != "not-found" ]]; then
+    return 0
+  fi
+  # Submission can still race another tick; a failure defers to the next one.
+  "$NM_SYSTEMD_RUN" --unit="$unit" --collect --no-block \
+    --description="ns-maint deadline restoration $txid" \
+    --property=Type=oneshot --property=TimeoutStartSec=31min \
+    "$(self_path)" __run-restore "$txid" || true
+}
+
+cmd_run_restore() {
+  require_privileged
+  local txid="${1-}"
+  valid_txid "$txid" || die "internal: __run-restore needs a valid transaction id"
+  # Another operation may win after tick submits us. The next tick retries.
+  if ! lock_acquire --defer; then return 0; fi
+  record_load
+  [[ "${RECORD[txid]}" == "$txid" ]] || return 0
+  is_pending_phase "${RECORD[phase]}" || return 0
+  valid_integer "${RECORD[deadline]}" || return 0
+  [[ "$(now_epoch)" -ge "${RECORD[deadline]}" ]] || return 0
   do_restore "$txid" "deadline-expired"
 }
 
@@ -1452,7 +1444,17 @@ cmd_tick() {
 # and clears the deadline so no watchdog fires against a stale expectation.
 cmd_reconcile() {
   require_privileged
-  lock_acquire
+  # --defer, and exit 0 on contention. This unit is WantedBy=multi-user.target
+  # and is a oneshot, so switch-to-configuration restarts it during EVERY
+  # activation — including one driven by ns-maint, which is holding this lock for
+  # its whole duration. Failing here would make switch-to-configuration exit 4,
+  # which ns-maint would answer by rolling the activation back. Reconciliation
+  # runs again at the next boot, so deferring costs nothing and saves the
+  # activation. See the comment above lock_acquire.
+  if ! lock_acquire --defer; then
+    sayf "reconcile: deferring to whoever holds the lock; reconciliation runs again at the next boot."
+    return 0
+  fi
   record_load
 
   if ! is_pending_phase "${RECORD[phase]}" && [[ "${RECORD[phase]}" != staged ]]; then
@@ -1481,7 +1483,7 @@ cmd_reconcile() {
     sayf "reconcile: $txid was ${phase} and this machine booted INTO the candidate."
     sayf "  The deadline is cleared and NO rollback will fire."
     sayf "  Confirm it explicitly once you have checked from a new client:"
-    sayf "    ns-maint confirm $txid"
+    sayf "    sudo ns-maint confirm $txid"
     return 0
   fi
 
@@ -1793,9 +1795,10 @@ usage: ns-maint <command> [options]
             closure, the profile and boot intent, and the booted closure, then
             hand activation to a system service that survives caller disconnect.
 
-  confirm   <txid> [--assume-new-connection]
-            Bind the operator's yes to one transaction id, after checking local
-            health AND that a NEW sshd session was accepted after APPLY completed. An old, still-open SSH socket proves nothing.
+  confirm   <txid>
+            After checking access from a new session, confirm this candidate.
+            Checks transaction ID, deadline, running closure and system profile.
+            Failed services are reported for review rather than blocking confirm.
 
   abort     [<txid>]
             Operator-initiated restore. Live, never a reboot.
@@ -1838,6 +1841,7 @@ main() {
   roots) cmd_roots "$@" ;;
   verify-installation) cmd_verify_installation "$@" ;;
   __run-activation) cmd_run_activation "$@" ;;
+  __run-restore) cmd_run_restore "$@" ;;
   -h | --help | help | "") usage ;;
   *) usage >&2; die "unknown command '$cmd'" ;;
   esac
