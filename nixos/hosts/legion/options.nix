@@ -95,15 +95,9 @@
   # desktop that autologins into mango and sleeps when closed. Daily-driver use
   # is unchanged.
   #
-  # 🔴 phoneAuthorizedKey is still null (the base default). Fill in the key
-  # generated ON THE PHONE before the 2222/Mosh fallback is useful — see
-  # docs/mobile-agents.md. Until then the build warns and port 2222 has no key
-  # authorized. Deliberately not invented here: a key generated on the host and
-  # copied down would defeat the point of the phone holding the only copy of
-  # its own key. Collie needs none of that — it is a browser on the tailnet and
-  # reaches nothing but port 443 on this machine.
   mobileAgents = {
     enable = true;
+    phoneAuthorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGSIasNErVrXN3PETtvzNSIKMAitUD3QaGzh4Q/EQBB8 s21";
 
     collie = {
       enable = true;
