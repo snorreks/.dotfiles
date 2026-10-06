@@ -1405,10 +1405,17 @@ cmd_tick() {
   local txid="${RECORD[txid]}"
   sayf "deadline passed for $txid (deadline $deadline, now $now)"
   lock_release
-  "$NM_SYSTEMD_RUN" --unit="ns-maint-restore-${txid}" --collect --no-block \
+  local unit="ns-maint-restore-${txid}" load_state
+  # A oneshot worker remains activating while restoring; is-active misses it.
+  load_state="$("$NM_SYSTEMCTL" show --property=LoadState --value "$unit.service" 2>/dev/null || true)"
+  if [[ -n "$load_state" && "$load_state" != "not-found" ]]; then
+    return 0
+  fi
+  # Submission can still race another tick; a failure defers to the next one.
+  "$NM_SYSTEMD_RUN" --unit="$unit" --collect --no-block \
     --description="ns-maint deadline restoration $txid" \
     --property=Type=oneshot --property=TimeoutStartSec=31min \
-    "$(self_path)" __run-restore "$txid"
+    "$(self_path)" __run-restore "$txid" || true
 }
 
 cmd_run_restore() {
