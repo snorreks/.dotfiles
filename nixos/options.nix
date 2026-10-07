@@ -183,17 +183,36 @@ rec {
   };
 
   # ── Shared NTFS volume ─────────────────────────────────────────────────────
-  # /mnt/shared is the Windows dual-boot volume. Mounting it is OFF by default
-  # on both hosts, for the same reason the Proton VPN is excluded on a server:
-  # it is a dependency that can fail in ways nothing else can fix.
+  # /mnt/shared is the Windows dual-boot volume. ON on both hosts: it is wanted
+  # as extra storage, and it is wanted in BOTH roles — parked at home as a
+  # server, and on the road with the MSI.
   #
-  # NTFS3 with `rw` on a volume Windows has hibernated (Fast Startup) is a way
-  # to corrupt it, and the fix — disabling hibernation from Windows, or
-  # remounting read-only — is something you need a keyboard and a booted
-  # Windows for. An unattended box that cannot reach it must not be writing
-  # there. Nothing server-critical reads or writes this path: all state and
-  # media roots are native Linux filesystems. See docs/headless-server.md.
-  mountShared = false;
+  # It was OFF by default, for the same reason the Proton VPN is excluded on a
+  # server: a dependency that can fail in ways nothing else can fix. The reason
+  # was specifically that ntfs3 with `rw` on a volume Windows has hibernated
+  # (Fast Startup) is a way to corrupt it, and the fix needs a keyboard and a
+  # booted Windows — neither of which an unattended box has.
+  #
+  # 🔴 That precondition has been MET: Fast Startup is now disabled in Windows
+  # on both machines, so a Windows shutdown leaves the volume cleanly unmounted
+  # rather than hibernated. THIS IS WINDOWS-SIDE STATE AND IT IS NOT TRACKED
+  # HERE. Nothing in this repository can enforce it, and if Fast Startup is ever
+  # re-enabled on either machine — a Control Panel checkbox, a Windows update,
+  # a fresh install — the `rw` mount below is a corruption risk again. Re-check
+  # it before trusting this volume with anything you would not lose:
+  #
+  #   powercfg /a            # "Hibernate" should be absent as a sleep state
+  #   powercfg /h            # hibernate state should be "Unavailable"
+  #
+  # Two things this being ON does NOT change, and still do not:
+  #   * `nofail` means a failed mount is SILENT. It is now a path real data is
+  #     expected on, so a mount that did not happen is discovered by the thing
+  #     that needed the files rather than by an error. If this volume starts
+  #     mattering, check `findmnt /mnt/shared` rather than trusting the path.
+  #   * Nothing server-critical lives here. State and media roots remain native
+  #     Linux filesystems, so a missing mount degrades convenience, never the
+  #     box. See docs/headless-server.md.
+  mountShared = true;
 
   # ── Battery charge threshold ──
   # Percentage to stop charging at, or null to leave the firmware alone.

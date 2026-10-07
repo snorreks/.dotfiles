@@ -253,15 +253,22 @@ assert_contains "and the blessing waits for the local gate" "$out" "boot-health-
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
-t_start "the shared NTFS volume is not mounted by default, on either host"
+t_start "the shared NTFS volume is mounted on both hosts"
 for output in legion gs65; do
   out="$(cfg "$output" 'builtins.hasAttr "/mnt/shared" system.config.fileSystems')"
-  assert_eq "$output has no /mnt/shared" "false" "$out"
+  assert_eq "$output mounts /mnt/shared" "true" "$out"
   # The kernel module stays: copying a file off it by hand during recovery is a
   # different question from mounting it at every boot.
   out="$(cfg "$output" 'builtins.hasAttr "ntfs" system.config.boot.supportedFilesystems')"
   assert_eq "$output can still read NTFS by hand" "true" "$out"
 done
+# It is wanted on both hosts and in both roles, so the decision lives in the
+# base options rather than in one host file — assert each host still points at
+# its OWN volume rather than inheriting the other's device.
+out="$(cfg legion 'system.config.fileSystems."/mnt/shared".device')"
+assert_contains "legion uses its own NTFS volume" "$out" "D8ECDAADECDA8562"
+out="$(cfg gs65 'system.config.fileSystems."/mnt/shared".device')"
+assert_contains "gs65 uses its own NTFS volume" "$out" "EA6CD3956CD35AC1"
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -30,24 +30,27 @@
 
   # --- Shared NTFS Drive for Windows and NixOS ---
   #
-  # OFF unless opts.mountShared is true (nixos/options.nix). The reasons are
-  # about unattended operation, not about NTFS:
+  # Mounted when opts.mountShared is true (nixos/options.nix), which it now is.
+  # It was OFF here for one reason, and that reason is satisfied rather than
+  # ignored: Fast Startup is disabled in Windows, so a Windows shutdown leaves
+  # this volume cleanly unmounted instead of hibernated. ntfs3 `rw` on a
+  # hibernated volume is a way to corrupt it, and the repair needs a booted
+  # Windows and a keyboard — neither of which an unattended box has.
   #
-  #   * Windows Fast Startup leaves the volume HIBERNATED. ntfs3 mounted rw on
-  #     a hibernated volume is a way to corrupt it, and the repair needs a
-  #     booted Windows and a keyboard — neither of which an unattended box has.
-  #   * `nofail` was doing the work of "if it does not mount, carry on", which
-  #     is right, and then nothing noticed whether it mounted at all. On a
-  #     machine reached only over the tailnet, a mount that silently did not
-  #     happen is discovered by the thing you needed the files for.
-  #   * Nothing server-critical reads or writes this path. Every state and
-  #     media root in this configuration is a native Linux filesystem.
+  # 🔴 Fast Startup is Windows-side state this repository cannot enforce. If it
+  # is re-enabled, this `rw` mount is a corruption risk again; verify with
+  # `powercfg /a` and `powercfg /h`. See opts.mountShared for the full note.
+  #
+  # Two things worth remembering now that this carries real data:
+  #   * `nofail` means a failed mount is silent. Check `findmnt /mnt/shared`
+  #     rather than assuming the path is populated.
+  #   * Nothing server-critical is here. Every state and media root is a native
+  #     Linux filesystem, so a missing mount costs convenience, not the box.
   #
   # Deliberately NOT changed: the partition is not repartitioned, not
   # reformatted, not resized and not given a different UUID, and the kernel
   # still has ntfs3 available (boot.supportedFilesystems) so a file can be
-  # copied off it by hand during recovery without it being mounted at boot.
-  # Flipping this on is one boolean.
+  # copied off it by hand during recovery.
   fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/D8ECDAADECDA8562";
     fsType = "ntfs3";

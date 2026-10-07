@@ -17,8 +17,9 @@ in {
     # The kernel MODULE is kept: reading a Windows volume by hand (to grab a
     # file during recovery) needs ntfs3 available and does not need it mounted
     # at boot. That is a different question from whether this machine should
-    # depend on the volume being mountable, and the answer on an unattended box
-    # is no — see opts.mountShared in nixos/options.nix.
+    # mount it at boot, and the answer is now yes on both hosts — see
+    # opts.mountShared in nixos/options.nix, including the Fast Startup
+    # precondition that makes it safe.
     supportedFilesystems = ["ntfs"];
 
     loader = {
