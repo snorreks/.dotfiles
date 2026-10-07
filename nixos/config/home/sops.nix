@@ -8,6 +8,12 @@
 }: let
   protonServers = import ./vpn/proton-servers.nix;
   envSecrets = import ./env-secrets.nix;
+  sessionVariableNames = lib.concatMap (
+    s:
+      if s.sessionVariable or true
+      then [s.name] ++ (s.aliases or [])
+      else []
+  ) envSecrets;
 
   mkVpnTemplate = server: {
     name = "vpn-${server.name}.conf";
@@ -98,24 +104,32 @@ in {
       };
 
     templates = {
+      # Make SOPS credentials available to login shells and the user manager.
+      # Only session credentials are exported. Read their files as data, never
+      # substitute plaintext into shell syntax. The sentinel preserves trailing
+      # newlines that command substitution would otherwise strip.
+      "secrets-env" = {
+        path = "${config.home.homeDirectory}/.config/sops/secrets-env";
+        content =
+          lib.concatMapStrings (
+            s:
+              if s.sessionVariable or true
+              then
+                lib.concatMapStrings (
+                  varName: ''
+                    if ${varName}="$(${pkgs.coreutils}/bin/cat -- ${lib.escapeShellArg config.sops.secrets.${s.name}.path} && printf '.')"; then
+                      export ${varName}="''${${varName}%.}"
+                    fi
+                  ''
+                ) ([s.name] ++ (s.aliases or []))
+              else ""
+          )
+          envSecrets;
+      };
+
       "nix-access-tokens".content = ''
         access-tokens = github.com=${config.sops.placeholder.GITHUB_ACCESS_TOKEN}
       '';
-      # 🔴 There is deliberately NO "secrets-env" template any more.
-      #
-      # It was `export NAME="placeholder"` per credential, sourced by
-      # ~/.profile, by fish's interactiveShellInit, and by a systemd unit that
-      # ran `systemctl --user import-environment` — which put every credential
-      # into the environment of every process in the user session, not the ones
-      # meant to have it. It was also a source/eval template: a value
-      # containing `"` ended the quoting and the rest was parsed as shell, a
-      # value containing `$(…)` or backticks was EXECUTED, and a multiline value
-      # could not survive at all.
-      #
-      # Values now reach a process only through
-      # config/home/scripts/scripts/secret-env.sh, which reads the decrypted
-      # files as bytes and hands them to execve. See that script's header, and
-      # docs/agent-operations.md.
     };
   };
 
@@ -155,9 +169,25 @@ in {
     executable = true;
   };
 
-  # 🔴 There is deliberately NO sops-import-environment.service and NO ~/.profile
-  # hook any more. Both existed only to run the eval template; both are the
-  # "desktop-global import" that put every credential into every process. The
-  # fish function `ns-secrets` reads values as data and runs automatically in
-  # interactive shells. `secret-env.sh --check` reports readiness.
+  systemd.user.services.sops-import-environment = {
+    Unit = {
+      Description = "Import SOPS decrypted secrets into systemd user environment";
+      After = ["sops-nix.service"];
+      PartOf = ["sops-nix.service"];
+    };
+    Install.WantedBy = ["default.target"];
+    Service = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # Import by name: systemctl's whole-environment import skips values with
+      # control characters, including newlines.
+      ExecStart = "${pkgs.bash}/bin/bash -c 'if [ -f ~/.config/sops/secrets-env ]; then source ~/.config/sops/secrets-env; ${pkgs.systemd}/bin/systemctl --user import-environment ${lib.concatStringsSep " " sessionVariableNames}; fi'";
+    };
+  };
+
+  home.file.".profile".text = ''
+    if [ -f "$HOME/.config/sops/secrets-env" ]; then
+      . "$HOME/.config/sops/secrets-env"
+    fi
+  '';
 }

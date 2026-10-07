@@ -186,6 +186,7 @@ prefs() { cat "$TMP/state/prefs"; }
 # ─────────────────────────────────────────────────────────────────────────────
 t_start "an unauthenticated node fails loudly and changes nothing"
 setup
+printf 'NeedsLogin\n' >"$TMP/state/backend"
 out="$(run_reconcile)" && rc=0 || rc=$?
 assert_ne_zero "exit status" "$rc"
 assert_contains "it says the node is not authenticated" "$out" "not authenticated"
@@ -212,6 +213,17 @@ wait "$bg" 2>/dev/null || true
 assert_ne_zero "exit status while still unauthenticated" "$rc"
 assert_contains "it reports what it waited" "$out" "waited"
 assert_eq "still nothing written" "" "$(prefs)"
+teardown
+t_done
+
+t_start "NoState at boot requests a retry, not a browser login"
+setup
+out="$(run_reconcile)" && rc=0 || rc=$?
+assert_ne_zero "startup state remains visible" "$rc"
+assert_contains "the timer will retry" "$out" "retry"
+assert_not_contains "no browser login is suggested" "$out" "browser login"
+assert_not_contains "no tailscale up is suggested" "$out" "run 'tailscale up'"
+assert_eq "startup changes nothing" "" "$(prefs)"
 teardown
 t_done
 
@@ -406,6 +418,28 @@ teardown
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
+t_start "a declared Serve unit is the only writer when repairing a missing mapping"
+setup
+printf 'Running\n' >"$TMP/state/backend"
+cat >"$TMP/bin/systemctl" <<'FAKE'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >>"$TMP/calls"
+[[ "$*" == 'restart tailscale-serve-collie.service' ]] || exit 2
+[[ "${FAKE_UNIT_FAIL:-0}" == 0 ]] || exit 1
+printf '%s\n' '{"TCP":{"443":{"HTTPS":true}},"Web":{"legion.tailf24d02.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8787"}}}}}' >"$TMP/state/serve"
+FAKE
+sed -i "1s|^#!.*|#!$(command -v bash)|" "$TMP/bin/systemctl"
+chmod +x "$TMP/bin/systemctl"
+out="$(NM_TS_SERVE_UNIT=tailscale-serve-collie.service run_reconcile)" && rc=0 || rc=$?
+assert_eq "unit repair succeeds" 0 "$rc"
+assert_contains "the unit is restarted" "$(calls)" "systemctl restart tailscale-serve-collie.service"
+assert_not_contains "the reconciler does not write Serve itself" "$(calls)" "serve --bg"
+: >"$TMP/state/serve"
+out="$(FAKE_UNIT_FAIL=1 NM_TS_SERVE_UNIT=tailscale-serve-collie.service run_reconcile)" && rc=0 || rc=$?
+assert_ne_zero "unit failure remains visible" "$rc"
+teardown
+t_done
+
 if [[ "$TESTS_FAILED" -ne 0 ]]; then
   printf '\n\033[31mtailscale-reconcile: %d assertion(s) failed\033[0m\n' "$TESTS_FAILED"
   exit 1

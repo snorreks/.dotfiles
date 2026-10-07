@@ -179,19 +179,33 @@ in {
       # dnscrypt-proxy (networking.nix), which on a machine nobody can reach the
       # console of is one more thing that can strand the box.
       NM_TS_ACCEPT_DNS = "false";
-      NM_TS_EXIT_NODE = lib.mkDefault (if headless then "true" else "false");
+      NM_TS_EXIT_NODE = lib.mkDefault (
+        if headless
+        then "true"
+        else "false"
+      );
       # Only manage Serve when Collie asked for it — see mobile-agents.nix,
       # which owns that mapping. Zero here means "this node serves no HTTPS",
       # which is the right answer for a host without Collie.
       NM_TS_SERVE_HTTPS_PORT = lib.mkDefault (
-        if opts.mobileAgents.enable && opts.mobileAgents.collie.enable then "443" else "0"
+        if opts.mobileAgents.enable && opts.mobileAgents.collie.enable
+        then "443"
+        else "0"
       );
       NM_TS_SERVE_TARGET_PORT = lib.mkDefault (
-        if opts.mobileAgents.enable && opts.mobileAgents.collie.enable then toString opts.mobileAgents.collie.port else "0"
+        if opts.mobileAgents.enable && opts.mobileAgents.collie.enable
+        then toString opts.mobileAgents.collie.port
+        else "0"
       );
       NM_TS_SERVE_HOST =
         if opts.mobileAgents.enable && opts.mobileAgents.collie.enable
-        then (lib.head (opts.mobileAgents.collie.serveHosts ++ [""]) )
+        then (lib.head (opts.mobileAgents.collie.serveHosts ++ [""]))
+        else "";
+      # The Collie unit is the only writer. Reconciliation checks for drift and
+      # asks that owner to repair it rather than issuing a second Serve command.
+      NM_TS_SERVE_UNIT =
+        if opts.mobileAgents.enable && opts.mobileAgents.collie.enable
+        then "tailscale-serve-collie.service"
         else "";
     };
   };
@@ -250,18 +264,12 @@ in {
     {
       ${opts.username}.openssh.authorizedKeys.keys =
         opts.sshAuthorizedKeys
-        # The builder's key belongs on the BUILDER side regardless of whether
-        # this machine is also a client.
-        #
-        # This used to read `opts.remoteBuilder.enable` alone, which is the
-        # enable-switch on the *client* — so the server, the one machine that
-        # actually has to accept the key, never added it. A builder configured
-        # on both ends and still unable to log in is a genuinely confusing
-        # failure, and it looks like a key or firewall problem rather than a
-        # condition that was never true on the server.
+        # This public key belongs only on the builder (headless server). On the
+        # client, `remoteBuilder.enable` configures outgoing builds and must
+        # not authorize the client's own builder key as an incoming login key.
         ++ lib.optional
-          ((opts.remoteBuilder.enable || headless) && opts.remoteBuilder.authorizedKey != null)
-          opts.remoteBuilder.authorizedKey;
+        (headless && opts.remoteBuilder.authorizedKey != null)
+        opts.remoteBuilder.authorizedKey;
     }
 
     # Linger: the user manager exists with NOBODY logged in. Written here

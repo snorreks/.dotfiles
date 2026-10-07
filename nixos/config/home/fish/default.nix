@@ -12,27 +12,11 @@
   # conveniences cost you nothing. On a server the same verb means "update every
   # flake input and apply it, unreviewed, to something nobody is sitting at".
   serverHost = opts.headless;
-  # Autoloadable even in a bare pane of an already-running server: do not
-  # depend on that pane having run the new interactiveShellInit/shellInit.
-  # Other launchers can opt in with a real executable; no global PATH shim.
-  childLauncher = pkgs.writeTextDir "__ns_agent_exec.fish" ''
-    function __ns_agent_exec --description 'ready credentials scoped to one actual child'
-        set -l loader "$HOME/.config/agent-ops/secret-env"
-        if set -q SECRET_ENV
-            set loader "$SECRET_ENV"
-        end
-        command "$loader" --ready --exec $argv
-        return $status
-    end
-  '';
 in {
   home.file = {
     # Copy all function files from ./functions to ~/.config/fish/functions
     ".config/fish/functions" = {
-      source = pkgs.symlinkJoin {
-        name = "fish-functions";
-        paths = [./functions childLauncher];
-      };
+      source = ./functions;
     };
 
     # ── Project-specific fish shortcuts (auto-sourced by conf.d) ──
@@ -77,14 +61,9 @@ in {
 
         # ── OS updates ─────────────────────────────────────────────────────────
         #
-        # On a DESKTOP host these are unchanged: `nh os switch` against the flake,
-        # exactly as before. On a headless host they are NOT emitted at all — fish
-        # resolves an alias before a function of the same name, so leaving the
-        # alias in place here would silently win over the guarded functions
-        # defined further down. The server variants are deliberately explicit
-        # about which of the four operations they perform (build / activate /
-        # update inputs / stage a reboot) rather than collapsing them into one
-        # word that does all four.
+        # Desktop aliases are unchanged. Server compatibility functions below
+        # delegate to nupdate so kernel checks, staging and confirmation have
+        # one implementation. Use nupdate/nconfirm for routine updates.
         # ── Garbage collection ─────────────────────────────────────────────────
         #
         # The old value was `nix-collect-garbage -d`. `-d` is "also delete
@@ -158,91 +137,31 @@ in {
     };
 
     interactiveShellInit = ''
-      # CLI credentials are read as data. Interactive agents and other CLI
-      # children inherit all ready session credentials, including aliases.
-      # Run ns-secrets to refresh an already-open shell, or check readiness.
-      set -gx SECRET_ENV "$HOME/.config/agent-ops/secret-env"
-      set -gx SECRET_ENV_MANIFEST "$HOME/.config/agent-ops/secrets.manifest"
-      # Path lookup, aliases and byte handling belong to the loader alone.
-
-      function ns-secrets --description 'refresh CLI credentials, check readiness, or run a command'
-          if test (count $argv) -eq 0
-              # Refresh every ready session credential; skip unready ones.
-              # NUL records preserve embedded/trailing newlines and include
-              # aliases. Split only the first '='; never source/eval values.
-              for name in (command $SECRET_ENV --list)
-                  command $SECRET_ENV --name "$name" --check >/dev/null 2>&1; or continue
-                  command $SECRET_ENV --name "$name" --format=nul | while read --null -l pair
-                      set -l fields (string split --max 1 '=' -- "$pair")
-                      set -gx "$fields[1]" "$fields[2]"
-                  end
-              end
-              return 0
-          end
-          switch $argv[1]
-              case check
-                  command $SECRET_ENV --check $argv[2..-1]
-                  return $status
-              case run
-                  # Scoped: only this child process sees the values.
-                  if test (count $argv) -lt 2
-                      echo 'ns-secrets run: give me a command' >&2
-                      return 2
-                  end
-                  command $SECRET_ENV --exec $argv[2..-1]
-                  return $status
-              case exec
-                  shift
-                  command $SECRET_ENV --exec $argv
-                  return $status
-              case '*'
-                  echo "ns-secrets: unknown subcommand '$argv[1]' (check|run|exec)" >&2
-                  return 2
-          end
-      end
-
-      # Readiness only, never values, and never fatal: a credential that is not
-      # decrypted yet must not stop a shell from opening. Load each ready key.
-      if status is-interactive
-          ns-secrets
-          if not command $SECRET_ENV --check >/dev/null 2>&1
-              set -g __ns_secrets_unready 1
-          end
-      end
-
       set fish_greeting # Disable greeting
       ${lib.optionalString serverHost ''        # Build before arming the rollback deadline. Activation runs in a
         # detached system service; the CLI waits for the result, then tells
         # you how to confirm after checking access from another session.
         set -gx NS_SERVER_MODE 1
 
-        function nswitch --description 'build, then activate the OS as a guarded no-reboot transaction'
-            if test (count $argv) -gt 0
-                echo 'nswitch: no arguments on this host.' >&2
-                echo '         build only:   ns-maint prepare' >&2
-                echo '         activate:     ns-maint activate' >&2
-                return 1
-            end
-            # Build first, offline from what is already fetched. This step arms
-            # nothing: there is no deadline that can fire during it, so however
-            # long it takes, the result is zero activation and zero rollback.
-            sudo ns-maint prepare --offline; or return $status
-            # Only now arm the deadline and hand activation to a system service.
-            sudo ns-maint activate --timeout 20m
+        # Compatibility names delegate to the same updater. It inspects the
+        # kernel before choosing guarded live activation or a staged reboot.
+        function nswitch --description 'apply existing configuration offline'
+            command nupdate --apply --offline $argv
         end
 
-        function nswitcho --description 'same as nswitch, but allows fetching from the network'
-            sudo ns-maint prepare; or return $status
-            sudo ns-maint activate --timeout 20m
+        function nswitcho --description 'apply existing configuration with network access'
+            command nupdate --apply $argv
         end
 
-        function nswitchu --description 'update one flake input, build, and wait for activation'
-            if test (count $argv) -ne 1
-                echo 'Usage: nswitchu nixpkgs (or another single flake input)' >&2
+        function nswitchu --description 'update nixpkgs, or one explicitly named input'
+            if test (count $argv) -eq 0
+                command nupdate
+            else if test (count $argv) -eq 1
+                command nupdate --input $argv[1]
+            else
+                echo 'Usage: nswitchu [input]' >&2
                 return 2
             end
-            sudo ns-maint prepare --update-input $argv[1]; or return $status
-            sudo ns-maint activate --timeout 20m
         end
 
         function nswitch-fast --description 'PREPARE the ollama-free output; activation is a separate, explicit step'

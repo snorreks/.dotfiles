@@ -1,10 +1,43 @@
 {
   pkgs,
   lib,
+  opts,
+  config,
   ...
-}: {
+}: let
+  realZed = pkgs.zed-editor;
+  guiLauncher = pkgs.callPackage ./gui-session/package.nix {
+    mango = config.wayland.windowManager.mango.package;
+  };
+  # Server terminals outlive Mango. Start the GUI in the live desktop's service
+  # lifetime instead of inspecting or killing another Zed process. Desktop
+  # hosts, including the GS65, keep the upstream package unchanged.
+  launcher = pkgs.writeShellScript "zed-editor-session-launch" ''
+    wait_args=()
+    for arg in "$@"; do
+      case "$arg" in
+        --) break ;;
+        -h|--help|-v|--version) exec ${lib.getExe realZed} "$@" ;;
+        -w|--wait|--foreground) wait_args=(--wait) ;;
+      esac
+    done
+    exec ${lib.getExe guiLauncher} "''${wait_args[@]}" ${lib.getExe realZed} "$@"
+  '';
+  sessionZed = pkgs.symlinkJoin {
+    name = "zed-editor-session-${lib.getVersion realZed}";
+    paths = [realZed];
+    postBuild = ''
+      rm "$out/bin/zeditor"
+      ln -s ${launcher} "$out/bin/zeditor"
+    '';
+  };
+in {
   programs.zed-editor = {
     enable = true;
+    package =
+      if opts.headless
+      then sessionZed
+      else realZed;
     extensions = [
       "nix"
       "toml"

@@ -60,11 +60,16 @@
   # overridden here.
   travel.enable = true;
 
-  # The aliases are generated; the HOST KEY is not, because it cannot honestly
-  # be produced on this side. Generate the keypair on the Legion and paste the
-  # public half here — see docs/media-travel.md:
-  #   legion$ cat /etc/ssh/ssh_host_ed25519_key.pub
-  travel.serverHostKey = "";
+  # MagicDNS is intentionally not used by this configuration. Resolve the
+  # Legion's current tailnet address through an explicit host entry instead.
+  tailnetHosts = {
+    "100.71.67.69" = ["legion"];
+  };
+
+  # Pin the Legion's OpenSSH host key. It was read directly from the Legion's
+  # /etc/ssh/ssh_host_ed25519_key.pub; travel.nix uses it only for the ordinary
+  # OpenSSH connection on port 2222.
+  travel.serverHostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJ4mTQwCyuqFDzF69fuPiJjyG2S/4OUTMlgjlEIswUZD root@sonny-laptop";
 
   # ── Offload builds to the Legion ───────────────────────────────────────────
   #
@@ -74,12 +79,12 @@
   # fails in a way that reads as a Nix problem rather than a port problem. See
   # docs/media-travel.md § "The builder".
   #
-  # `authorizedKey` is null until the key is generated HERE and its public half
-  # pasted into hosts/legion/options.nix. Null rather than empty so
-  # config/system/server.nix can turn that into a build warning naming the exact
-  # command — the same pattern opts.mobileAgents.phoneAuthorizedKey uses.
+  # The private half lives in ~/.ssh/nixbuilder on this client. Nix's daemon
+  # runs as root and can read it; the public half is authorized only on Legion.
+  remoteBuilder.sshKey = "/home/sonny/.ssh/nixbuilder";
+  # The matching public half is set in hosts/legion/options.nix.
   remoteBuilder.enable = true;
-  remoteBuilder.authorizedKey = null;
+  remoteBuilder.authorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBma7L7cRLEXSfdFHeCtwBEOg931x2uKYnkWM9Aa0vTh gs65-nixbuilder";
 
   # ── Private media: deliberately OFF ─────────────────────────────────────────
   #

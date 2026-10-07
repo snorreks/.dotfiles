@@ -41,12 +41,13 @@
   # EFI space, and a reboot you chose to take).
   role = "server";
 
-  # The compatibility boolean, stated rather than left to be derived. It is not
-  # the switch any more — role is — and setting it here is what makes the
-  # diff readable: a reviewer sees the resolved answer, not a default that
-  # happens to be true. `role = "desktop"` with this true is refused at
-  # evaluation, so the two can never silently disagree.
-  headless = true;
+  # Dedicated builder identity generated on the GS65. Its private half stays
+  # there; server.nix adds this public half to sonny's OpenSSH keys on port 2222.
+  remoteBuilder.authorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBma7L7cRLEXSfdFHeCtwBEOg931x2uKYnkWM9Aa0vTh gs65-nixbuilder";
+
+  # Keep local desktop login while this is also a daily driver. Set false when
+  # parked as a remote-only server. Server services never depend on Mango.
+  desktop.enable = true;
 
   # 80 while it is a daily driver; 60 once it is parked and permanently on AC.
   #
@@ -91,9 +92,8 @@
   #
   #   MOSHI (mobileAgents.moshi.enable) — off here, see below.
   #
-  # Deliberately INDEPENDENT of headless: this stays a normal three-monitor
-  # desktop that autologins into mango and sleeps when closed. Daily-driver use
-  # is unchanged.
+  # Mobile access is independent of the role. With this host's server policy,
+  # Mango starts only after manual login and closing the lid never suspends it.
   #
   mobileAgents = {
     enable = true;

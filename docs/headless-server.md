@@ -64,7 +64,7 @@ What a server role changes:
 | DNS      | Numeric resolvers appended behind dnscrypt-proxy, `maxnames` raised   | dnscrypt failing to start would otherwise leave the box with no name resolution at all |
 | Firewall | Ports 11434 (ollama) / 8188 (ComfyUI) closed to the LAN               | Unauthenticated HTTP; a family LAN is not a trust boundary                             |
 | VPN      | Proton `wg0`, its kill-switch and its `NOPASSWD` sudo rules **absent** | The kill-switch REJECTs all output that is not marked for wg0 — the tailnet included     |
-| NTFS     | `/mnt/shared` not mounted                                             | A hibernated Windows volume mounted `rw` is a corruption waiting to happen              |
+| NTFS     | `/mnt/shared` mounted — **requires Fast Startup OFF in Windows**        | The one server-mode exception: wanted as extra storage, and the hibernation precondition is now met |
 | Tailnet  | Advertises itself as an exit node                                     | A Norwegian IP for banking and geo-locked services from abroad                         |
 | SSH      | Password and keyboard-interactive auth off, root login off            | Keys and Tailscale SSH are the two ways in                                             |
 | Nix      | `${username}` added to `trusted-users`                                | Lets the travel laptop offload builds here                                             |
@@ -272,6 +272,35 @@ the operator's side of it.
 | Confirm | `ns-maint confirm <txid>` | disarms | no | no |
 | Stage a reboot | `ns-maint stage` | no | no | no |
 | Reboot | `ns-maint reboot --yes` | no | no | **yes** |
+
+### Everyday use on the Legion
+
+The Legion is an always-on server with an optional local desktop. Its current
+`role = "server"` disables suspend and autologin. `desktop.enable = true`
+keeps the graphical login screen available; set it to `false` in
+`hosts/legion/options.nix` once the machine is remote-only. Desktop packages
+remain installed, and agent services run without Mango in either case.
+The GS65's desktop role and update aliases are unchanged.
+
+Use `nupdate` to update nixpkgs, build, and apply. Use `nswitch` to apply your
+edited dotfiles offline without updating inputs, or `nswitcho` to allow
+network downloads. All three use the same kernel check: a new kernel is staged
+for a planned reboot, while compatible changes use guarded live activation.
+After a live activation, check a fresh connection and run `nconfirm`. If you
+skip confirmation, the previous configuration is restored after 20 minutes.
+`nswitchu` is a compatibility name for `nupdate`; `nswitchu herdr` updates only
+that explicitly named input. `ns-maint` remains the lower-level maintenance
+interface described below. None of these commands automatically reboots.
+
+Herdr is for persistent terminals and agents. Use `ns-gui <command>` for GUI
+apps launched from those panes after desktop login; Zed uses it automatically.
+The launcher validates the current Mango session, forwards arguments without a
+shell, and ends the application with the desktop session. It never kills an
+existing Zed process based on a window-list guess.
+
+Collie's Serve unit owns HTTPS/443 and retries startup failures with backoff.
+The Tailscale reconciler checks drift and restarts that owner when repair is
+needed. It does not independently write the same Serve mapping.
 
 ### Why the build is a separate command
 
@@ -682,21 +711,39 @@ Critical-battery behaviour is unchanged (`upower`: warn at 20%, critical at 5%,
 power off at 3%). It is a graceful action on a machine that is normally on AC, and
 it is the honest answer for a pack that is actually flat.
 
-## The shared NTFS volume is not mounted
+## The shared NTFS volume is mounted
 
-`/mnt/shared` — the Windows dual-boot volume — is off unless `mountShared = true`
-in a host's options. Nothing server-critical reads or writes it: every state and
-media root here is a native Linux filesystem. The reasons are about unattended
-operation, not about NTFS:
+`/mnt/shared` — the Windows dual-boot volume — is mounted on both hosts. It is
+wanted as extra storage, in both roles: parked at home as a server, and on the
+road with the MSI. `mountShared = true` in `nixos/options.nix` — one boolean, in
+the base options rather than in a host file, because the answer is the same on
+both machines.
 
-- Windows Fast Startup leaves the volume **hibernated**, and ntfs3 mounted `rw` on
-  a hibernated volume is a way to corrupt it. The repair needs a booted Windows
-  and a keyboard; an unattended box has neither.
-- `nofail` used to mean "if it does not mount, carry on", which is right, and then
-  nothing noticed whether it mounted at all.
-- The partition is not repartitioned, reformatted, resized or re-identified, and
-  `ntfs3` stays in `boot.supportedFilesystems`, so copying a file off it by hand
-  during recovery still works. Flipping it on is one boolean.
+It was OFF by default, and the reason it was off was specifically Fast Startup:
+Windows leaves the volume **hibernated** on a Fast Startup shutdown, and ntfs3
+mounted `rw` on a hibernated volume is a way to corrupt it. The repair needs a
+booted Windows and a keyboard — neither of which an unattended box has.
+
+🔴 **That precondition is now met, and it is Windows-side state this repository
+cannot enforce.** Fast Startup is disabled on both machines. It is a Control
+Panel checkbox; a Windows update or a fresh install can restore it unnoticed. If
+that happens, this `rw` mount is a corruption risk again. Verify after any
+Windows work on either box:
+
+```
+powercfg /a     # "Hibernate" should NOT be listed as a sleep state
+powercfg /h     # hibernate state should report unavailable
+```
+
+Two things this being ON does not change:
+
+- `nofail` still means a failed mount is **silent**, and that now matters more
+  because this is a path real data is expected on. Nothing will tell you the
+  mount did not happen; you find out from whatever needed the files. Check
+  `findmnt /mnt/shared` when the path is unexpectedly empty rather than assuming
+  it is mounted.
+- Nothing server-critical lives here. Every state and media root is a native
+  Linux filesystem, so a missing mount costs convenience, never the box.
 
 ## Private overrides and the build source
 
@@ -791,29 +838,30 @@ pay per token for (batch summarisation, transcription, ComfyUI).
 
 The sleeper feature: stop grinding builds through the travel laptop.
 
-One-time key exchange, since nix runs distributed builds as the daemon user and
-cannot use Tailscale SSH:
+The GS65 keeps its private key in `~/.ssh/nixbuilder`; its Nix daemon runs as
+root and reads that file to authenticate to the Legion. Tailscale SSH on port
+22 is identity-based, so the builder uses the Legion's key-only OpenSSH listener
+on port 2222:
 
 ```console
 # on the client (gs65)
-sudo ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_nixbuilder
-sudo cat /root/.ssh/id_nixbuilder.pub
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/nixbuilder -C gs65-nixbuilder
+cat ~/.ssh/nixbuilder.pub
 ```
 
-Add that public key to `sshAuthorizedKeys` in `nixos/options.nix`, rebuild the
-Legion, then teach root the host key and verify:
+Before activation, replace the existing `remoteBuilder.authorizedKey` values in
+both `nixos/hosts/gs65/options.nix` and `nixos/hosts/legion/options.nix` with the
+output of `cat ~/.ssh/nixbuilder.pub` on the GS65. Do not add it to the operator's
+`sshAuthorizedKeys`: the separate field keeps builder access independently
+revocable. The GS65 config points `remoteBuilder.sshKey` at
+`/home/sonny/.ssh/nixbuilder` for the Nix daemon. Pin the Legion host key in
+`travel.serverHostKey` and make sure `tailnetHosts` maps `legion` to its current
+Tailscale address.
+
+After both configurations are activated, verify the key-only path:
 
 ```console
-sudo ssh -i /root/.ssh/id_nixbuilder sonny@legion true
-```
-
-Finally, in `hosts/gs65/options.nix`:
-
-```nix
-remoteBuilder = {
-  enable = true;
-  hostName = "legion";   # or the 100.x address if tailnetHosts is unset
-};
+ssh -i ~/.ssh/nixbuilder -p 2222 sonny@legion true
 ```
 
 `builders-use-substitutes` is on, so the Legion pulls dependencies from the

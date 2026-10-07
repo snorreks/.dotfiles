@@ -9,7 +9,7 @@
 # Both follow the same contract as the sys-daemon streams: a long-lived process
 # that prints one JSON line whenever the rendered state changes, so waybar gets
 # push updates instead of an interval poll. Both read their credential from the
-# sops `secrets-env` file (see sops.nix) — nothing secret enters the nix store,
+# decrypted SOPS file (see sops.nix) — nothing secret enters the nix store,
 # and they degrade to a "setup" pill instead of failing when it is missing.
 {
   pkgs,

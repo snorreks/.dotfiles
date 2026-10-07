@@ -373,7 +373,6 @@
       herdrWantedBy = jsonList svc.herdr.Install.WantedBy;
       herdrAfter = jsonList svc.herdr.Unit.After;
       herdrWants = jsonList svc.herdr.Unit.Wants;
-      herdrLoadCredential = toString (builtins.length svc.herdr.Service.LoadCredential);
       resumeSuccess = svc.herdr-resume.Service.SuccessExitStatus;
       resumeWantedBy = jsonList svc.herdr-resume.Install.WantedBy;
       hasImportEnvironment =
@@ -472,6 +471,12 @@
             # and why this suite can run in here at all.
             nixpkgs.legacyPackages.${system}.nix
             nixpkgs.legacyPackages.${system}.jq
+            # python3 binds the throwaway unix sockets tests/gui-session.sh
+            # needs, so the launcher's `-S` session checks run against real
+            # socket paths instead of skipping themselves. Without it every
+            # launch assertion failed on a missing command rather than on the
+            # behaviour under test.
+            nixpkgs.legacyPackages.${system}.python3
             nixpkgs.legacyPackages.${system}.shellcheck
             nixpkgs.legacyPackages.${system}.util-linux
             nixpkgs.legacyPackages.${system}.which
@@ -510,8 +515,8 @@
           # This output owns maintenance and foundation only. The full registry
           # also needs agent/media tools and Cargo, with separate check closures
           # below; invoking it here silently skipped or failed unrelated lanes.
-          shellcheck -x -P "$src/tests" "$src/config/system/maintenance/ns-maint.sh" "$src/config/home/updates/nupdate.sh" "$src/tests/ns-maint-transaction.sh" "$src/tests/nupdate-workflow.sh"
-          for suite in ns-maint-transaction.sh nupdate-workflow.sh kill-switch-targets.sh disk-cleanup-safety.sh \
+          shellcheck -x -P "$src/tests" "$src/config/system/maintenance/ns-maint.sh" "$src/config/home/updates/nupdate.sh" "$src/config/home/gui-session/ns-gui.sh" "$src/tests/ns-maint-transaction.sh" "$src/tests/nupdate-workflow.sh" "$src/tests/gui-session.sh"
+          for suite in ns-maint-transaction.sh nupdate-workflow.sh gui-session.sh kill-switch-targets.sh disk-cleanup-safety.sh \
             server-foundation/role-policy.sh server-foundation/boot-health.sh \
             server-foundation/tailscale-reconcile.sh server-foundation/ssh-confirm.sh; do
             bash "$src/tests/$suite"

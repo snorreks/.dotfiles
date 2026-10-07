@@ -134,59 +134,24 @@ bash "$SECRET_ENV" --name TRAILING_KEY --format=nul >"$TMP/actual-nul"
 cmp -s "$TMP/expected-nul" "$TMP/actual-nul"
 assert_eq '0' "$?" 'NUL records and aliases retain the remaining newline'
 
-_t_start "explicit fish loading uses loader lookup and aliases without ambient auto-loading"
-# Extract the actual function, not a reimplementation of the Nix string.
-python3 - "$LANE_SRC/config/home/fish/default.nix" "$TMP/ns-secrets.fish" <<'PY'
-import pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text()
-start = text.index('      function ns-secrets ')
-end = text.index('\n      # Readiness only', start)
-pathlib.Path(sys.argv[2]).write_text(text[start:end])
-PY
-# A hard-coded interpreter wrapper also works in the Nix test sandbox.
-# Exercise more than one lookup directory: the old string-collect path joined
-# these into a single newline-bearing pathname and could find neither.
-mkdir -p "$XDG_RUNTIME_DIR/sops-nix/secrets"
-mv "$CREDENTIALS_DIRECTORY/ALIASED_KEY" "$XDG_RUNTIME_DIR/sops-nix/secrets/ALIASED_KEY"
-fake loader <<'FAKE'
-exec bash "$SECRET_ENV_SOURCE" "$@"
-FAKE
-export SECRET_ENV_SOURCE="$SECRET_ENV"
-SECRET_ENV="$TMP/bin/loader" fish --no-config -c '
-    source "$TMP/ns-secrets.fish"
-    set -q TRAILING_KEY; and exit 8
-    ns-secrets
-    printf "%s" "$TRAILING_KEY" > "$TMP/fish-value"
-    printf "%s" "$TRAILING_ALIAS" > "$TMP/fish-alias"
-    test "$GH_TOKEN" = aliased-value; or exit 9
-    set -q ANTHROPIC_API_KEY; and exit 10
-    set -q NUL_KEY; and exit 11
-    exit 0
-'
-assert_eq '0' "$?" 'fish loads ready aliases only, explicitly, retaining OAuth precedence'
-cmp -s "$TMP/expected-value" "$TMP/fish-value"
-assert_eq '0' "$?" 'fish preserves the remaining trailing newline'
-cmp -s "$TMP/expected-value" "$TMP/fish-alias"
-assert_eq '0' "$?" 'fish aliases preserve identical bytes'
-
-_t_start "interactive fish automatically exports ready credentials to arbitrary CLI children"
-python3 - "$LANE_SRC/config/home/fish/default.nix" "$TMP/cli-init.fish" <<'PYTHON'
-import pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text()
-start = text.index('      function ns-secrets ')
-end = text.index('      set fish_greeting', start)
-pathlib.Path(sys.argv[2]).write_text(text[start:end])
-PYTHON
-cat >"$TMP/cli-child.sh" <<'CHILD'
-test "$GH_TOKEN" = aliased-value && test -n "$QUOTED_KEY" && test -n "$INJECT_KEY" && test -z "${ANTHROPIC_API_KEY+x}" && test -z "${NUL_KEY+x}"
-CHILD
-SECRET_ENV="$TMP/bin/loader" fish --no-config --interactive -c '
-    source "$TMP/cli-init.fish"
-    command bash "$TMP/cli-child.sh"
-' >"$TMP/cli-init.out" 2>&1
-assert_eq '0' "$?" 'ordinary CLI children inherit ready keys and aliases without ns-secrets'
-assert_no_file "$CANARY_CMD" 'automatic loading never executes command substitutions'
-assert_no_file "$CANARY_BTICK" 'automatic loading never executes backticks'
+_t_start "interactive shells use the SOPS session environment without per-key startup calls"
+variables_nix="$LANE_SRC/config/home/variables.nix"
+sops_nix="$LANE_SRC/config/home/sops.nix"
+fish_nix="$LANE_SRC/config/home/fish/default.nix"
+assert_contains "$(<"$variables_nix")" 'secretSessionVariables' \
+  'Home Manager declares session variables for SOPS credentials'
+assert_contains "$(<"$variables_nix")" 'config.sops.secrets.' \
+  'session values are read from decrypted SOPS files'
+assert_contains "$(<"$sops_nix")" '"secrets-env"' \
+  'SOPS generates the shared environment template'
+assert_contains "$(<"$sops_nix")" 'sops-import-environment' \
+  'the user manager imports the SOPS environment'
+assert_contains "$(<"$sops_nix")" 'home.file.".profile"' \
+  'login shells source the generated environment'
+assert_not_contains "$(<"$fish_nix")" 'ns-secrets' \
+  'opening Fish does not run the per-credential loader'
+assert_not_contains "$(<"$fish_nix")" 'secret-env' \
+  'Fish startup has no secret-env subprocess loop'
 
 _t_start "the sops-nix home-manager symlink path is searched"
 # This is the layout on a real host: sops-nix decrypts into
@@ -203,102 +168,15 @@ assert_eq 'CONFIG_DIR_KEY=config-dir-value' "$out" \
 out="$(bash "$SECRET_ENV" --name CONFIG_DIR_KEY --check 2>/dev/null)"
 assert_contains "$out" 'ready' 'and --check reports it ready'
 
-_t_start "actual managed fish children load ready keys, not server/client/pane shells"
-python3 - "$LANE_SRC/config/home/fish/default.nix" "$TMP/__ns_agent_exec.fish" <<'PY'
-import pathlib, sys
-text = pathlib.Path(sys.argv[1]).read_text()
-start = text.index('function __ns_agent_exec ')
-end = text.index("'';", start)
-pathlib.Path(sys.argv[2]).write_text(text[start:end])
-PY
-export MANAGED_FUNCTIONS="$LANE_SRC/config/home/fish/functions"
-cat >"$TMP/managed.manifest" <<'EOF'
-QUOTED_KEY||true
-TRAILING_KEY|TRAILING_ALIAS|true
-OPENROUTER_API_KEY||true
-ANTHROPIC_API_KEY||false
-EOF
-fake pi <<'FAKE'
-printf '%s' "$QUOTED_KEY" >"$TMP/child-quotes"
-printf '%s' "$TRAILING_KEY" >"$TMP/child-trailing"
-printf '%s' "$TRAILING_ALIAS" >"$TMP/child-alias"
-printf '%s\0' "$@" >"$TMP/child-argv"
-if [[ -v ANTHROPIC_API_KEY ]]; then exit 18; fi
-if [[ -v OPENROUTER_API_KEY ]]; then
-    [[ ${ALLOW_READY_API:-} == 1 ]] || exit 18
-    printf '%s' "$OPENROUTER_API_KEY" >"$TMP/child-api"
-fi
-printf child >"$TMP/child-started"
-FAKE
-cp "$TMP/bin/pi" "$TMP/bin/claude"
-fake herdr <<'FAKE'
-printf unexpected-client >"$TMP/client-called"
-exit 19
-FAKE
-# Simulates the plain fish pane of a server that already exists, using the
-# exact shell-submitted executable words (not command/exec builtins).
-cat >"$TMP/managed.fish" <<'FISH'
-set -p fish_function_path "$TMP"
-source "$MANAGED_FUNCTIONS/pi.fish"
-source "$MANAGED_FUNCTIONS/claude.fish"
-set -gx HERDR_ENV 1
-set -q QUOTED_KEY; and exit 21
-set -q TRAILING_KEY; and exit 22
-'pi' --resume 'argument with spaces' 'quote" $literal'; or exit $status
-'claude' --resume 'argument with spaces' 'quote" $literal'; or exit $status
-set -q QUOTED_KEY; and exit 23
-set -q TRAILING_KEY; and exit 24
-set -q ANTHROPIC_API_KEY; and exit 25
-set -q OPENROUTER_API_KEY; and exit 26
-exit 0
-FISH
-SECRET_ENV="$TMP/bin/loader" SECRET_ENV_MANIFEST="$TMP/managed.manifest" \
-    fish --no-config "$TMP/managed.fish"
-assert_eq '0' "$?" 'plain existing-server fish runs pi and claude with absent optional API key'
-printf '%s' 'has "double" quotes and $dollar and \backslash' >"$TMP/expected-quotes"
-printf '%s\0' --resume 'argument with spaces' 'quote" $literal' >"$TMP/expected-argv"
-for part in quotes trailing alias argv; do
-    expected="$TMP/expected-value"
-    [[ "$part" == quotes ]] && expected="$TMP/expected-quotes"
-    [[ "$part" == argv ]] && expected="$TMP/expected-argv"
-    cmp -s "$expected" "$TMP/child-$part"
-    assert_eq '0' "$?" "managed child exact $part bytes, including aliases/quotes/trailing LF"
-done
-assert_no_file "$TMP/client-called" 'no herdr client or restart is used for child credentials'
-# A selected malformed optional credential fails rather than starting a child.
-printf 'bad\0value' >"$CREDENTIALS_DIRECTORY/OPENROUTER_API_KEY"
-rm -f "$TMP/child-started"
-SECRET_ENV="$TMP/bin/loader" SECRET_ENV_MANIFEST="$TMP/managed.manifest" \
-    fish --no-config "$TMP/managed.fish" >"$TMP/managed-error" 2>&1
-assert_eq '4' "$?" 'malformed selected key prevents managed consumer spawn'
-assert_no_file "$TMP/child-started" 'malformed values do not reach either consumer'
-assert_contains "$(<"$TMP/managed-error")" 'NUL byte' 'failure names malformed credential without its value'
-SECRET_ENV="$TMP/bin/loader" SECRET_ENV_MANIFEST="$TMP/managed.manifest" \
-    fish --no-config -c 'set -p fish_function_path "$TMP"; source "$MANAGED_FUNCTIONS/claude.fish"; set -gx HERDR_ENV 1; claude --resume' \
-    >"$TMP/managed-error" 2>&1
-assert_eq '4' "$?" 'Claude actual branch also refuses selected malformed keys'
-assert_no_file "$TMP/child-started" 'Claude failure does not spawn a consumer'
-# Files arriving after the server already started are discovered per spawn.
-printf 'ready "API" $literal\n\n' >"$CREDENTIALS_DIRECTORY/OPENROUTER_API_KEY"
-printf 'ready "API" $literal\n' >"$TMP/expected-api"
-ALLOW_READY_API=1 SECRET_ENV="$TMP/bin/loader" SECRET_ENV_MANIFEST="$TMP/managed.manifest" \
-    fish --no-config "$TMP/managed.fish"
-assert_eq '0' "$?" 'newly ready API key reaches both children without server restart or parent keys'
-cmp -s "$TMP/expected-api" "$TMP/child-api"
-assert_eq '0' "$?" 'ready provider API key preserves exact bytes'
-rm -f "$CREDENTIALS_DIRECTORY/OPENROUTER_API_KEY"
-# No ready values is valid for OAuth/auth-store/local; explicit API intent is strict.
-printf 'OPENROUTER_API_KEY||true\nANTHROPIC_API_KEY||false\n' >"$TMP/empty-ready.manifest"
-out="$(ANTHROPIC_API_KEY=ambient OPENROUTER_API_KEY=ambient bash "$SECRET_ENV" \
-    --manifest "$TMP/empty-ready.manifest" --ready --exec "$TMP/bin/showenv")"
-assert_eq '0' "$?" 'zero ready keys still permits a local/OAuth consumer'
-assert_not_contains "$out" 'ambient' 'all manifest keys cleared even with no ready values'
-bash "$SECRET_ENV" --manifest "$TMP/empty-ready.manifest" --ready \
-    --name OPENROUTER_API_KEY --exec "$TMP/bin/showenv" >"$TMP/strict-out" 2>"$TMP/strict-error"
-assert_eq '3' "$?" 'explicit API credential remains required in ready mode'
-assert_eq '' "$(<"$TMP/strict-out")" 'strict missing key never starts a consumer'
-bash "$SECRET_ENV" --ready --name UNKNOWN_KEY --exec "$TMP/bin/showenv" >/dev/null 2>&1
-assert_eq '2' "$?" 'unknown explicit name is rejected before value lookup'
+_t_start "managed herdr panes inherit the SOPS session environment"
+claude_fish="$LANE_SRC/config/home/fish/functions/claude.fish"
+pi_fish="$LANE_SRC/config/home/fish/functions/pi.fish"
+assert_contains "$(<"$claude_fish")" 'command claude $argv' \
+  'Claude runs directly inside an existing herdr pane'
+assert_contains "$(<"$pi_fish")" 'command pi $argv' \
+  'Pi runs directly inside an existing herdr pane'
+assert_not_contains "$(<"$claude_fish")$(<"$pi_fish")" '__ns_agent_exec' \
+  'agent launches do not require the scoped credential wrapper'
 
 _t_start "Unicode survives"
 out="$(env_of UNICODE_KEY | grep -a '^UNICODE_KEY=')"
@@ -419,8 +297,8 @@ assert_not_contains "$cmdline_part" 'CANARY' 'nor in /proc/self/cmdline'
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "the caller's environment survives; only credentials are scoped"
 # `env -i` also cleared TERM, LANG, USER, SSH_AUTH_SOCK and XDG_RUNTIME_DIR, so
-# `ns-secrets run pi` started a terminal program with no terminal and git over
-# SSH with no agent. Scoping means "these credentials", not "no environment".
+# Clearing the environment started terminal programs without a terminal and git
+# over SSH without an agent. Scoping means "these credentials", not "no environment".
 out="$(TERM=xterm-256color LANG=en_US.UTF-8 SSH_AUTH_SOCK=/tmp/agent.sock \
 	bash "$SECRET_ENV" --name PLAIN_KEY --exec "$TMP/bin/showenv" 2>/dev/null)"
 assert_contains "$out" 'TERM=xterm-256color' 'TERM survives (a terminal program still has a terminal)'

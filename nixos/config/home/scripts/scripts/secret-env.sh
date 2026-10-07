@@ -511,8 +511,8 @@ do_exec() {
 	#
 	# The caller's environment is also PRESERVED, deliberately: `env -i` also
 	# cleared TERM, LANG, USER, SSH_AUTH_SOCK and XDG_RUNTIME_DIR, so
-	# `ns-secrets run pi` started a terminal program with no terminal and git
-	# over SSH with no agent. The scoping guarantee is "only the REQUESTED
+	# Clearing the environment started terminal programs without a terminal and
+	# git over SSH without an agent. The scoping guarantee is "only the REQUESTED
 	# credentials are added, and no OTHER credential is inherited" — so every
 	# credential in the manifest that was NOT requested is unset first, and
 	# everything unrelated to credentials is left alone.

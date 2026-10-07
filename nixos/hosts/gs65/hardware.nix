@@ -57,8 +57,16 @@
 
   # --- Shared NTFS Drive (Windows dual-boot) ---
   #
-  # OFF unless opts.mountShared is true (nixos/options.nix) — see the long note
-  # on the same mount in hosts/legion/hardware.nix, which applies here too.
+  # Mounted when opts.mountShared is true (nixos/options.nix), which it now is.
+  # The MSI dual-boots too and wants the same extra storage on the road as the
+  # Legion has parked. It was OFF for the Fast Startup / hibernation reason only,
+  # and that precondition is met — see the long note on the same mount in
+  # hosts/legion/hardware.nix, which applies here, and opts.mountShared.
+  #
+  # 🔴 This is a DIFFERENT physical volume from the Legion's (see the device
+  # below), so Fast Startup must be off in the GS65's own Windows install too —
+  # disabling it on one machine says nothing about the other.
+  #
   # The partition is not repartitioned and ntfs3 stays available by hand.
   fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/EA6CD3956CD35AC1";

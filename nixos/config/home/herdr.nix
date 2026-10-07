@@ -52,8 +52,9 @@
 #
 # What is genuinely given up: at cold boot the server has no WAYLAND_DISPLAY,
 # because nothing has run mango's autostart yet. Agents started into it before
-# you log in cannot use wl-copy or xdg-open; they behave normally once you are
-# logged in. That is inherent to "reachable when nobody is at the desk", and
+# you log in cannot use wl-copy or xdg-open directly. Logging in does not change
+# the existing daemon's environment: use `ns-gui <command>` to reach the current
+# desktop without restarting Herdr. That is inherent to boot lifetime, and
 # docs/mobile-agents.md says so rather than hiding it.
 #
 # 🔴 Do not add a second Wants here, or split the mobile path into its own
@@ -103,63 +104,7 @@
   bootLifetime = lifetime.bootLifetime headless mobile;
 
   herdr = inputs.herdr.packages.${pkgs.stdenv.hostPlatform.system}.default;
-
-  # Scoped managed-child credentials: pinned src/app/agents.rs:start_agent
-  # builds [interactive_agent_executable(kind)], and platform/mod.rs's
-  # interactive_unix_shell_command submits quoted `pi ...` / `claude ...`
-  # (not command/exec). Thus fish/functions/{pi,claude}.fish HERDR_ENV branches
-  # ARE the actual spawn hook, including panes of an existing plain server.
-  # They invoke secret-env --ready only for the real executable child; absent
-  # optional keys allow OAuth/auth-store/local use, malformed keys fail loudly.
-  # ANTHROPIC_API_KEY remains excluded by sessionVariable=false. Pinned Pi
-  # pi-ai/dist/auth/resolve.js resolves stored OAuth/API auth before env fallback.
-  # Interactive fish panes load ready CLI credentials for every agent kind.
-  # Existing plain panes can refresh with ns-secrets; these two launchers also
-  # refresh credentials per child without restarting the server.
-  envSecrets = import ./env-secrets.nix;
-
-  # Credential names a spawned agent needs, i.e. everything in env-secrets.nix
-  # that is NOT sessionVariable=false. Deliberately computed from the same list
-  # the manifest and the loader use, so the three cannot drift.
-  agentCredentialNames =
-    map (s: s.name) (builtins.filter (s: s.sessionVariable or true) envSecrets);
-
-  # The sops-nix home-manager module's defaultSymlinkPath: a symlink at
-  # ~/.config/sops-nix/secrets to the current generation's decrypted dir
-  # ($XDG_RUNTIME_DIR/secrets.d/<id>). Stable across activations, unlike the
-  # generation id itself. LoadCredential needs a real path, and this is it.
-  secretDir = "${config.xdg.configHome}/sops-nix/secrets";
 in {
-  # Declared as a Home Manager option, NOT a NixOS one. Home Manager user modules
-  # receive the HM submodule's own `config`, so a NixOS option declared in
-  # config/system/agent-ops/ is invisible here — `config.agentOps` does not exist
-  # inside this module, while `config.home` and `config.xdg` do.
-  options.herdr = {
-    # Hand the agent credentials to the herdr server as systemd credentials, so
-    # they arrive in $CREDENTIALS_DIRECTORY instead of the ambient session
-    # environment.
-    #
-    # OFF by default, and that default is a judgement rather than an omission:
-    # LoadCredential is MANDATORY. If sops-nix has not decrypted yet — no age
-    # key on a fresh install, a stale key, sops-nix.service failed — the herdr
-    # unit fails to start, and the machine loses every agent it has. Trading
-    # "the agents start blind" for "the agents do not start" on an unattended
-    # box is the worse of the two. The same policy is documented system-side in
-    # config/system/agent-ops/credentials.nix; the two are deliberately separate
-    # switches for that reason.
-    agentCredentials = {
-      enable = lib.mkOption {
-        type = lib.types.bool;
-        default = false;
-        description = ''
-          Deliver nixos/config/home/env-secrets.nix credentials to herdr.service
-          through systemd LoadCredential= instead of the session environment.
-          Requires sops-nix to have decrypted successfully before herdr starts.
-        '';
-      };
-    };
-  };
-
   config = {
     # Single owner of the package: `__herdr_launch_agent` and the contract
     # pipeline both resolve `herdr` from PATH, and the unit resolves from the
@@ -177,15 +122,18 @@ in {
       Unit = {
         Description = "herdr — persistent terminal workspace server for AI agents";
         Documentation = ["https://herdr.dev"];
+        # Configuration changes must not restart the daemon hosting the updater
+        # or any other live agent. The new unit applies on its next deliberate
+        # start; sd-switch still updates the files and reloads the user manager.
+        X-SwitchMethod = lib.mkIf headless "keep-old";
 
-        # Graphical-session ordering is present only when the agents are NOT
-        # meant to survive without a login. sops-nix is always here: it is what
-        # decrypts the credentials, and a server that comes up before
-        # decryption has run serves agents that cannot authenticate.
+        # The SOPS import must finish before herdr starts so its panes inherit
+        # the session credentials. The graphical-session ordering still comes
+        # from the shared agent-lifetime rule.
         After = lifetime.afterUnits headless mobile;
-        Wants = lib.optionals (!lifetime.needsGraphicalSession headless mobile) [
-          "sops-nix.service"
-        ];
+        Wants =
+          ["sops-import-environment.service"]
+          ++ lib.optionals (!lifetime.needsGraphicalSession headless mobile) ["sops-nix.service"];
       };
 
       Service = {
@@ -222,13 +170,6 @@ in {
         # next one arrives report-ready for upstream.
         Environment = "RUST_BACKTRACE=1";
 
-        # Credentials as systemd credentials, never as ambient session
-        # variables. Off unless asked for — see the option's own note on why a
-        # mandatory LoadCredential must not be able to strand the server.
-        LoadCredential = lib.optionals config.herdr.agentCredentials.enable (
-          map (n: "${n}:${secretDir}/${n}") agentCredentialNames
-        );
-
         # `herdr server stop` (and ctrl+b quit) exit 0 on purpose — only restart
         # on an actual crash, otherwise a deliberate stop would come straight
         # back up and there would be no way to stop the server at all.
@@ -243,6 +184,11 @@ in {
         KillMode = "mixed";
         KillSignal = "SIGTERM";
         TimeoutStopSec = 30;
+
+        # An OOM-killed pane must not cause systemd to kill every other pane and
+        # the multiplexer. This does not prevent kernel OOM kills; it prevents
+        # systemd's stop-policy cascade after one child is killed.
+        OOMPolicy = lib.mkIf headless "continue";
 
         WorkingDirectory = "%h";
       };
@@ -274,6 +220,10 @@ in {
         Description = "Report herdr server ownership, CLI compatibility and unit health";
         After = ["herdr.service"];
         Wants = ["herdr.service"];
+        # Type=simple becomes active before the socket is ready. Retry only
+        # this read-only diagnostic, with a bound so real conflicts stay visible.
+        StartLimitIntervalSec = lib.mkIf headless 30;
+        StartLimitBurst = lib.mkIf headless 5;
       };
 
       Service = {
@@ -284,9 +234,13 @@ in {
         # needs to see, and hiding it in the journal of a unit nobody reads is
         # what this whole check exists to avoid.
         SuccessExitStatus = "0";
-        # Report and stop. Restarting the server to "fix" a version mismatch is
-        # precisely the thing that destroys live panes.
-        Restart = "no";
+        # Retry the checker, never the daemon. A persistent mismatch exhausts
+        # the short start limit and remains failed for the operator to inspect.
+        Restart =
+          if headless
+          then "on-failure"
+          else "no";
+        RestartSec = lib.mkIf headless 2;
       };
 
       Install.WantedBy = ["herdr.service"];

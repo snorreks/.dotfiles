@@ -91,13 +91,13 @@ assert_eq 'true' "$(field "$out" lifetime)" 'headless=false mobile=true keeps wo
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "graphical-session ordering is REMOVED, not merely optional"
 out="$(eval_lifetime false false)"
-assert_eq '["graphical-session.target","sops-nix.service"]' "$(field "$out" after)" \
+assert_eq '["graphical-session.target","sops-nix.service","sops-import-environment.service"]' "$(field "$out" after)" \
 	'a desktop still orders behind the graphical session'
 out="$(eval_lifetime true false)"
-assert_eq '["sops-nix.service"]' "$(field "$out" after)" \
+assert_eq '["sops-nix.service","sops-import-environment.service"]' "$(field "$out" after)" \
 	'headless=true does NOT, because that target is never pulled in'
 out="$(eval_lifetime false true)"
-assert_eq '["sops-nix.service"]' "$(field "$out" after)" \
+assert_eq '["sops-nix.service","sops-import-environment.service"]' "$(field "$out" after)" \
 	'mobileAgents=true does not either'
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -107,6 +107,8 @@ for h in false true; do
 		out="$(eval_lifetime "$h" "$m")"
 		assert_contains "$(field "$out" after)" 'sops-nix.service' \
 			"headless=$h mobile=$m orders after sops-nix.service"
+		assert_contains "$(field "$out" after)" 'sops-import-environment.service' \
+			"headless=$h mobile=$m orders after the session environment import"
 	done
 done
 
@@ -169,7 +171,6 @@ in {
   herdrWantedBy = builtins.toJSON (asList s.herdr.Install.WantedBy);
   herdrAfter = builtins.toJSON (asList s.herdr.Unit.After);
   herdrWants = builtins.toJSON (asList s.herdr.Unit.Wants);
-  herdrLoadCredential = toString (builtins.length s.herdr.Service.LoadCredential);
   resumeSuccess = s.herdr-resume.Service.SuccessExitStatus;
   resumeWantedBy = builtins.toJSON (asList s.herdr-resume.Install.WantedBy);
   hasImportEnvironment = if s ? sops-import-environment then "true" else "false";
@@ -241,20 +242,18 @@ else
 
 	assert_eq '["default.target"]' "$(fact "HOST_FACT_herdrWantedBy")" \
 		'legion (mobile on) starts the server at boot, not at login'
-	assert_eq '["sops-nix.service"]' "$(fact "HOST_FACT_herdrAfter")" \
+	assert_eq '["sops-nix.service","sops-import-environment.service"]' "$(fact "HOST_FACT_herdrAfter")" \
 		'and does not order behind a graphical session that may never exist'
-	assert_eq '["sops-nix.service"]' "$(fact "HOST_FACT_herdrWants")" \
-		'and pulls sops-nix in'
-	assert_eq '0' "$(fact "HOST_FACT_herdrLoadCredential")" \
-		'LoadCredential is empty by default (a mandatory credential must not be able to strand the server)'
+	assert_eq '["sops-import-environment.service","sops-nix.service"]' "$(fact "HOST_FACT_herdrWants")" \
+		'and imports the SOPS environment before herdr starts'
 	assert_eq '0' "$(fact "HOST_FACT_resumeSuccess")" \
 		'the resume unit no longer declares exit 1 as success'
 	assert_eq '["herdr.service"]' "$(fact "HOST_FACT_resumeWantedBy")" \
 		'and fires on every herdr start'
-	assert_eq 'false' "$(fact "HOST_FACT_hasImportEnvironment")" \
-		'the sops-import-environment unit is gone'
-	assert_eq '[]' "$(fact "HOST_FACT_sessionSecretVars")" \
-		'no credential is in home.sessionVariables any more'
+	assert_eq 'true' "$(fact "HOST_FACT_hasImportEnvironment")" \
+		'the sops-import-environment unit is installed'
+	assert_contains "$(fact "HOST_FACT_sessionSecretVars")" 'OPENAI_API_KEY' \
+		'provider credentials are exposed through home.sessionVariables'
 
 	# And the generated unit agrees with the RULE, not merely with itself.
 	lifetime="$(eval_lifetime false true)"

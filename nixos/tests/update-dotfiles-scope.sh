@@ -157,32 +157,63 @@ if [[ ! -f "$FUNC" ]]; then
   exit 90
 fi
 
+# The definition is loaded ONCE and matched with bash pattern matching instead
+# of being piped into `grep -q`. The piped form is wrong under `set -o pipefail`:
+# `grep -q` exits the instant it matches, fish is then killed by SIGPIPE while
+# still writing the rest of a ~12 KB definition, and pipefail reports the whole
+# pipeline as failed EVEN THOUGH THE MATCH WAS FOUND. Whether fish finishes
+# writing first depends on the pipe's buffer capacity, which the kernel shrinks
+# once the build user approaches /proc/sys/fs/pipe-user-pages-soft. A busy CI
+# runner gets a smaller pipe than a workstation does, so a byte-identical
+# derivation passed locally and failed in CI — see run 37690303910, where this
+# is the exact line that failed. Matching in bash has no pipe, so there is no
+# SIGPIPE to propagate. fish's stderr is kept rather than sent to /dev/null, so
+# the next failure here explains itself instead of only saying "not the
+# rewritten function".
+UD_ERR_FILE="$(mktemp)"
+UD_FISH_STATUS=0
+UD_DEF="$(XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config \
+  -c "source '$FUNC'; functions update_dotfiles" 2>"$UD_ERR_FILE")" ||
+  UD_FISH_STATUS=$?
+
+# Comments are stripped for the two body checks below. The file deliberately
+# *quotes* the old `sudo chown -R sonny:users ~/.dotfiles` in its header to
+# explain what it replaced, so matching the whole body would match the
+# documentation of the very thing these checks forbid.
+UD_CODE=""
+while IFS= read -r ud_line; do
+  [[ "$ud_line" =~ ^[[:space:]]*# ]] || UD_CODE+="$ud_line"$'\n'
+done <<<"$UD_DEF"
+
+ud_bail() {
+  echo "update-dotfiles-scope: FATAL — $*" >&2
+  if [[ -s "$UD_ERR_FILE" ]]; then
+    echo "  fish reported:" >&2
+    sed 's/^/    /' "$UD_ERR_FILE" >&2
+  fi
+  rm -f "$UD_ERR_FILE"
+  exit 90
+}
+
 # The loaded definition must be this repository's. `NM_DOTFILES_REPO` is the
 # first thing the rewritten function sets; the old implementation never had it.
-if ! XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
-  grep -q 'NM_DOTFILES_REPO'; then
-  echo "update-dotfiles-scope: FATAL — $FUNC is not the rewritten function." >&2
-  echo "  Refusing to run against the installed copy." >&2
-  exit 90
+if [[ "$UD_FISH_STATUS" -ne 0 || "$UD_DEF" != *NM_DOTFILES_REPO* ]]; then
+  ud_bail "$FUNC is not the rewritten function. Refusing to run against the installed copy."
 fi
 
-# No live `chown -R` command. Comment lines are stripped first: the file
-# deliberately *quotes* the old `sudo chown -R sonny:users ~/.dotfiles` in its
-# header to explain what it replaced, so a naive grep over the whole body would
-# match the documentation of the very thing this test forbids.
-if XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
-  grep -v '^[[:space:]]*#' | grep -q 'chown[[:space:]].*-R'; then
-  echo "update-dotfiles-scope: FATAL — $FUNC still runs 'chown ... -R'." >&2
-  exit 90
+# No live `chown -R` command.
+re_chown='chown[[:space:]].*-R'
+if [[ "$UD_CODE" =~ $re_chown ]]; then
+  ud_bail "$FUNC still runs 'chown ... -R'."
 fi
 
 # No blanket staging or a push to master, checked the same way.
-if XDG_CONFIG_HOME="$EMPTY_CONFIG_HOME" fish --no-config -c "source '$FUNC'; functions update_dotfiles" 2>/dev/null |
-  grep -v '^[[:space:]]*#' | grep -qE 'add[[:space:]]+(-A|\.)|push[[:space:]].*origin[[:space:]]+master'; then
-  echo "update-dotfiles-scope: FATAL — $FUNC still does a blanket add or pushes to master." >&2
-  exit 90
+re_blanket='add[[:space:]]+(-A|\.)|push[[:space:]].*origin[[:space:]]+master'
+if [[ "$UD_CODE" =~ $re_blanket ]]; then
+  ud_bail "$FUNC still does a blanket add or pushes to master."
 fi
 
+rm -f "$UD_ERR_FILE"
 printf '    driving %s\n' "$FUNC"
 
 # Decisive sandbox check, run before any test touches git.
@@ -427,7 +458,8 @@ assert_contains "$UD_OUT" "cancelled" "answering 'n' must cancel"
 # build sandbox has no USER set, and the property worth asserting is that an
 # owner IS passed, not which one.
 run_ud "$d" fixperms ./tracked.txt <<< "n"
-if printf '%s' "$UD_OUT" | grep -qE "about to chown to [^[:space:]]+: $d/tracked\.txt"; then
+re_chown_to="about to chown to [^[:space:]]+: $d/tracked\.txt"
+if [[ "$UD_OUT" =~ $re_chown_to ]]; then
   _ok "fixperms chowns the resolved absolute target, with an explicit owner"
 else
   _fail "fixperms chowns the resolved absolute target, with an explicit owner" "got: $UD_OUT"

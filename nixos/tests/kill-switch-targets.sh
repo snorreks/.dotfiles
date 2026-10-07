@@ -175,6 +175,8 @@ run_ks() {
 }
 
 setup() {
+  # Each fixture declares its own role; do not inherit the real server shell.
+  unset NS_SERVER_MODE
   fixture_new
   write_ps_fakes
   table_reset
