@@ -98,24 +98,29 @@ in {
       };
 
     templates = {
+      # Make SOPS credentials available to login shells and the user manager.
+      # Only session credentials are exported; the decrypted values are written
+      # by sops-nix into this runtime template, not into the Nix store.
+      "secrets-env" = {
+        path = "${config.home.homeDirectory}/.config/sops/secrets-env";
+        content =
+          lib.concatMapStrings (
+            s:
+              if s.sessionVariable or true
+              then
+                lib.concatMapStrings (
+                  varName: ''
+                    export ${varName}="${config.sops.placeholder.${s.name}}"
+                  ''
+                ) ([s.name] ++ (s.aliases or []))
+              else ""
+          )
+          envSecrets;
+      };
+
       "nix-access-tokens".content = ''
         access-tokens = github.com=${config.sops.placeholder.GITHUB_ACCESS_TOKEN}
       '';
-      # 🔴 There is deliberately NO "secrets-env" template any more.
-      #
-      # It was `export NAME="placeholder"` per credential, sourced by
-      # ~/.profile, by fish's interactiveShellInit, and by a systemd unit that
-      # ran `systemctl --user import-environment` — which put every credential
-      # into the environment of every process in the user session, not the ones
-      # meant to have it. It was also a source/eval template: a value
-      # containing `"` ended the quoting and the rest was parsed as shell, a
-      # value containing `$(…)` or backticks was EXECUTED, and a multiline value
-      # could not survive at all.
-      #
-      # Values now reach a process only through
-      # config/home/scripts/scripts/secret-env.sh, which reads the decrypted
-      # files as bytes and hands them to execve. See that script's header, and
-      # docs/agent-operations.md.
     };
   };
 
@@ -155,9 +160,21 @@ in {
     executable = true;
   };
 
-  # 🔴 There is deliberately NO sops-import-environment.service and NO ~/.profile
-  # hook any more. Both existed only to run the eval template; both are the
-  # "desktop-global import" that put every credential into every process. The
-  # fish function `ns-secrets` reads values as data and runs automatically in
-  # interactive shells. `secret-env.sh --check` reports readiness.
+  systemd.user.services.sops-import-environment = {
+    Unit = {
+      Description = "Import SOPS decrypted secrets into systemd user environment";
+      After = ["sops-nix.service"];
+    };
+    Install.WantedBy = ["default.target"];
+    Service = {
+      Type = "oneshot";
+      ExecStart = "${pkgs.bash}/bin/bash -c 'if [ -f ~/.config/sops/secrets-env ]; then set -a; source ~/.config/sops/secrets-env; systemctl --user import-environment; fi'";
+    };
+  };
+
+  home.file.".profile".text = ''
+    if [ -f "$HOME/.config/sops/secrets-env" ]; then
+      . "$HOME/.config/sops/secrets-env"
+    fi
+  '';
 }

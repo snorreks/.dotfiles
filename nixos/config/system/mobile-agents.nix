@@ -188,10 +188,18 @@ in {
     after = ["tailscaled.service" "tailscaled-autoconnect.service" "tailscaled-set.service"];
     wants = ["tailscaled.service"];
     wantedBy = ["multi-user.target"];
+    # tailscaled.service being active does not mean its backend is ready. Retry
+    # the actual Serve command instead of leaving a cold-boot failure permanent.
+    startLimitIntervalSec = 0;
 
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
+      Restart = "on-failure";
+      RestartSec = "10s";
+      RestartSteps = 6;
+      RestartMaxDelaySec = "300s";
+      TimeoutStartSec = "30s";
       ExecStart = "${lib.getExe config.services.tailscale.package} serve --bg --https=443 http://127.0.0.1:${toString cfg.collie.port}";
       ExecStop = "${lib.getExe config.services.tailscale.package} serve --https=443 off";
     };

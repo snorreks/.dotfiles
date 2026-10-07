@@ -273,6 +273,35 @@ the operator's side of it.
 | Stage a reboot | `ns-maint stage` | no | no | no |
 | Reboot | `ns-maint reboot --yes` | no | no | **yes** |
 
+### Everyday use on the Legion
+
+The Legion is an always-on server with an optional local desktop. Its current
+`role = "server"` disables suspend and autologin. `desktop.enable = true`
+keeps the graphical login screen available; set it to `false` in
+`hosts/legion/options.nix` once the machine is remote-only. Desktop packages
+remain installed, and agent services run without Mango in either case.
+The GS65's desktop role and update aliases are unchanged.
+
+Use `nupdate` to update nixpkgs, build, and apply. Use `nswitch` to apply your
+edited dotfiles offline without updating inputs, or `nswitcho` to allow
+network downloads. All three use the same kernel check: a new kernel is staged
+for a planned reboot, while compatible changes use guarded live activation.
+After a live activation, check a fresh connection and run `nconfirm`. If you
+skip confirmation, the previous configuration is restored after 20 minutes.
+`nswitchu` is a compatibility name for `nupdate`; `nswitchu herdr` updates only
+that explicitly named input. `ns-maint` remains the lower-level maintenance
+interface described below. None of these commands automatically reboots.
+
+Herdr is for persistent terminals and agents. Use `ns-gui <command>` for GUI
+apps launched from those panes after desktop login; Zed uses it automatically.
+The launcher validates the current Mango session, forwards arguments without a
+shell, and ends the application with the desktop session. It never kills an
+existing Zed process based on a window-list guess.
+
+Collie's Serve unit owns HTTPS/443 and retries startup failures with backoff.
+The Tailscale reconciler checks drift and restarts that owner when repair is
+needed. It does not independently write the same Serve mapping.
+
 ### Why the build is a separate command
 
 `prepare` builds the exact closure for the selected host and pins it with a GC
@@ -791,29 +820,29 @@ pay per token for (batch summarisation, transcription, ComfyUI).
 
 The sleeper feature: stop grinding builds through the travel laptop.
 
-One-time key exchange, since nix runs distributed builds as the daemon user and
-cannot use Tailscale SSH:
+The GS65 keeps its private key in `~/.ssh/nixbuilder`; its Nix daemon runs as
+root and reads that file to authenticate to the Legion. Tailscale SSH on port
+22 is identity-based, so the builder uses the Legion's key-only OpenSSH listener
+on port 2222:
 
 ```console
 # on the client (gs65)
-sudo ssh-keygen -t ed25519 -N "" -f /root/.ssh/id_nixbuilder
-sudo cat /root/.ssh/id_nixbuilder.pub
+ssh-keygen -t ed25519 -N "" -f ~/.ssh/nixbuilder -C gs65-nixbuilder
+cat ~/.ssh/nixbuilder.pub
 ```
 
-Add that public key to `sshAuthorizedKeys` in `nixos/options.nix`, rebuild the
-Legion, then teach root the host key and verify:
+The public half is set as `remoteBuilder.authorizedKey` in both the GS65 client
+configuration and Legion builder configuration. Do not add it to the operator's
+`sshAuthorizedKeys`: the separate field keeps builder access independently
+revocable. The GS65 config points `remoteBuilder.sshKey` at
+`/home/sonny/.ssh/nixbuilder` for the Nix daemon. Pin the Legion host key in
+`travel.serverHostKey` and make sure `tailnetHosts` maps `legion` to its current
+Tailscale address.
+
+After both configurations are activated, verify the key-only path:
 
 ```console
-sudo ssh -i /root/.ssh/id_nixbuilder sonny@legion true
-```
-
-Finally, in `hosts/gs65/options.nix`:
-
-```nix
-remoteBuilder = {
-  enable = true;
-  hostName = "legion";   # or the 100.x address if tailnetHosts is unset
-};
+ssh -i ~/.ssh/nixbuilder -p 2222 sonny@legion true
 ```
 
 `builders-use-substitutes` is on, so the Legion pulls dependencies from the

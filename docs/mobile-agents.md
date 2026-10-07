@@ -91,12 +91,13 @@ they remain the recovery path, and nothing about Tailscale SSH is disabled.
 Collie uses neither. It is a browser on the tailnet and reaches nothing but port
 443.
 
-### Why not headless
+### Mobile access and the server role
 
-`mobileAgents.enable` is independent of `opts.headless`. The Legion stays a
-three-monitor desktop: it still autologins into mango and still sleeps when
-closed. Verified: `gs65` (which has not opted in) evaluates to a byte-identical
-`system.build.toplevel` derivation before and after this change, with
+`mobileAgents.enable` is independent of the role. The Legion currently uses
+`role = "server"`: it never suspends and Mango starts after manual login.
+`desktop.enable = false` disables the local graphical login screen once the
+machine is parked remotely. The GS65 keeps its desktop role, autologin, and
+sleep policy, with
 `ports = [22]`, `mosh.enable = false`, `linger = null`, no `moshi-hook` unit,
 no `collie` unit and no `tailscale-serve-collie` unit.
 
@@ -104,8 +105,9 @@ no `collie` unit and no `tailscale-serve-collie` unit.
 
 - **Wayland at cold boot.** With `WantedBy = default.target`, herdr starts
   before any graphical login, so it has no `WAYLAND_DISPLAY`. Agents started
-  into it *before* you log in cannot use `wl-copy` or `xdg-open`; they behave
-  normally once you are. Inherent to "reachable when nobody is at the desk".
+  into it cannot use `wl-copy` or `xdg-open` directly, even after login: the
+  running daemon keeps its original environment. On the Legion, use
+  `ns-gui <command>` to reach the active desktop; Zed does this automatically.
 - **Processes do not survive a reboot.** herdr restores workspaces, tabs, panes
   and their cwds — **not their commands** (`session.json` has no command field).
   After a reboot you get the layout back with bare shells. Interactive agents
@@ -471,10 +473,10 @@ host firewall permitting a port is not the same as the ACL allowing it.
 
 Each public half is pasted into the server's options and the private half stays
 on the client that generated it; no private key is ever created in this
-repository. `remoteBuilder.authorizedKey` is `null` until you do the exchange,
-and while it is null the remote build authenticates **as the operator** — which
-works, and means "build remotely" and "log in as me" are the same credential.
-The build warns until you give it its own key.
+repository. The GS65 builder key is configured on both ends: its public half is
+accepted by Legion, and the private half stays in `~/.ssh/nixbuilder` on the
+GS65. The server adds that key only on headless builder hosts, never on the
+client laptop.
 
 Where a tailnet is shared with other people, `COLLIE_TRUSTED_USER` is the thing
 that makes this safe, and it is not optional.

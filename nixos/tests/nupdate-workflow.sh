@@ -225,5 +225,46 @@ run_update
 assert_ne 0 "$rc" 'missing kernel metadata is an error'
 assert_not_contains "$calls" 'nh os ' 'unknown kernel never activates'
 
+_t_start "Legion applies existing dotfiles without updating inputs"
+new_fixture
+export NU_HOST=legion NU_IS_SERVER=1 NU_FLAKE="$TMP/legion" NU_BOOTED_SYSTEM="$TMP/booted-legion"
+run_update --apply --offline
+assert_eq 0 "$rc" 'offline apply succeeds'
+assert_contains "$calls" 'ns-maint prepare --offline' 'offline build uses maintenance'
+assert_not_contains "$calls" 'update-input' 'applying config keeps the lock file unchanged'
+assert_contains "$calls" 'ns-maint activate --timeout 20m' 'apply keeps guarded activation'
+
+_t_start "Legion config apply stages kernel changes instead of attempting a live switch"
+new_fixture
+export NU_HOST=legion NU_IS_SERVER=1 NU_FLAKE="$TMP/legion" NU_BOOTED_SYSTEM="$TMP/booted-legion"
+ln -sfn "$TMP/modules-b" "$TMP/candidate-legion/kernel-modules"
+run_update --apply
+assert_eq 0 "$rc" 'kernel-changing apply stages successfully'
+assert_contains "$calls" 'ns-maint stage' 'the candidate is staged'
+assert_not_contains "$calls" 'ns-maint activate' 'no incompatible live activation'
+
+_t_start "Legion can deliberately update one named input"
+new_fixture
+export NU_HOST=legion NU_IS_SERVER=1 NU_FLAKE="$TMP/legion" NU_BOOTED_SYSTEM="$TMP/booted-legion"
+run_update --input herdr
+assert_eq 0 "$rc" 'named input update succeeds'
+assert_contains "$calls" 'ns-maint prepare --update-input herdr' 'only the requested input changes'
+
+_t_start "new server options reject ambiguous or desktop use before mutation"
+new_fixture
+for args in '--apply' '--offline' '--input herdr'; do
+  read -r -a options <<<"$args"
+  run_update "${options[@]}"
+  assert_ne 0 "$rc" 'server options are not applied to Stealth'
+  assert_eq '' "$calls" 'invalid use makes no changes'
+done
+export NU_HOST=legion NU_IS_SERVER=1
+run_update --apply --input herdr
+assert_ne 0 "$rc" 'apply cannot also update an input'
+assert_eq '' "$calls" 'ambiguous request makes no changes'
+run_update --offline
+assert_ne 0 "$rc" 'offline requires apply'
+assert_eq '' "$calls" 'offline cannot update inputs'
+
 fixture_free
 summary

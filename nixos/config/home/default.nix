@@ -24,6 +24,7 @@
     ./waybar # status bar
     ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
     ./herdr.nix # herdr headless server as a supervised user service (never a shell job)
+    ./gui-session # GUI launch boundary for persistent server terminals
     ./collie.nix # Collie bridge: phone PWA over Tailscale Serve; self-gates on opts.mobileAgents.collie.enable
     ./updates # nupdate/nconfirm: local and remote upgrades
     ./travel.nix # travel laptop: host-key-pinned SSH aliases + native herdr remote; gates on opts.travel.enable

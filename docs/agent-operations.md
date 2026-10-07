@@ -62,61 +62,53 @@ tailscale serve status                         # expect: 443 still pointed at co
 
 At cold boot the server has no `WAYLAND_DISPLAY` and no session `DBUS` address,
 because nothing has run mango's autostart. Agents started before login cannot
-`wl-copy` or `xdg-open`. That is inherent to "reachable when nobody is at the
-desk".
+`wl-copy` or `xdg-open` directly. Logging in does not update the running daemon
+or its panes. On the Legion, use `ns-gui <command> [arguments...]` after desktop
+login, for example `ns-gui xdg-open .` or `ns-gui wl-copy hello`. It reads the
+current session from the user manager and runs the command in a service that
+ends with Mango. Zed uses this launcher automatically. Without a working
+desktop, the launcher refuses the request; it never restarts Herdr or kills
+an existing application to recover a window.
+
+`ns-gui --wait <command>` attaches input/output and waits for the service.
+Zed's `--wait` and `--foreground` select this mode automatically; help/version
+queries run directly. If this starts a new Zed instance, waiting includes the
+whole editor process: close the editor to finish. When opening files in an
+already running editor, the CLI waits for those files as usual.
+
+On the Legion, Home Manager keeps a running Herdr daemon during configuration
+switches (`X-SwitchMethod = keep-old`). Changed daemon settings take effect at
+its next deliberate start, rather than interrupting live agents. Its OOM policy
+is `continue`: a child killed by the kernel does not instruct systemd to stop
+all other panes. This is not protection against the daemon itself being killed.
+Run heavy validation/build commands in a separate user service with a memory
+limit, rather than letting them accumulate inside Herdr's service cgroup.
 
 ---
 
 ## 2. Credentials
 
-### CLI and service credentials
+### User-session credentials
 
-| Path | How | Scope |
-|---|---|---|
-| **Interactive fish** (default) | loaded automatically at shell startup | shell and every CLI child |
-| **Systemd credential** | `LoadCredential=NAME:path` | that service and its children |
-| **Refresh or scoped command** | `ns-secrets` / `ns-secrets run <cmd>` | current shell / one child |
+`env-secrets.nix` names the SOPS credentials. `variables.nix` exposes the ready
+session credentials through Home Manager's `home.sessionVariables`; the SOPS
+`secrets-env` template and `sops-import-environment.service` also make them
+available to login shells and the user systemd manager. Fish and Herdr panes
+inherit the environment without running a credential loader for each key.
 
-```console
-ns-secrets check                 # readiness; names and booleans only
-ns-secrets                       # refresh credentials in an already-open shell
-ns-secrets run pi                # run ONE command with them, scoped
-~/.config/agent-ops/secret-env --exec curl https://api.example.com
-```
+This is intentionally a session-wide environment: shells and their child
+processes inherit the credentials. `sessionVariable = false` still excludes
+specific credentials such as `ANTHROPIC_API_KEY`.
 
-Fresh interactive fish shells export all ready credentials marked
-`sessionVariable = true`, including provider keys and aliases such as `GH_TOKEN`.
-Any agent or tool launched from that shell inherits them. Missing or malformed
-credentials are skipped so opening a shell never depends on successful decryption;
-use `ns-secrets check` to diagnose them. Existing shells can run `ns-secrets` to
-refresh. Secret bytes are assigned as data, never sourced or evaluated.
+System services continue to use `LoadCredential=NAME:path` for service-only
+secrets. `~/.config/agent-ops/secret-env` remains available to system checks and
+service scripts that need values-as-data access.
 
-### What was removed, and why it was wrong
+### System-side values-as-data helper
 
-The `secrets-env` sops **template** (`export NAME="value"`) and the
-`sops-import-environment` unit are gone, along with the `$(cat /run/secrets/X)`
-entries in `home.sessionVariables` and the broken fish parser.
-
-Concretely, each of those was a way for a value to become code or to reach the
-wrong process:
-
-* **a value containing `"` ended the quoting** and the remainder was parsed as
-  shell; a value containing `$(…)` or a backtick was **executed**;
-* **a multiline value could not survive** — the template was line-oriented, and
-  `$(cat …)` in `profile.d` was a syntax error;
-* **`systemctl --user import-environment`** put every credential into the
-  environment of *every* process in the user session;
-* **neither ran when there was nobody logging in**, which with `linger` is the
-  normal state of this machine — so the mechanism meant to supply the agents'
-  credentials could not run there at all;
-* the fish parser's pattern was `'^export\s+([^=]+)=(.*)\$'` — `\$` is a literal
-  dollar, so it demanded that every secret line **end with a `$`** and matched
-  essentially nothing.
-
-### Newline and NUL semantics
-
-`secret-env.sh` reads bytes and hands them to `execve`. There is no code path in
-which a value is parsed.
+`secret-env.sh` reads bytes and hands them to `execve` for the commands that use
+that helper. Its byte-handling guarantees apply to those calls, not to the
+session environment path above.
 
 * A value is the file's bytes with **at most one trailing newline** removed.
 * **Embedded newlines are preserved.** A PEM key is three lines; it round-trips.
@@ -129,17 +121,8 @@ which a value is parsed.
 `ANTHROPIC_API_KEY` is `sessionVariable = false` and stays that way. When a
 Claude Agent SDK client finds it in its environment it bills a $0-credit console
 account **instead of** using the Pro OAuth token — silently: the requests
-succeed, the console balance does not move. It is excluded from every ambient
-path and reachable only by asking for it by name.
-
-### `herdr.agentCredentials.enable` — leave it off unless you test it
-
-Hands the session credentials to `herdr.service` via `LoadCredential=`.
-**Default: false.** `LoadCredential` is mandatory: if sops-nix has not decrypted,
-the herdr unit fails to start and the machine loses every agent it has. Trading
-"the agents start blind" for "the agents do not start" on an unattended box is
-the worse of the two. Turn it on only after
-`systemctl --user status sops-nix` has been observed to succeed on every boot.
+succeed, the console balance does not move. It remains excluded from the
+session environment through `sessionVariable = false`.
 
 ---
 

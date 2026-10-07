@@ -87,8 +87,21 @@ AI-agent-heavy dev workflow.
 ## NixOS Management
 
 ```fish
-# Rebuild and switch
-nswitchu           # nixos-rebuild switch --flake ~/.dotfiles/nixos#legion
+# Update the current machine (only nixpkgs)
+nupdate
+
+# Legion: apply edited dotfiles without changing inputs
+nswitch           # offline build; guarded activation or staged kernel update
+nswitcho          # same, allowing downloads
+nconfirm          # confirm after checking a fresh connection, if activated live
+
+# GS65: update the Legion over Tailscale
+nupdate legion
+nconfirm legion
+
+# Legion compatibility name: update nixpkgs, or one named input
+nswitchu          # same as nupdate
+nswitchu herdr     # deliberate Herdr input update; does not restart live agents
 
 # Update flake inputs — SCOPED, and always through a reviewable branch
 #

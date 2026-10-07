@@ -7,7 +7,7 @@
 }: {
   # Configure greetd to enable the display manager
   services.greetd = {
-    enable = true;
+    enable = opts.desktop.enable;
     settings =
       {
         # Set up the default session to run the defined command as the specified user

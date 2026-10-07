@@ -111,6 +111,11 @@ rec {
   # starts one unattended.
   role = null;
 
+  # Local graphical login is independent of always-on server policy. Keep it
+  # available while using the Legion at a desk; disable it once parked remotely.
+  # This controls greetd, not installation of the desktop packages.
+  desktop.enable = true;
+
   # ── Headless / server mode (compatibility boolean) ─────────────────────────
   # The EFFECTIVE answer to "is this host reached only remotely?", and the
   # boolean every module reads. `headless` is kept as an input, not the switch:

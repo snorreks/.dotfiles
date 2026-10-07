@@ -9,12 +9,18 @@ expected_txid=
 on_legion=0
 report=0
 capture=
+apply_only=0
+offline=0
+input=nixpkgs
+input_given=0
 trap '[[ -z "$capture" ]] || rm -f -- "$capture"' EXIT
 
 fail() { printf 'nupdate: %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 Usage: nupdate [local|legion|both]
+       nupdate --apply [--offline]   (server: apply existing dotfiles)
+       nupdate --input <name>       (server: update one named input)
        nconfirm [local|legion]
 
 Update only nixpkgs, build, then apply. Kernel changes are staged for a
@@ -28,6 +34,13 @@ while [[ $# -gt 0 ]]; do
     --confirm) action=confirm ;;
     --on-legion) on_legion=1 ;;
     --report) report=1 ;;
+    --apply) apply_only=1 ;;
+    --offline) offline=1 ;;
+    --input)
+      [[ $# -ge 2 && "$input_given" == 0 ]] || fail '--input needs one input name'
+      input="$2"; input_given=1; shift
+      [[ "$input" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail 'invalid flake input name'
+      ;;
     --txid)
       [[ $# -ge 2 ]] || fail '--txid needs a transaction ID'
       expected_txid="$2"; shift
@@ -47,6 +60,12 @@ done
 NU_MAINT="${NU_MAINT:-/run/current-system/sw/bin/ns-maint}"
 NU_BOOTED_SYSTEM="${NU_BOOTED_SYSTEM:-/run/booted-system}"
 [[ "$(hostname -s)" == "$NU_HOST" ]] || fail 'this updater was built for a different host'
+if [[ "$apply_only" == 1 || "$offline" == 1 || "$input_given" == 1 ]]; then
+  [[ "$NU_IS_SERVER" == 1 && "$action" == update && "$target" == local && "$on_legion" == 0 ]] \
+    || fail '--apply, --offline and --input are for local server maintenance only'
+  [[ "$apply_only" == 0 || "$input_given" == 0 ]] || fail '--apply cannot update an input'
+  [[ "$offline" == 0 || "$apply_only" == 1 ]] || fail '--offline requires --apply'
+fi
 if [[ "$on_legion" -eq 1 ]]; then
   [[ "$NU_HOST" == legion && "$NU_IS_SERVER" == 1 ]] || fail 'remote command must run on Legion in server mode'
   target=local
@@ -84,10 +103,20 @@ confirm_local() {
 }
 
 update_local() {
-  printf 'Updating %s: nixpkgs, using %s\n' "$NU_HOST" "$NU_FLAKE"
+  if [[ "$apply_only" == 1 ]]; then
+    printf 'Applying %s configuration from %s (inputs unchanged)\n' "$NU_HOST" "$NU_FLAKE"
+  else
+    printf 'Updating %s: %s, using %s\n' "$NU_HOST" "$input" "$NU_FLAKE"
+  fi
   local candidate state txid armed_txid='' line
   if [[ "$NU_IS_SERVER" == 1 ]]; then
-    sudo "$NU_MAINT" prepare --update-input nixpkgs
+    local -a prepare_args=()
+    if [[ "$apply_only" == 1 ]]; then
+      [[ "$offline" == 0 ]] || prepare_args+=(--offline)
+    else
+      prepare_args+=(--update-input "$input")
+    fi
+    sudo "$NU_MAINT" prepare "${prepare_args[@]}"
     state="$(read_state)"
     candidate="$(jq -er '.candidate' <<<"$state")"
     if kernel_changed "$candidate"; then

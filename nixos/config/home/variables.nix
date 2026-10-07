@@ -1,32 +1,30 @@
 # nixos/config/home/variables.nix
 # A safe and minimal set of environment variables to ensure a stable session.
-#
-# 🔴 SECRETS ARE NOT HERE, AND WERE.
-#
-# Every credential in env-secrets.nix used to be added to home.sessionVariables
-# as `"$(cat /run/secrets/NAME)"`. That is a shell substitution inside the
-# profile.d fragment Home Manager generates, which means:
-#
-#   * a value containing a newline produced a SYNTAX ERROR in every login shell
-#     — a PEM key did not merely arrive truncated, it broke the shell;
-#   * the value was re-parsed as shell text on every login, on every session,
-#     which is a standing invitation for a value to be code;
-#   * and it did not run at all when there was nobody logging in — which, with
-#     `linger`, is the normal state of this machine. The whole point of boot
-#     lifetime is that the agents come up with nobody at the desk, so the one
-#     mechanism meant to supply their credentials was the one mechanism that
-#     cannot run there.
-#
-# Credentials now reach a process one of two ways, neither of which is "ambient
-# session environment": `secret-env.sh --exec CMD` (values-as-data, via
-# execve) or systemd LoadCredential on the specific unit that needs them. See
-# config/home/sops.nix and config/home/scripts/scripts/secret-env.sh.
 {
   config,
   lib,
   opts,
   ...
-}: {
+}: let
+  envSecrets = import ./env-secrets.nix;
+
+  # Make SOPS-decrypted credentials available in the user's shell environment.
+  # The generated values are command substitutions that read the decrypted
+  # files at shell startup; the secret values themselves stay out of the Nix store.
+  secretSessionVariables = builtins.listToAttrs (
+    lib.concatMap (
+      s:
+        if s.sessionVariable or true
+        then
+          map (varName: {
+            name = varName;
+            value = "$(cat ${config.sops.secrets.${s.name}.path})";
+          }) ([s.name] ++ (s.aliases or []))
+        else []
+    )
+    envSecrets
+  );
+in {
   # Home Manager handles adding these to your PATH automatically.
   home.sessionPath = [
     "$HOME/.dotfiles/bin"
@@ -90,5 +88,6 @@
       XDG_SCREENSHOTS_DIR = "$HOME/Pictures/Screenshots";
       PI_HARNESS_CACHE_ENABLED = "0";
       PI_HARNESS_STORMBREAKER_ENABLED = "0";
-    };
+    }
+    // secretSessionVariables;
 }

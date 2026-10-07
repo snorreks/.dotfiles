@@ -24,7 +24,7 @@
 #   * headless=true, mobileAgents=false — a server nobody reaches from a phone.
 #     The agents must still start at boot, or "unattended" means "attended, by
 #     someone who walks over and logs in".
-#   * headless=false, mobileAgents=true — today's Legion. A three-monitor
+#   * headless=false, mobileAgents=true — a three-monitor
 #     desktop that also answers a phone. Already worked; must keep working.
 #
 # ── Why pure ─────────────────────────────────────────────────────────────────
@@ -52,7 +52,8 @@ let
   # After=. `graphical-session.target` is REMOVED rather than merely not
   # required: with lingering there may never be a graphical session, and a unit
   # ordered after a target that is never pulled in simply never starts.
-  # Everything else (credential decryption) is kept in both cases.
+  # SOPS decryption and importing the generated session environment are kept
+  # in both cases, including on a lingering headless user manager.
   afterUnits = headless: mobileAgents:
     (
       if headless || mobileAgents
@@ -61,6 +62,7 @@ let
     )
     ++ [
       "sops-nix.service"
+      "sops-import-environment.service"
     ];
 
   # A unit that starts at boot has no WAYLAND_DISPLAY, no DBUS_SESSION_BUS_ADDRESS

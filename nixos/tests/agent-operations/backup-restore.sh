@@ -274,7 +274,7 @@ else
 		"import $MEDIA_EVAL_FILE { nixpkgs = $nixpkgs_expression; }" 2>&1)"
 	assert_eq '0' "$?" 'the typed-module union proof evaluates within 60s'
 	assert_contains "$out" '"stateDir":"/var/lib/custom-backup"' 'stateDir propagates to the backup unit'
-	assert_contains "$out" '"operatorSources":["/operator/selected","/var/lib/agent-ops/media-exports","/var/lib/syncthing"]' 'operator sources keep their selection and gain integrations once'
+	assert_contains "$out" '"operatorSources":["/operator/selected","/var/lib/agent-ops/media-exports","/var/lib/syncthing","/etc/jellyfin"]' 'operator sources keep their selection and gain all integrations once'
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

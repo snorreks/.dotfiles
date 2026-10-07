@@ -17,11 +17,8 @@
 function claude -d "Launch claude inside herdr (shared workspace, numbered tabs). claudeb = plain claude"
     # Already in a herdr-managed pane → that pane IS herdr; run claude here.
     if set -q HERDR_ENV
-        # Default ready selection excludes ANTHROPIC_API_KEY (session=false),
-        # preserving Claude's native OAuth/auth-store path.
-        set -l executable (command -s claude); or return 127
-        __ns_agent_exec "$executable" $argv
-        return $status
+        command claude $argv
+        return
     end
     __herdr_launch_agent claude $argv
 end

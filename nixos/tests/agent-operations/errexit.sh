@@ -49,7 +49,7 @@ assert_eq 'yes' "$saw_errexit" 'the prologue under test really does enable errex
 # ═══════════════════════════════════════════════════════════════════════════
 _t_start "every production script disables errexit itself"
 # These four are the ones built by writeShellApplication. secret-env.sh is
-# included: a `ns-secrets check` that aborted on the first absent credential
+# included: a readiness check that aborted on the first absent credential
 # would report nothing at all, which is the one thing it exists to do.
 for script in "$BACKUP" "$HEALTH" "$DAEMON_ROOTS" "$SECRET_ENV"; do
 	name="$(basename "$script")"

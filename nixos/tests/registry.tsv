@@ -33,6 +33,7 @@ maintenance	tests/nupdate-workflow.sh	fast	shell
 maintenance	tests/kill-switch-targets.sh	fast	shell
 maintenance	tests/disk-cleanup-safety.sh	fast	shell
 
+server-foundation	tests/gui-session.sh	fast	shell
 server-foundation	tests/server-foundation/role-policy.sh	eval	shell
 server-foundation	tests/server-foundation/boot-health.sh	fast	shell
 server-foundation	tests/server-foundation/tailscale-reconcile.sh	fast	shell

@@ -53,6 +53,7 @@
 #   NM_TS_SERVE_HTTPS_PORT   port already serving HTTPS (0 = do not manage)
 #   NM_TS_SERVE_TARGET_PORT  loopback port to proxy to (0 = do not manage)
 #   NM_TS_SERVE_HOST         the .ts.net name to verify  ("" = skip the check)
+#   NM_TS_SERVE_UNIT         sole mapping owner unit   ("" = use the CLI)
 #   NM_TS_WAIT_SECONDS       how long to wait for auth   (default 0)
 set -o nounset -o pipefail
 
@@ -64,6 +65,7 @@ set -o nounset -o pipefail
 : "${NM_TS_SERVE_TARGET_PORT:=0}"
 : "${NM_TS_SERVE_HOST:=}"
 : "${NM_TS_WAIT_SECONDS:=0}"
+: "${NM_TS_SERVE_UNIT:=}"
 
 log() { printf 'tailscale-reconcile: %s\n' "$*"; }
 warn() { printf 'tailscale-reconcile: %s\n' "$*" >&2; }
@@ -118,7 +120,11 @@ case "$state" in
   Running)
     :
     ;;
-  NeedsLogin | NoState)
+  NoState)
+    fail "tailscaled has not finished loading its backend (BackendState=NoState).
+         This is a startup condition; the timer and Serve unit retry."
+    ;;
+  NeedsLogin)
     fail "the node is not authenticated (BackendState=$state).
          A browser login is required — run 'tailscale up' from a console, or
          use the admin console. This job will not: an unattended 'tailscale up'
@@ -194,7 +200,14 @@ if [[ "$NM_TS_SERVE_HTTPS_PORT" -gt 0 && "$NM_TS_SERVE_TARGET_PORT" -gt 0 ]]; th
     log "Serve already maps HTTPS/$NM_TS_SERVE_HTTPS_PORT -> 127.0.0.1:$NM_TS_SERVE_TARGET_PORT; leaving it untouched"
   else
     log "Serve mapping for HTTPS/$NM_TS_SERVE_HTTPS_PORT is missing or points elsewhere; restoring it"
-    if "$NM_TAILSCALE" serve --bg --https="$NM_TS_SERVE_HTTPS_PORT" "http://127.0.0.1:$NM_TS_SERVE_TARGET_PORT"; then
+    restore_serve() {
+      if [[ -n "$NM_TS_SERVE_UNIT" ]]; then
+        systemctl restart "$NM_TS_SERVE_UNIT"
+      else
+        "$NM_TAILSCALE" serve --bg --https="$NM_TS_SERVE_HTTPS_PORT" "http://127.0.0.1:$NM_TS_SERVE_TARGET_PORT"
+      fi
+    }
+    if restore_serve; then
       log "Serve restored"
     else
       # A certificate that has not been issued yet is the expected transient
