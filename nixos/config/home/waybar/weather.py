@@ -31,7 +31,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 SECRET_NAME = "OPENWEATHER_API_KEY"
-SECRETS_ENV = Path.home() / ".config/sops/secrets-env"
+SECRETS_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sops-nix/secrets"
 API = "https://api.openweathermap.org/data/2.5"
 
 FETCH_INTERVAL = 10 * 60
@@ -97,24 +97,16 @@ def local_tz():
 
 
 def secret(name):
-    """env → sops secrets-env (waybar can start before the env import ran)."""
+    """Read the environment, then the decrypted SOPS file before env import."""
     value = (os.environ.get(name) or "").strip()
     # home.sessionVariables exposes these as literal "$(cat /run/secrets/…)"
     # shell substitutions; an unexpanded one means we must read the file.
     if value and not value.startswith("$("):
         return value
     try:
-        text = SECRETS_ENV.read_text()
+        return (SECRETS_DIR / name).read_text().strip() or None
     except OSError:
         return None
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("export "):
-            line = line[len("export "):]
-        key, sep, val = line.partition("=")
-        if sep and key.strip() == name:
-            return val.strip().strip('"').strip("'") or None
-    return None
 
 
 # ── fetching ───────────────────────────────────────────────────────────────

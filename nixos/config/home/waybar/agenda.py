@@ -36,7 +36,7 @@ import icalendar
 import recurring_ical_events
 
 SECRET_NAME = "GOOGLE_CALENDAR_ICS_URL"
-SECRETS_ENV = Path.home() / ".config/sops/secrets-env"
+SECRETS_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "sops-nix/secrets"
 
 FETCH_INTERVAL = 15 * 60  # ICS re-download
 RETRY_INTERVAL = 60       # after a failed download
@@ -90,25 +90,16 @@ def local_tz():
 
 
 def secret(name):
-    """env → sops secrets-env. waybar can start before sops-import-environment
-    has run, so the file is the reliable path, not the inherited environment."""
+    """Read the environment, then the decrypted SOPS file before env import."""
     value = (os.environ.get(name) or "").strip()
     # home.sessionVariables exposes these as literal "$(cat /run/secrets/…)"
     # shell substitutions; an unexpanded one means we must read the file.
     if value and not value.startswith("$("):
         return value
     try:
-        text = SECRETS_ENV.read_text()
+        return (SECRETS_DIR / name).read_text().strip() or None
     except OSError:
         return None
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("export "):
-            line = line[len("export "):]
-        key, sep, val = line.partition("=")
-        if sep and key.strip() == name:
-            return val.strip().strip('"').strip("'") or None
-    return None
 
 
 # ── fetching ───────────────────────────────────────────────────────────────

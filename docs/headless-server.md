@@ -831,8 +831,9 @@ ssh-keygen -t ed25519 -N "" -f ~/.ssh/nixbuilder -C gs65-nixbuilder
 cat ~/.ssh/nixbuilder.pub
 ```
 
-The public half is set as `remoteBuilder.authorizedKey` in both the GS65 client
-configuration and Legion builder configuration. Do not add it to the operator's
+Before activation, replace the existing `remoteBuilder.authorizedKey` values in
+both `nixos/hosts/gs65/options.nix` and `nixos/hosts/legion/options.nix` with the
+output of `cat ~/.ssh/nixbuilder.pub` on the GS65. Do not add it to the operator's
 `sshAuthorizedKeys`: the separate field keeps builder access independently
 revocable. The GS65 config points `remoteBuilder.sshKey` at
 `/home/sonny/.ssh/nixbuilder` for the Nix daemon. Pin the Legion host key in

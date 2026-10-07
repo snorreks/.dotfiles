@@ -8,6 +8,12 @@
 }: let
   protonServers = import ./vpn/proton-servers.nix;
   envSecrets = import ./env-secrets.nix;
+  sessionVariableNames = lib.concatMap (
+    s:
+      if s.sessionVariable or true
+      then [s.name] ++ (s.aliases or [])
+      else []
+  ) envSecrets;
 
   mkVpnTemplate = server: {
     name = "vpn-${server.name}.conf";
@@ -99,8 +105,9 @@ in {
 
     templates = {
       # Make SOPS credentials available to login shells and the user manager.
-      # Only session credentials are exported; the decrypted values are written
-      # by sops-nix into this runtime template, not into the Nix store.
+      # Only session credentials are exported. Read their files as data, never
+      # substitute plaintext into shell syntax. The sentinel preserves trailing
+      # newlines that command substitution would otherwise strip.
       "secrets-env" = {
         path = "${config.home.homeDirectory}/.config/sops/secrets-env";
         content =
@@ -110,7 +117,9 @@ in {
               then
                 lib.concatMapStrings (
                   varName: ''
-                    export ${varName}="${config.sops.placeholder.${s.name}}"
+                    if ${varName}="$(${pkgs.coreutils}/bin/cat -- ${lib.escapeShellArg config.sops.secrets.${s.name}.path} && printf '.')"; then
+                      export ${varName}="''${${varName}%.}"
+                    fi
                   ''
                 ) ([s.name] ++ (s.aliases or []))
               else ""
@@ -164,11 +173,15 @@ in {
     Unit = {
       Description = "Import SOPS decrypted secrets into systemd user environment";
       After = ["sops-nix.service"];
+      PartOf = ["sops-nix.service"];
     };
     Install.WantedBy = ["default.target"];
     Service = {
       Type = "oneshot";
-      ExecStart = "${pkgs.bash}/bin/bash -c 'if [ -f ~/.config/sops/secrets-env ]; then set -a; source ~/.config/sops/secrets-env; systemctl --user import-environment; fi'";
+      RemainAfterExit = true;
+      # Import by name: systemctl's whole-environment import skips values with
+      # control characters, including newlines.
+      ExecStart = "${pkgs.bash}/bin/bash -c 'if [ -f ~/.config/sops/secrets-env ]; then source ~/.config/sops/secrets-env; ${pkgs.systemd}/bin/systemctl --user import-environment ${lib.concatStringsSep " " sessionVariableNames}; fi'";
     };
   };
 
