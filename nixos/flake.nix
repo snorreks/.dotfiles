@@ -127,7 +127,7 @@
     # To move it: `collie-bump <version>`, which rewrites this line, locks, and
     # prints both numbers. See docs/mobile-agents.md §2.
     collie = {
-      url = "github:AltanS/collie/v1.15.3";
+      url = "github:AltanS/collie/v1.18.1";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
