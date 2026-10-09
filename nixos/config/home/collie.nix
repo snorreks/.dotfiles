@@ -66,8 +66,8 @@
   enable = opts.mobileAgents.enable && cfg.enable;
 
   # The pinned flake package. Wraps the upstream release tarball; see the
-  # `collie` input comment in flake.nix for why it reports 1.15.0 at tag
-  # v1.15.3.
+  # `collie` input comment in flake.nix for why the version trails the pinned
+  # tag by one release, and `collie-bump` for how to move it.
   #
   # `inputs` is a specialArg threaded through flake.nix (home-manager
   # extraSpecialArgs), the same one herdr.nix resolves herdr from.

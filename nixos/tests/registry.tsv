@@ -45,5 +45,6 @@ media-travel	tests/media-travel/run.sh	eval	lane
 agent-operations	tests/agent-operations/run.sh	eval	lane
 
 repo-contracts	tests/update-dotfiles-scope.sh	fast	shell
+repo-contracts	tests/collie-bump.sh	fast	shell
 repo-contracts	config/home/sys-daemon	fast	cargo
 repo-contracts	tests/check-registry.sh	fast	shell

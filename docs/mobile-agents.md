@@ -235,16 +235,47 @@ install, so it declines and names the package manager. Verified on this
 derivation — `collie update --check` reports
 `✓ package updates come from your package manager`.
 
-To move the version, edit the tag in `flake.nix` and `nix flake lock`. Note that
-a collie bump changes `ExecStart`, so Home Manager will restart the bridge on
-the next activation. That is intended, and it is harmless: the phone's
-websocket reconnects on its own.
+To move the version, use `collie-bump` (below). It rewrites the tag, runs
+`nix flake lock`, and prints what the tag actually delivers.
 
-> The flake package at tag `v1.15.3` reports `1.15.0`. That is upstream's
-> `packaging/nix/sources.json` running one release behind, not a packaging
-> mistake — the package wraps the published, hashed release tarball rather than
-> building from source. The manifest in that file is what proves the payload is
-> genuine.
+```fish
+collie-bump --current        # what is pinned, and what payload that tag wraps
+collie-bump --check 1.18.1   # resolve a version, change nothing
+collie-bump 1.18.1           # pin it; prompts first
+collie-bump 1.18.1 --yes     # same, for a phone over SSH
+collie-bump --latest         # newest upstream tag, then pin it
+```
+
+It never builds and never activates. Those stay the separate `ns-maint`
+steps, because a bump that also activated would collapse the 20-minute
+dead-man window into the same command that edits the file.
+
+Note that a collie bump changes `ExecStart`, so Home Manager will restart the
+bridge on the next activation. That is intended, and it is harmless: the
+phone's websocket reconnects on its own.
+
+> ### 🔴 The tag and the payload are different numbers
+>
+> `collie-bump` prints two versions on purpose, because the tag you pin is
+> **not** the version you get. Upstream's `packaging/nix/sources.json` is
+> written by the release workflow from the *previous* release's manifest, so it
+> trails by one at every tag:
+>
+> | pinned tag | payload it wraps |
+> | --- | --- |
+> | v1.15.3 | v1.15.0 |
+> | v1.16.2 | v1.16.1 |
+> | v1.18.1 | v1.17.2 |
+>
+> So `collie version` reporting `1.15.0` under the v1.15.3 pin is **accurate**:
+> the derivation really does fetch the v1.15.0 tarball. The package wraps the
+> published, hashed release tarball rather than building from source, and that
+> manifest is what proves the payload is genuine — but it also means the binary
+> is one release behind the tag, permanently, until upstream fixes the ordering.
+>
+> Judge a bump by the **payload** line. `collie-bump` also re-reads the payload
+> from the revision that actually landed in `flake.lock` and warns when the two
+> disagree, which means the tag moved under you mid-bump.
 
 ### The two gates
 

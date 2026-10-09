@@ -111,13 +111,21 @@
     # autoPatchelfHook rewrites the ELF interpreter in, and nothing about the
     # payload itself.
     #
-    # ⚠ The package WRAPS a published release tarball; it never builds from
-    # source (`bun install` needs the network, a Nix derivation has none). Its
-    # version comes from `packaging/nix/sources.json` at that tag, and upstream
-    # refreshes that file ONE RELEASE LATE: at tag v1.15.3 it still names
-    # v1.15.0. So `collie version` under this input reports 1.15.0+<rev>. That
-    # is upstream's lag, not a Nix packaging mistake — the manifest and hashes
-    # in that file are what prove the payload is the real signed release.
+    # ⚠ THE PINNED TAG IS NOT THE VERSION YOU GET. The package WRAPS a
+    # published release tarball; it never builds from source (`bun install` needs
+    # the network, a Nix derivation has none). Its version comes from
+    # `packaging/nix/sources.json` AT THAT TAG, and upstream writes that file
+    # from the PREVIOUS release's manifest — so it trails by one at every tag:
+    # v1.15.3 names v1.15.0, v1.16.2 names v1.16.1, v1.18.1 names v1.17.2.
+    #
+    # So `collie version` reporting 1.15.0 under the v1.15.3 pin is ACCURATE:
+    # the derivation really does fetch the v1.15.0 tarball, and the hashes in
+    # that file are what prove the payload is the genuine signed release. This
+    # is upstream's release ordering, not a Nix packaging mistake — and only
+    # upstream can close it. Judge a bump by the PAYLOAD, not by the tag.
+    #
+    # To move it: `collie-bump <version>`, which rewrites this line, locks, and
+    # prints both numbers. See docs/mobile-agents.md §2.
     collie = {
       url = "github:AltanS/collie/v1.15.3";
       inputs.nixpkgs.follows = "nixpkgs";
