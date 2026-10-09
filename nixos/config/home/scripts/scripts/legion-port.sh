@@ -85,19 +85,19 @@ alive() {
 
 # Local port, and remote [host:]port.
 parse_spec() {
-  local spec="$1" local remote
+  local spec="$1" lp remote
   if [[ "$spec" == *:* ]]; then
-    local="${spec%%:*}"
+    lp="${spec%%:*}"
     remote="${spec#*:}"
   else
-    local="$spec"
+    lp="$spec"
     remote="$spec"
   fi
-  [[ "$local" =~ ^[0-9]+$ ]] || die "'$spec': port must be a number"
+  [[ "$lp" =~ ^[0-9]+$ ]] || die "'$spec': port must be a number"
   [[ "$remote" =~ ^[0-9]+$ ]] || die "'$spec': remote port must be a number"
-  ((local >= 1 && local <= 65535 && remote >= 1 && remote <= 65535)) ||
+  ((lp >= 1 && lp <= 65535 && remote >= 1 && remote <= 65535)) ||
     die "'$spec': port out of range"
-  printf '%s %s' "$local" "$remote"
+  printf '%s %s' "$lp" "$remote"
 }
 
 cmd_list() {
@@ -128,8 +128,9 @@ cmd_list() {
 }
 
 cmd_stop() {
-  local spec="${1:-$default_port}" file pid lport rport
-  read -r lport rport < <(parse_spec "$spec")
+  local spec="${1:-$default_port}" file pid lport rport ports
+  ports=$(parse_spec "$spec") || return $?
+  read -r lport rport <<< "$ports"
   file="$state_dir/$lport.port"
   if [[ ! -f "$file" ]]; then
     note "no forward recorded for $lport"
@@ -170,14 +171,15 @@ cmd_open() {
 }
 
 cmd_forward() {
-  local spec="${1:-$default_port}" bind="127.0.0.1" lan=0
+  local spec="${1:-$default_port}" bind="127.0.0.1" lan=0 ports
   shift || true
   [[ "${1:-}" == "--lan" ]] && {
     lan=1
     bind="0.0.0.0"
   }
 
-  read -r lport rport < <(parse_spec "$spec")
+  ports=$(parse_spec "$spec") || return $?
+  read -r lport rport <<< "$ports"
   mkdir -p "$state_dir"
 
   # "Already forwarded" is answered from our own record, and "something else is
@@ -216,8 +218,8 @@ cmd_forward() {
     "$host" >/dev/null 2>&1 &
   local pid=$!
 
-  local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.3
     alive "$pid" || break
     is_listening "$lport" && break

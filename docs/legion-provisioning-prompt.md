@@ -69,7 +69,8 @@ Produce a short briefing containing:
      WITHOUT sudo (/nix/store, ~/.local, ~/.cache). Identify reclaim candidates.
      Do NOT delete anything. Do NOT run `nix-collect-garbage`.
   b. Confirm the verified state above still holds; flag anything that changed.
-  c. `sudo ns-maint status` if reachable → [[NEEDS ROOT]] if not.
+  c. [[NEEDS ROOT]] Give the human `sudo ns-maint status` to run and request
+     its output. Do not run it yourself during Phase 0.
   d. One paragraph on where a media library should live, given the real numbers,
      with the tradeoff of /srv versus an external disk.
 STOP after Phase 0 and wait for the human. Do not proceed to Phase 1.
@@ -104,7 +105,12 @@ Present the plan. Do not execute Phase 1 without explicit approval.
 ─── PHASE 2+ — only after the human approves Phase 1 ────────────────────
 One step at a time. After each: verify it, report the evidence, then continue.
 If a step fails, STOP and report. Never paper over a failure.
-Never leave the machine half-configured at the end of your run.
+If earlier steps changed the machine, roll back to the prior state and verify
+the rollback when safe and permitted by the hard rules. Otherwise, explicitly
+hand off the partial state for human recovery: list completed changes, the
+failed step, current state, and exact recovery commands (mark privileged ones
+[[NEEDS ROOT]]). Do not continue provisioning or claim completion; leave no
+partial configuration without a documented recovery handoff.
 
 ─── OUT OF SCOPE THIS RUN ────────────────────────────────────────────────
 - Agent-to-agent task passing between this box and the MSI. Not configured, not
