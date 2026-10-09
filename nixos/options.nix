@@ -60,8 +60,17 @@ rec {
     # Run the tray applet too (battery indicator only — not needed for settings).
     tray = true;
     # Bind the thumb wheel to volume in mango (see config/home/mango.nix).
-    # NOTE: this consumes horizontal scroll globally — see the comment there.
     thumbWheelVolume = true;
+    # Modifier the volume axisbinds require. Default SUPER, and NOT NONE:
+    # mango matches an axisbind on (key mode, modifiers, direction) only —
+    # src/input/pointer.c `handle_cursor_axis()` never looks at which device
+    # produced the axis, and `device_rule` cannot scope axisbinds either. With
+    # NONE the bind therefore also ate the trackpad's horizontal (and slightly
+    # diagonal) two-finger scrolls and turned them into volume steps. The
+    # modifier is the only lever mango exposes; with one required, horizontal
+    # scrolling without it reaches apps again. Set NONE to opt back into the
+    # unconditional bind (volume from every scroll wheel, no app scrolling).
+    thumbWheelModifier = "SUPER";
     # Invert the thumb wheel's left/right direction in mango's axisbinds.
     # The same physical flick yields opposite REL_HWHEEL signs depending on how
     # the mouse is paired: over the Bolt receiver hid-logitech-hidpp translates
