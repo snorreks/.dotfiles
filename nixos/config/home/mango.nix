@@ -10,6 +10,19 @@
   c = config.lib.stylix.colors;
   theme = import ./theme/lib.nix {inherit lib;};
   mango = config.wayland.windowManager.mango;
+  # Modifier required by the thumb-wheel volume axisbinds (see opts.mouse).
+  # Validated here rather than left to mango: a typo like "Super" or "SUPERR"
+  # would still parse into config lines, but every one of them would fail to
+  # match at runtime and only mango's log would say so.
+  thumbWheelModifier = opts.mouse.thumbWheelModifier;
+  # lib.splitString, not lib.split: the latter compiles its separator as a regex.
+  thumbWheelModifierOk = lib.all (
+    m: lib.elem m ["NONE" "SUPER" "CTRL" "ALT" "SHIFT"]
+  ) (lib.splitString "+" thumbWheelModifier);
+  thumbWheelMod =
+    if thumbWheelModifierOk
+    then thumbWheelModifier
+    else throw "opts.mouse.thumbWheelModifier = ${thumbWheelModifier}: expected NONE or a '+'-joined combination of SUPER/CTRL/ALT/SHIFT";
   # The current upstream HM module still emits the removed exec-once key.
   # Keep its session activation semantics, but launch with the new exec_once.
   autostart = pkgs.writeShellScript "mango-autostart" ''
@@ -200,154 +213,165 @@ in {
       ];
 
       # ── Keybindings ───────────────────────────────────────────────────
-      bind = [
-        # System & Window Controls
-        "SUPER,r,reload_config"
-        "SUPER,q,killclient"
-        "SUPER+SHIFT,q,killclient, force"
-        "SUPER,space,togglefloating"
-        "ALT,backslash,togglefloating"
-        "SUPER,Escape,spawn,swaylock-runtime"
-        "SUPER+SHIFT,Escape,spawn,shutdown-script"
-        "SUPER+SHIFT,Delete,spawn,kill-switch --light"
-        "SUPER+CTRL+SHIFT,code:119,spawn,kill-switch --full"
-        "SUPER+CTRL+ALT,code:119,spawn,kill-switch --reboot"
-        "SUPER,k,spawn,toggle_keyboard"
+      bind =
+        [
+          # System & Window Controls
+          "SUPER,r,reload_config"
+          "SUPER,q,killclient"
+          "SUPER+SHIFT,q,killclient, force"
+          "SUPER,space,togglefloating"
+          "ALT,backslash,togglefloating"
+          "SUPER,Escape,spawn,swaylock-runtime"
+          "SUPER+SHIFT,Escape,spawn,shutdown-script"
+          "SUPER+SHIFT,Delete,spawn,kill-switch --light"
+          "SUPER+CTRL+SHIFT,code:119,spawn,kill-switch --full"
+          "SUPER+CTRL+ALT,code:119,spawn,kill-switch --reboot"
+          "SUPER,k,spawn,toggle_keyboard"
 
-        # Terminals & Launchers
-        "CTRL+SHIFT,Delete,spawn,foot-clear-scrollback"
-        "SUPER,Return,spawn,${opts.defaultTerminal}"
-        "CTRL,Return,spawn_shell,FISH_NO_GREETING=1 ${opts.defaultTerminal} --title=float_${opts.defaultTerminal}"
-        "SUPER+SHIFT,Return,spawn,${opts.defaultTerminal}-big"
-        "SUPER,c,spawn_shell,wlrctl toplevel focus app_id:zed || ${opts.defaultEditor} &"
-        "SUPER,x,spawn,${opts.defaultBrowser}"
-        "SUPER,h,spawn,hs-skip"
+          # Terminals & Launchers
+          "CTRL+SHIFT,Delete,spawn,foot-clear-scrollback"
+          "SUPER,Return,spawn,${opts.defaultTerminal}"
+          # "CTRL,Return,spawn_shell,FISH_NO_GREETING=1 ${opts.defaultTerminal} --title=float_${opts.defaultTerminal}"
+          "SUPER+SHIFT,Return,spawn,${opts.defaultTerminal}-big"
+          "SUPER,c,spawn_shell,wlrctl toplevel focus app_id:zed || ${opts.defaultEditor} &"
+          "SUPER,x,spawn,${opts.defaultBrowser}"
+          "SUPER,h,spawn,hs-skip"
 
-        # Applications & Tools
-        "SUPER,F1,spawn,show-keybinds"
-        "SUPER,e,spawn,${opts.defaultFileManager}"
-        "SUPER,y,spawn,${opts.defaultTerminal} yazi"
-        "SUPER,m,spawn,spotify"
-        "SUPER,a,spawn,fuzzel-drun"
-        "SUPER,v,spawn,fuzzel-clipboard"
-        "SUPER,w,spawn,wallpaper-picker"
-        # One panel, three views (dashboard/qml/Drawer.qml). SUPER+D lands on
-        # whichever view was last open; SUPER+I goes straight to notifications
-        # so the old swaync control-center reflex still has a key. Once either
-        # is up, the tab bar switches between Home / System / Notifications.
-        "SUPER,d,spawn,qs -c dashboard ipc call dash toggle"
-        "SUPER,i,spawn,qs -c dashboard ipc call dash open notifications"
-        "SUPER+SHIFT,i,spawn,qs -c dashboard ipc call dash dnd"
-        "SUPER+SHIFT,b,spawn,pkill -SIGUSR1 .waybar-wrapped"
+          # Applications & Tools
+          "SUPER,F1,spawn,show-keybinds"
+          "SUPER,e,spawn,${opts.defaultFileManager}"
+          "SUPER,y,spawn,${opts.defaultTerminal} yazi"
+          "SUPER,m,spawn,spotify"
+          "SUPER,a,spawn,fuzzel-drun"
+          "SUPER,v,spawn,fuzzel-clipboard"
+          "SUPER,w,spawn,wallpaper-picker"
+          # One panel, three views (dashboard/qml/Drawer.qml). SUPER+D lands on
+          # whichever view was last open; SUPER+I goes straight to notifications
+          # so the old swaync control-center reflex still has a key. Once either
+          # is up, the tab bar switches between Home / System / Notifications.
+          "SUPER,d,spawn,qs -c dashboard ipc call dash toggle"
+          "SUPER,i,spawn,qs -c dashboard ipc call dash open notifications"
+          "SUPER+SHIFT,i,spawn,qs -c dashboard ipc call dash dnd"
+          "SUPER+SHIFT,b,spawn,pkill -SIGUSR1 .waybar-wrapped"
 
-        # Declarative App Launches
-        "SUPER+SHIFT,d,spawn,discord"
-        "SUPER,s,restore_minimized"
-        "SUPER+SHIFT,s,minimized"
-        "SUPER+SHIFT,F2,spawn,SoundWireServer"
+          # Declarative App Launches
+          "SUPER+SHIFT,d,spawn,discord"
+          "SUPER,s,restore_minimized"
+          "SUPER+SHIFT,s,minimized"
+          "SUPER+SHIFT,F2,spawn,SoundWireServer"
 
-        # Bluetooth Popup
-        "SUPER,b,spawn,${opts.defaultTerminal} --title=bluetuith-popup --window-size-chars=80x24 bluetuith"
+          # Bluetooth Popup
+          "SUPER,b,spawn,${opts.defaultTerminal} --title=bluetuith-popup --window-size-chars=80x24 bluetuith"
 
-        # Fullscreen / Layout Toggles
-        "SUPER,f,togglemaximizescreen"
-        "SUPER+SHIFT,f,togglefullscreen"
-        "ALT,f,togglefakefullscreen"
-        "SUPER,n,exchange_stack_client,next"
-        "SUPER,j,switch_layout"
+          # Fullscreen / Layout Toggles
+          "SUPER,f,togglemaximizescreen"
+          "SUPER+SHIFT,f,togglefullscreen"
+          "ALT,f,togglefakefullscreen"
+          "SUPER,n,exchange_stack_client,next"
+          "SUPER,j,switch_layout"
 
-        # Screen Share / Monitor Rotations
-        "SUPER+SHIFT,r,spawn,wlr-randr --output DP-1 --transform normal"
-        "SUPER+SHIFT+ALT,r,spawn,wlr-randr --output DP-1 --transform 90"
+          # Screen Share / Monitor Rotations
+          "SUPER+SHIFT,r,spawn,wlr-randr --output DP-1 --transform normal"
+          "SUPER+SHIFT+ALT,r,spawn,wlr-randr --output DP-1 --transform 90"
 
-        # Screen Capture
-        "SUPER,Print,spawn,screenshot-area"
-        "SUPER+SHIFT,Print,spawn,screenshot-annotate"
-        "NONE,Print,spawn,screenshot-clipboard"
-        "CTRL,Print,spawn,screenshot-output"
-        "SUPER+CTRL,Print,spawn,screenshot-freeze"
-        "SUPER+ALT,Print,spawn,screenshot-gif-start"
+          # Screen Capture
+          "SUPER,Print,spawn,screenshot-area"
+          "SUPER+SHIFT,Print,spawn,screenshot-annotate"
+          "NONE,Print,spawn,screenshot-clipboard"
+          "CTRL,Print,spawn,screenshot-output"
+          "SUPER+CTRL,Print,spawn,screenshot-freeze"
+          "SUPER+ALT,Print,spawn,screenshot-gif-start"
 
-        # Window Focus Navigation
-        "ALT,Left,focusdir,left"
-        "ALT,Right,focusdir,right"
-        "ALT,Up,focusdir,up"
-        "ALT,Down,focusdir,down"
+          # Window Focus Navigation
+          "ALT,Left,focusdir,left"
+          "ALT,Right,focusdir,right"
+          "ALT,Up,focusdir,up"
+          "ALT,Down,focusdir,down"
 
-        # Swap Windows
-        "SUPER+SHIFT,Up,exchange_client,up"
-        "SUPER+SHIFT,Down,exchange_client,down"
-        "SUPER+SHIFT,Left,exchange_client,left"
-        "SUPER+SHIFT,Right,exchange_client,right"
+          # Swap Windows
+          "SUPER+SHIFT,Up,exchange_client,up"
+          "SUPER+SHIFT,Down,exchange_client,down"
+          "SUPER+SHIFT,Left,exchange_client,left"
+          "SUPER+SHIFT,Right,exchange_client,right"
 
-        # Move Window by Pixels (floating)
-        "CTRL+SHIFT,Up,movewin,+0,-50"
-        "CTRL+SHIFT,Down,movewin,+0,+50"
-        "CTRL+SHIFT,Left,movewin,-50,+0"
-        "CTRL+SHIFT,Right,movewin,+50,+0"
+          # Move Window by Pixels (floating)
+          "CTRL+SHIFT,Up,movewin,+0,-50"
+          "CTRL+SHIFT,Down,movewin,+0,+50"
+          "CTRL+SHIFT,Left,movewin,-50,+0"
+          "CTRL+SHIFT,Right,movewin,+50,+0"
 
-        # Resize Window
-        "CTRL+ALT,Up,resizewin,+0,-50"
-        "CTRL+ALT,Down,resizewin,+0,+50"
-        "CTRL+ALT,Left,resizewin,-50,+0"
-        "CTRL+ALT,Right,resizewin,+50,+0"
+          # Resize Window
+          "CTRL+ALT,Up,resizewin,+0,-50"
+          "CTRL+ALT,Down,resizewin,+0,+50"
+          "CTRL+ALT,Left,resizewin,-50,+0"
+          "CTRL+ALT,Right,resizewin,+50,+0"
 
-        # Tag Switching
-        "SUPER,1,view,1,0"
-        "SUPER,2,view,2,0"
-        "SUPER,3,view,3,0"
-        "SUPER,4,view,4,0"
-        "SUPER,5,view,5,0"
-        "SUPER,6,view,6,0"
-        "SUPER,7,view,7,0"
-        "SUPER,8,view,8,0"
-        "SUPER,9,view,9,0"
+          # Tag Switching
+          "SUPER,1,view,1,0"
+          "SUPER,2,view,2,0"
+          "SUPER,3,view,3,0"
+          "SUPER,4,view,4,0"
+          "SUPER,5,view,5,0"
+          "SUPER,6,view,6,0"
+          "SUPER,7,view,7,0"
+          "SUPER,8,view,8,0"
+          "SUPER,9,view,9,0"
 
-        # Tag Navigation
-        "SUPER,Left,viewtoleft,0"
-        "SUPER,Right,viewtoright,0"
+          # Tag Navigation
+          "SUPER,Left,viewtoleft,0"
+          "SUPER,Right,viewtoright,0"
 
-        # Monitor Navigation
-        "SUPER+CTRL,Left,focusmon,left"
-        "SUPER+CTRL,Right,focusmon,right"
+          # Monitor Navigation
+          "SUPER+CTRL,Left,focusmon,left"
+          "SUPER+CTRL,Right,focusmon,right"
 
-        # Move Window to Adjacent Monitor
-        "SUPER+ALT,Left,tagmon,left,1"
-        "SUPER+ALT,Right,tagmon,right,1"
+          # Move Window to Adjacent Monitor
+          "SUPER+ALT,Left,tagmon,left,1"
+          "SUPER+ALT,Right,tagmon,right,1"
 
-        # Move Window to Tag & Follow
-        "SUPER+ALT,1,tag,1,0"
-        "SUPER+ALT,2,tag,2,0"
-        "SUPER+ALT,3,tag,3,0"
-        "SUPER+ALT,4,tag,4,0"
-        "SUPER+ALT,5,tag,5,0"
-        "SUPER+ALT,6,tag,6,0"
-        "SUPER+ALT,7,tag,7,0"
-        "SUPER+ALT,8,tag,8,0"
-        "SUPER+ALT,9,tag,9,0"
+          # Move Window to Tag & Follow
+          "SUPER+ALT,1,tag,1,0"
+          "SUPER+ALT,2,tag,2,0"
+          "SUPER+ALT,3,tag,3,0"
+          "SUPER+ALT,4,tag,4,0"
+          "SUPER+ALT,5,tag,5,0"
+          "SUPER+ALT,6,tag,6,0"
+          "SUPER+ALT,7,tag,7,0"
+          "SUPER+ALT,8,tag,8,0"
+          "SUPER+ALT,9,tag,9,0"
 
-        # Move Window to Tag Silently
-        "SUPER+CTRL+SHIFT,Left,tagtoleft,0"
-        "SUPER+CTRL+SHIFT,Right,tagtoright,0"
+          # Move Window to Tag Silently
+          "SUPER+CTRL+SHIFT,Left,tagtoleft,0"
+          "SUPER+CTRL+SHIFT,Right,tagtoright,0"
 
-        # Dropdown Scratchpad Terminal
-        "ALT,z,toggle_named_scratchpad,${opts.defaultTerminal}-scratchpad,none,${opts.defaultTerminal} --app-id=${opts.defaultTerminal}-scratchpad"
+          # Dropdown Scratchpad Terminal
+          "ALT,z,toggle_named_scratchpad,${opts.defaultTerminal}-scratchpad,none,${opts.defaultTerminal} --app-id=${opts.defaultTerminal}-scratchpad"
 
-        # Audio / Media Keys
-        "NONE,XF86AudioRaiseVolume,spawn,wpctl set-volume @DEFAULT_SINK@ 2%+"
-        "NONE,XF86AudioLowerVolume,spawn,wpctl set-volume @DEFAULT_SINK@ 2%-"
-        "NONE,XF86AudioMute,spawn,wpctl set-mute @DEFAULT_SINK@ toggle"
-        "SHIFT,XF86AudioMute,spawn,wpctl set-mute @DEFAULT_SOURCE@ toggle"
-        "NONE,XF86AudioNext,spawn,playerctl next"
-        "NONE,XF86AudioPrev,spawn,playerctl previous"
-        "NONE,XF86AudioPlay,spawn,playerctl play-pause"
+          # Audio / Media Keys
+          "NONE,XF86AudioRaiseVolume,spawn,wpctl set-volume @DEFAULT_SINK@ 2%+"
+          "NONE,XF86AudioLowerVolume,spawn,wpctl set-volume @DEFAULT_SINK@ 2%-"
+          "NONE,XF86AudioMute,spawn,wpctl set-mute @DEFAULT_SINK@ toggle"
+          "SHIFT,XF86AudioMute,spawn,wpctl set-mute @DEFAULT_SOURCE@ toggle"
+          "NONE,XF86AudioNext,spawn,playerctl next"
+          "NONE,XF86AudioPrev,spawn,playerctl previous"
+          "NONE,XF86AudioPlay,spawn,playerctl play-pause"
 
-        # Hardware Brightness
-        "NONE,XF86MonBrightnessUp,spawn,brightnessctl s +2%"
-        "SHIFT,XF86MonBrightnessUp,spawn,brightnessctl s 100%"
-        "NONE,XF86MonBrightnessDown,spawn,brightnessctl s 2%-"
-        "SHIFT,XF86MonBrightnessDown,spawn,brightnessctl s 1%"
-      ];
+          # Hardware Brightness
+          "NONE,XF86MonBrightnessUp,spawn,brightnessctl s +2%"
+          "SHIFT,XF86MonBrightnessUp,spawn,brightnessctl s 100%"
+          "NONE,XF86MonBrightnessDown,spawn,brightnessctl s 2%-"
+          "SHIFT,XF86MonBrightnessDown,spawn,brightnessctl s 1%"
+        ]
+        # A terminal whose shell runs on the Legion: everything typed and shown
+        # belongs to the server, foot is only rendering a remote PTY.
+        #
+        # Gated on opts.travel.enable rather than added unconditionally: the
+        # `legion` alias is generated by config/home/travel.nix only where that
+        # option is on, and on the Legion itself this key would point a server at
+        # itself.
+        ++ lib.optionals opts.travel.enable [
+          "SUPER+ALT,Return,spawn,legion-term"
+        ];
 
       # ── Mouse Bindings ────────────────────────────────────────────────
       mousebind = [
@@ -370,9 +394,18 @@ in {
           "ALT,DOWN,spawn,brightnessctl s 2%-"
         ]
         # Thumb wheel → volume. A matched axisbind is CONSUMED (mango returns
-        # without forwarding to the client), so with the NONE modifier this
-        # takes horizontal scroll away from every app. That is the intent here;
-        # to keep horizontal scrolling, change NONE to a modifier such as SUPER.
+        # without forwarding to the client), so whatever modifier is required
+        # here is also the price of horizontal scrolling: without it, apps get
+        # the event; with it, the wheel drives the volume instead.
+        #
+        # The modifier is NOT optional in practice. mango matches an axisbind on
+        # (key mode, modifiers, direction) and nothing else — handle_cursor_axis()
+        # in src/input/pointer.c never checks which device sent the axis, and
+        # `device_rule` has no axisbind scoping. An unconditional (NONE) bind
+        # therefore cannot tell the MX Master's thumb wheel (REL_HWHEEL) from the
+        # trackpad's two-finger or slightly diagonal scroll, and both moved the
+        # volume. opts.mouse.thumbWheelModifier (default SUPER) is the only
+        # discriminator mango offers; see the note in options.nix.
         ++ lib.optionals opts.mouse.thumbWheelVolume (
           # 5% steps rather than the 2% used by the media keys: mango throttles
           # axis binds to one per `axis_bind_apply_timeout` (default 100ms), so
@@ -384,8 +417,9 @@ in {
           # (see the note in options.nix). Either way: thumb wheel toward the
           # right raises the volume.
           let
-            up = dir: "NONE,${dir},spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%+";
-            down = dir: "NONE,${dir},spawn,wpctl set-volume @DEFAULT_SINK@ 5%-";
+            mod = thumbWheelMod;
+            up = dir: "${mod},${dir},spawn,wpctl set-volume -l 1.0 @DEFAULT_SINK@ 5%+";
+            down = dir: "${mod},${dir},spawn,wpctl set-volume @DEFAULT_SINK@ 5%-";
           in
             if opts.mouse.thumbWheelInvert
             then [(up "LEFT") (down "RIGHT")]

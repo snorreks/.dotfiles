@@ -68,11 +68,37 @@
   # disabling it on one machine says nothing about the other.
   #
   # The partition is not repartitioned and ntfs3 stays available by hand.
+  #
+  # `force` is here because this volume came up DIRTY, which is a different
+  # problem from Fast Startup and is not fixed by turning Fast Startup off:
+  #
+  #   ntfs3(nvme1n1p4): volume is dirty and "force" flag is not set!
+  #
+  # ntfs3 refuses an `rw` mount of a volume that Windows did not unmount
+  # cleanly. Disabling Fast Startup only prevents the flag being set again; it
+  # does not clear a flag that is already on disk. The mount therefore failed
+  # on every boot from 2026-10-06 onward, under two different kernels, and
+  # because `switch-to-configuration test` exits 4 on ANY failed unit, that
+  # one non-critical mount also blocked every activation.
+  #
+  # `force` lets ntfs3 replay its journal, which is its designed recovery path
+  # for an unclean unmount — ntfs3 is a journaling driver, so replaying the
+  # journal is how this filesystem is meant to recover. It is NOT a full
+  # consistency check, and the kernel itself recommends chkdsk. So:
+  #
+  #   * This repairs a dirty-but-consistent volume, which is the common case.
+  #   * If the volume has STRUCTURAL damage, `force` will not fix it and
+  #     Windows `chkdsk X: /f` is the repair. Symptom of that: ntfs3 logs
+  #     errors during the forced mount, or the volume stays dirty afterwards.
+  #
+  # Once Windows has run chkdsk (or a forced mount has cleared the flag and
+  # Windows has subsequently shut down cleanly), this option can be dropped.
   fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/EA6CD3956CD35AC1";
     fsType = "ntfs3";
     options = [
       "rw"
+      "force"
       "uid=1000"
       "gid=100"
       "nofail"
