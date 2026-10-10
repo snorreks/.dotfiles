@@ -97,35 +97,28 @@
     # config/system/media/jellyfin.nix, next to the assertion.
     allowSharedNtfsLibrary = true;
 
-    # Stays false until the wizard has created a real administrator. While it
-    # is false, ANY tailnet device reaching the port could claim the admin
-    # account, so publication is refused on purpose.
+    # TRUE, and honestly so. Verified on 2026-10-10, not assumed:
+    #   - /etc/jellyfin/system.xml has IsStartupWizardCompleted = true, which
+    #     is the marker jellyfin-private-config reads;
+    #   - jellyfin-private-config check /etc/jellyfin PASSES — the same
+    #     command the serve unit runs before mapping 8443;
+    #   - the jellyfin user can list the library (28 entries).
+    # The administrator account exists; the wizard is finished.
     #
-    # This is independent of `publishServe` below, and both must be true
-    # before 8443 is mapped. Neither is set early to "get the wizard going":
-    # jellyfin binds loopback only, so the wizard is reachable at
-    # http://127.0.0.1:8096 with publication entirely off.
-    setupCompleted = false;
+    # Before the wizard, this stayed false and jellyfin still ran, because it
+    # binds loopback only. See the comment on publishServe below for why the
+    # two options exist separately.
+    setupCompleted = true;
 
-    # Off ONLY for the initial bootstrap, and ONLY because of a real module
-    # defect that this branch also fixes.
+    # TRUE, together with setupCompleted above. The module asserts these two
+    # can never disagree in the direction that publishes early, so they are
+    # flipped as a pair.
     #
-    # tailscale-serve-jellyfin is `wantedBy = multi-user.target`, so it runs
-    # during every activation. While the wizard is unfinished it exits 1 —
-    # correctly refusing to publish — but ns-maint reads any failed unit as
-    # activation failure (rc 4) and rolls the entire switch back, INCLUDING
-    # jellyfin.service. The configuration needed to REACH the wizard was
-    # therefore the configuration that could not activate until the wizard
-    # was done: a deadlock with no honest flag value, because the second
-    # gate (jellyfin-private-config check, which requires Jellyfin's own
-    # IsStartupWizardCompleted marker) fails either way until the wizard has
-    # genuinely run.
-    #
-    # Fixed on this branch by gating the whole unit on publishServe, so
-    # "not ready to publish" means "no unit" instead of "a failing unit".
-    # Turn this on in the same commit that sets setupCompleted = true for
-    # real.
-    publishServe = false;
+    # This is what maps https://legion.tailf24d02.ts.net:8443 at the Jellyfin
+    # on 127.0.0.1:8096. Collie keeps 443; these are separate units writing to
+    # the same Tailscale Serve config, so `tailscale serve status` should show
+    # BOTH afterwards, and collie must stay up. Worth reading, not assuming.
+    publishServe = true;
 
     # OFF. The discrete NVIDIA GPU is for Ollama inference on this box, and
     # jellyfin.nix refuses "nvenc" by assertion for exactly that reason.
