@@ -97,10 +97,35 @@
     # config/system/media/jellyfin.nix, next to the assertion.
     allowSharedNtfsLibrary = true;
 
-    # Stays false until the first-run wizard has created an administrator.
-    # While it is false, Jellyfin refuses publication on purpose: any device
-    # on the tailnet that reaches the port could claim the admin account.
+    # Stays false until the wizard has created a real administrator. While it
+    # is false, ANY tailnet device reaching the port could claim the admin
+    # account, so publication is refused on purpose.
+    #
+    # This is independent of `publishServe` below, and both must be true
+    # before 8443 is mapped. Neither is set early to "get the wizard going":
+    # jellyfin binds loopback only, so the wizard is reachable at
+    # http://127.0.0.1:8096 with publication entirely off.
     setupCompleted = false;
+
+    # Off ONLY for the initial bootstrap, and ONLY because of a real module
+    # defect that this branch also fixes.
+    #
+    # tailscale-serve-jellyfin is `wantedBy = multi-user.target`, so it runs
+    # during every activation. While the wizard is unfinished it exits 1 —
+    # correctly refusing to publish — but ns-maint reads any failed unit as
+    # activation failure (rc 4) and rolls the entire switch back, INCLUDING
+    # jellyfin.service. The configuration needed to REACH the wizard was
+    # therefore the configuration that could not activate until the wizard
+    # was done: a deadlock with no honest flag value, because the second
+    # gate (jellyfin-private-config check, which requires Jellyfin's own
+    # IsStartupWizardCompleted marker) fails either way until the wizard has
+    # genuinely run.
+    #
+    # Fixed on this branch by gating the whole unit on publishServe, so
+    # "not ready to publish" means "no unit" instead of "a failing unit".
+    # Turn this on in the same commit that sets setupCompleted = true for
+    # real.
+    publishServe = false;
 
     # OFF. The discrete NVIDIA GPU is for Ollama inference on this box, and
     # jellyfin.nix refuses "nvenc" by assertion for exactly that reason.

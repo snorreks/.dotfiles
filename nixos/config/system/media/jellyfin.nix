@@ -273,7 +273,36 @@ in {
   '');
 
   # ── Private publication ────────────────────────────────────────────────────
-  systemd.services.tailscale-serve-jellyfin = lib.mkIf cfg.enable {
+  # Gated on publishServe as well as enable.
+  #
+  # This unit is wantedBy = multi-user.target, so it runs on EVERY activation.
+  # Its ExecStart refuses — by design — while the wizard is unfinished:
+  #
+  #   if ! ${if cfg.setupCompleted then "true" else "false"}; then exit 1; fi
+  #   runuser -u jellyfin -- … jellyfin-private-config check /etc/jellyfin
+  #
+  # A refusal is a CORRECT outcome, but a unit that exits non-zero is a
+  # FAILED unit, and a failed unit during activation aborts the whole switch
+  # and rolls back every other unit — including jellyfin.service itself. The
+  # host then never reaches a state where the wizard could be run, because the
+  # configuration required to reach the wizard is the configuration that
+  # refuses to activate. That is a deadlock, not a guardrail.
+  #
+  # Neither flag value escaped it, which is why this is a separate option and
+  # not a nudge to one of the existing two:
+  #   - setupCompleted = true skips the first gate, but the second gate
+  #     (jellyfin-private-config check) requires Jellyfin's own
+  #     IsStartupWizardCompleted marker in /etc/jellyfin/system.xml, which
+  #     does not exist until the wizard has genuinely run. Verified by running
+  #     that check directly: it prints "Jellyfin private configuration
+  #     refused" and exits 1.
+  #   - setupCompleted = false exits at the first gate.
+  #
+  # "Not ready to publish" is therefore expressed as "the unit does not
+  # exist", which is an honest off and leaves activation successful. The
+  # assertion below keeps publishServe and setupCompleted from ever
+  # disagreeing in the direction that publishes early.
+  systemd.services.tailscale-serve-jellyfin = lib.mkIf (cfg.enable && cfg.publishServe) {
     description = "Jellyfin on the node's private Tailscale HTTPS endpoint (${toString cfg.serveHttpsPort})";
     after = [
       "tailscaled.service"
@@ -353,6 +382,40 @@ in {
       assertion = builtins.isInt cfg.port && cfg.port > 0 && cfg.port <= 65535
         && !(builtins.elem cfg.port [22 2222 443]);
       message = "media.jellyfin.port must not claim SSH or tailnet HTTPS";
+    }
+    {
+      # Publishing is a two-key operation, and this is the key that matters.
+      #
+      # The serve script refuses on its own when setupCompleted is false, and
+      # jellyfin-private-config refuses again unless Jellyfin's OWN
+      # IsStartupWizardCompleted marker is set. So this is defence in depth
+      # on top of two runtime checks, not the only thing standing between an
+      # empty Jellyfin and the tailnet.
+      #
+      # It exists so the mistake is a FAILED BUILD, which is reviewable,
+      # rather than a unit that fails on every boot until someone reads a
+      # journal. Turning publication on before an administrator exists would
+      # let any tailnet device claim the admin account.
+      assertion = !(cfg.publishServe && !cfg.setupCompleted);
+      message = ''
+        media: opts.media.jellyfin.publishServe is true but setupCompleted
+        is false.
+
+        Publication would map ${toString cfg.serveHttpsPort} at a Jellyfin with
+        no administrator account. Until the wizard has been run, any device on
+        the tailnet that reaches the port can claim the admin account.
+
+        Complete the wizard first:
+          1. Keep publishServe = false and activate. Jellyfin binds loopback
+             only, so the wizard is reachable at http://127.0.0.1:8096 on the
+             host itself, or through `ssh -L 8096:127.0.0.1:8096 <host>`.
+          2. Create the administrator in that wizard.
+          3. Set setupCompleted = true and publishServe = true together.
+
+        Do not work around this by setting setupCompleted = true first: the
+        serve script's second gate reads Jellyfin's own marker and refuses
+        anyway, which fails the unit and rolls back the whole activation.
+      '';
     }
     {
       # Two Serve units claiming one port is a race, not a conflict error.

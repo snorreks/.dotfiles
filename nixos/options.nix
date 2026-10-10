@@ -545,6 +545,26 @@ rec {
       # was completed, and false produces a build warning saying so.
       setupCompleted = false;
 
+      # Whether to RUN the tailscale-serve-jellyfin unit that maps the private
+      # HTTPS endpoint (serveHttpsPort) at 127.0.0.1:port.
+      #
+      # SEPARATE from setupCompleted on purpose. That option records a fact
+      # about the world (an administrator exists); this one records an intent
+      # (map the port). Conflating them made the bootstrap impossible: the
+      # serve unit exits 1 while the wizard is unfinished, and because it is
+      # wantedBy = multi-user.target it runs on EVERY activation, so a
+      # correct refusal failed the whole switch and rolled back jellyfin
+      # itself. Neither flag value escaped it — the second gate
+      # (jellyfin-private-config check, requiring Jellyfin's own
+      # IsStartupWizardCompleted marker) fails until the wizard has genuinely
+      # run. See config/system/media/jellyfin.nix.
+      #
+      # With this false the unit does not exist, which is an honest "off"
+      # rather than a permanent failure. An assertion below requires
+      # setupCompleted whenever this is true, so the two can never disagree
+      # in the direction that publishes early.
+      publishServe = true;
+
       hardwareAcceleration = {
         # OFF until jellyfin-accel-check passes on this machine. See
         # jellyfin.nix for why "it has an Intel GPU" is not sufficient.
