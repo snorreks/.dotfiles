@@ -68,6 +68,11 @@
   # disabling it on one machine says nothing about the other.
   #
   # The partition is not repartitioned and ntfs3 stays available by hand.
+  #
+  # Rely on normal ntfs3 journal recovery; do not persist the `force` option.
+  # If recovery reports structural errors or the volume remains dirty and
+  # refuses to mount, run `chkdsk X: /f` separately in Windows (using this
+  # volume's drive letter), then shut Windows down cleanly before retrying.
   fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/EA6CD3956CD35AC1";
     fsType = "ntfs3";

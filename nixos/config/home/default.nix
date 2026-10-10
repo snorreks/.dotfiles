@@ -10,6 +10,7 @@
 
   imports = [
     ./sops.nix # Dedicated secrets & environment config
+    ./ssh.nix # SINGLE owner of ~/.ssh/config; other modules add stanzas via extraConfig
     ./bat.nix # better cat command
     ./btop.nix # resources monitor
     ./git.nix # version control

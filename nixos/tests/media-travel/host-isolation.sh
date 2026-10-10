@@ -190,9 +190,36 @@ if grep -v '^[[:space:]]*#' <<<"$ts_block" | grep -q "IdentityFile"; then
 else
   ok "the Tailscale alias offers no key file (a key cannot authenticate there)"
 fi
-# The host key is not provisioned yet, and the generated config says so
-# loudly rather than presenting an unpinned alias as a working one.
-if grep -q "NOT PINNED" <<<"$sshcfg"; then
+# The pin's state must be reported HONESTLY, and WHICH honest report is correct
+# depends on whether the operator has provisioned travel.serverHostKey. So both
+# are asserted, branching on the pin itself rather than on a snapshot.
+#
+# This previously asserted ONLY the unpinned shape, which made it start failing
+# the moment the key was provisioned — and a test that can only ever describe
+# one state is not a check of honesty, it is a check of a moment. `pinnedKnownHosts`
+# is written by travel.nix only when the pin exists, so it IS the pinned state,
+# read from the same evaluation rather than re-derived here.
+#
+# Both branches matter: reporting a provisioned pin as missing sends the
+# operator to re-run a provisioning step that is already done, which is the same
+# class of quiet falsehood as the unpinned case it was written to catch.
+if [[ -n "$(json '.pinnedKnownHosts' "$GS65")" ]]; then
+  # Matched as a UserKnownHostsFile LINE rather than the exact former string:
+  # it is now emitted once, globally, listing BOTH files — the live
+  # ~/.ssh/known_hosts and the travel pin — because dropping the first would
+  # break github.com and gitlab.com lookups.
+  if grep -q "StrictHostKeyChecking yes" <<<"$sshcfg" &&
+    grep -qE '^UserKnownHostsFile .*ssh/known_hosts\.travel' <<<"$sshcfg"; then
+    ok "the provisioned host key is pinned and the pinned branch is in force"
+  else
+    bad "known_hosts.travel exists but the generated config does not pin" "$sshcfg"
+  fi
+  if grep -q "NOT PINNED" <<<"$sshcfg"; then
+    bad "a provisioned pin is still reported as missing" "the operator is told to redo a step already done"
+  else
+    ok "a provisioned pin is not reported as missing"
+  fi
+elif grep -q "NOT PINNED" <<<"$sshcfg"; then
   ok "the missing host-key pin is reported in the generated config"
 else
   bad "no visible warning about the missing host-key pin" "an unpinned alias looks identical to a pinned one"
