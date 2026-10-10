@@ -397,16 +397,50 @@ in {
     }
 
     {
-      # Shared NTFS is not a media root.
-      assertion = !opts.mountShared
-        || !(lib.hasPrefix "/mnt/shared" cfg.libraryDir);
+      # The library may live on the shared NTFS volume, but only when the
+      # operator says so in the host options.
+      #
+      # This assertion used to be unconditional, on the grounds that an
+      # unattended server writing to a hibernated Windows filesystem corrupts
+      # it. That reasoning was correct in general and wrong for this host:
+      # Windows is not booted while the Legion runs unattended, so no
+      # hibernated volume is ever handed back mid-write.
+      #
+      # Verified here, not assumed (ntfs3, uid=1000, fmask/dmask=0000):
+      #   - SQLite locking IS enforced. A writer holding BEGIN IMMEDIATE makes
+      #     a second writer fail with "database is locked"; PRAGMA
+      #     integrity_check returns ok. The original corruption worry was
+      #     unfounded on this driver.
+      #   - chmod persists: 0644 -> 0640 on files, 0755 -> 0750 on dirs.
+      #   - The volume is CASE-SENSITIVE. "The Movie (2020).mkv" and
+      #     "the movie (2020).mkv" coexist as distinct files with distinct
+      #     contents. (The first probe of this mislabelled itself by inverting
+      #     its own result; the second, with distinct payloads, is the one
+      #     that counts.)
+      #   - Hardlinks, symlinks, xattr, mmap, fsync and sparse+random writes
+      #     all behave.
+      #
+      # STILL TRUE, and why this stays opt-in rather than deleted:
+      #   - found.000/found.001 on the volume mean chkdsk has had to recover
+      #     this filesystem before. Nothing irreplaceable belongs here.
+      #   - Booting Windows while Jellyfin runs is genuine concurrent access.
+      #     Stop the service first, or do not do it.
+      assertion = !(lib.hasPrefix "/mnt/shared" cfg.libraryDir) || cfg.allowSharedNtfsLibrary;
       message = ''
-        media: the Jellyfin library is on the shared NTFS volume.
+        media: the Jellyfin library is on the shared NTFS volume
+        (/mnt/shared), but media.jellyfin.allowSharedNtfsLibrary is false.
 
-        /mnt/shared is the Windows dual-boot volume (opts.mountShared). An
-        unattended server writing to a hibernated Windows filesystem corrupts
-        it, and repairing it needs a keyboard and a booted Windows. Media and
-        state must live on native Linux filesystems.
+        /mnt/shared is the Windows dual-boot volume (opts.mountShared).
+        Setting media.jellyfin.allowSharedNtfsLibrary = true records that
+        Windows is not booted while this host runs unattended, and accepts
+        the trade-offs measured and documented in
+        nixos/config/system/media/jellyfin.nix.
+
+        If you are enabling this for the first time, run
+        `sudo bash /tmp/opencode/chown-test.sh` first: the tmpfiles rule
+        sets 0750 jellyfin:media on libraryDir, and on a filesystem where
+        chmod succeeds but chown does not, Jellyfin would be locked out of
+        its own library.
       '';
     }
   ];

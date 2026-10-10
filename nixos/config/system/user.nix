@@ -62,6 +62,15 @@
           "adbusers" # Allows access to the Android Debug Bridge
           "gamemode"
           "i2c" # DDC/CI monitor control (ddcutil)
+          # The media library is owned jellyfin:media at 0750 (see
+          # config/system/media/jellyfin.nix). Without this, the human who
+          # administers the box cannot list or traverse /mnt/shared/Videos
+          # from Linux at all — Windows is unaffected, since NTFS does not
+          # honour POSIX modes, which makes the loss easy to miss until a
+          # script or file manager silently fails. The group is declared
+          # unconditionally by config/system/media/jellyfin.nix, so this is
+          # valid on gs65 too.
+          "media"
           # "libvirtd"      # Uncomment if managing virtual machines
           # "tss"           # Uncomment if using TPM software
         ];

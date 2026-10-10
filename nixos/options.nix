@@ -496,14 +496,34 @@ rec {
     jellyfin = {
       enable = false;
 
-      # Native Linux paths only. /mnt/shared (the Windows NTFS volume,
-      # opts.mountShared) is refused by an assertion below rather than merely
-      # discouraged: an unattended server writing to a hibernated Windows
-      # filesystem corrupts it, and repairing that needs a keyboard.
+      # dataDir and configDir MUST stay on native Linux filesystems: they hold
+      # jellyfin.db and the wizard state, and they are what
+      # agentOps.backup.additionalSources exports.
       dataDir = "/var/lib/jellyfin";
       configDir = "/etc/jellyfin";
+
+      # The media library itself. /mnt/shared/Videos is the Windows dual-boot
+      # NTFS volume (opts.mountShared) and REQUIRES
+      # allowSharedNtfsLibrary = true below. What was measured on this host,
+      # and what does not go away, is in
+      # config/system/media/jellyfin.nix next to the assertion.
       libraryDir = "/srv/media/library";
       downloadDir = "/srv/media/download";
+
+      # Acknowledge that libraryDir is on the dual-boot NTFS volume.
+      #
+      # The original refusal said an unattended server writing to a hibernated
+      # Windows filesystem corrupts it. On THIS host Windows is not booted
+      # while the Legion runs unattended, so that specific path does not apply.
+      # Measured here (ntfs3, uid=1000, fmask/dmask=0000): SQLite locking is
+      # enforced, chmod persists, the volume is case-SENSITIVE, and
+      # hardlinks/symlinks/xattr/mmap/fsync/sparse writes all behave.
+      #
+      # What survives: found.000/found.001 on the volume mean chkdsk has had
+      # to recover it before, and booting Windows while Jellyfin runs is real
+      # concurrent access. Opt-in rather than deleted so the trade-off stays
+      # visible in the diff and greppable later.
+      allowSharedNtfsLibrary = false;
 
       # Loopback port. NOT opened in the firewall — Jellyfin binds 127.0.0.1
       # only and is published through a private Tailscale Serve listener, which

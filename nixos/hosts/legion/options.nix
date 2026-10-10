@@ -70,6 +70,51 @@
   # Legion modules use.
   acpi.acpiCall = false;
 
+  # ── Media server ───────────────────────────────────────────────────────────
+  # STAGED, NOT YET ENABLED. `media.jellyfin.enable` is still false at the base
+  # default in nixos/options.nix. Flipping it is one line here, deliberately
+  # left out until `sudo bash /tmp/opencode/chown-test.sh` reports ALL PASS:
+  # the tmpfiles rule sets 0750 jellyfin:media on libraryDir, and on a
+  # filesystem where chmod succeeds but chown does not, Jellyfin ends up locked
+  # out of its own library while the build looks clean.
+  media.jellyfin = {
+    # GATED ON: sudo bash /tmp/opencode/chown-test.sh -> ALL PASS
+    #   chown works on ntfs3; chmod persists across it; and the permission
+    #   model genuinely enforces (nobody refused a root-owned 0750 dir,
+    #   allowed at 0755). The 0750 jellyfin:media tmpfiles rule in
+    #   config/system/media/jellyfin.nix can therefore succeed, instead of
+    #   leaving the library unreadable to jellyfin while the build reports
+    #   success.
+    enable = true;
+
+    # The library is the existing 117G of movies on the dual-boot volume
+    # rather than a fresh /srv. All of it is indexed, including the zero-byte
+    # entries, which will show up as broken items — that is expected, not a
+    # scan failure.
+    libraryDir = "/mnt/shared/Videos";
+
+    # See the measurement and the surviving caveats in
+    # config/system/media/jellyfin.nix, next to the assertion.
+    allowSharedNtfsLibrary = true;
+
+    # Stays false until the first-run wizard has created an administrator.
+    # While it is false, Jellyfin refuses publication on purpose: any device
+    # on the tailnet that reaches the port could claim the admin account.
+    setupCompleted = false;
+
+    # OFF. The discrete NVIDIA GPU is for Ollama inference on this box, and
+    # jellyfin.nix refuses "nvenc" by assertion for exactly that reason.
+    # Playback will software-transcode. The Intel iGPU path is available via
+    # hardwareAcceleration.type = "vaapi" but is UNVERIFIED here: render nodes
+    # /dev/dri/renderD128 and renderD129 exist, jellyfin-accel-check does not
+    # run until the module is enabled, and "it has an Intel GPU" is not a
+    # statement about QSV being usable.
+    hardwareAcceleration = {
+      enable = false;
+      type = "vaapi";
+    };
+  };
+
   # ── Phone → herdr over Tailscale ───────────────────────────────────────────
   # The Legion is the host this is for: it stays on and runs the agents worth
   # reaching from a phone. Collie is the PRIMARY Android interface; the SSH /
