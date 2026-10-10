@@ -31,6 +31,36 @@ let
   svcs = c.systemd.services;
   have = name: builtins.hasAttr name svcs;
 
+  # ── What this host actually opted in to ─────────────────────────────────
+  #
+  # Read through `config` rather than `opts`, and the reason is not
+  # convenience: `opts` is a module argument, reachable from neither `config`
+  # nor `_module.args` (both verified), so deriving intent from option values
+  # here would let this suite disagree with the modules about what was
+  # requested. Reading the services the modules actually define keeps one
+  # source of truth.
+  #
+  # These live in `let` rather than as attributes of the result because a Nix
+  # attrset is not recursive unless declared `rec`, and the result below
+  # refers back to them.
+  #
+  # Note that `tailscale-serve-jellyfin` is NOT implied by
+  # services.jellyfin.enable alone: publishServe gates that unit separately, so
+  # a host may legitimately run Jellyfin with publication off. The shell suite
+  # therefore treats that unit as permitted-but-not-required, while every other
+  # media unit must be fully accounted for.
+  #
+  # `(x or false)` because a host that never enables a service has no such
+  # option value at all, and reading it unguarded would throw.
+  jellyfinEnabled = c.services.jellyfin.enable or false;
+  torrentsEnabled = c.services.qbittorrent.enable or false;
+  syncthingEnabled = c.services.syncthing.enable or false;
+
+  # Which of the media units this host actually installed. Also in `let`,
+  # because `mediaUnitsUnaccounted` below refers to it and a plain attrset is
+  # not recursive.
+  mediaUnitsPresent = builtins.filter have mediaUnits;
+
   mediaUnits = [
     "tailscale-serve-jellyfin"
     "tailscale-serve-syncthing"
@@ -44,8 +74,25 @@ let
   ];
 in
   {
+    # Which media services this host opted in to. See the comment on
+    # `jellyfinEnabled` in the `let` above for why these are read from
+    # `config` and not from `opts`.
+    jellyfinEnabled = jellyfinEnabled;
+    torrentsEnabled = torrentsEnabled;
+    syncthingEnabled = syncthingEnabled;
+
     # ── The media lane declares NOTHING until it is asked ──────────────────
-    mediaUnitsPresent = builtins.filter have mediaUnits;
+    mediaUnitsPresent = mediaUnitsPresent;
+
+    # A media unit is legitimate only when its owning service is enabled.
+    mediaUnitsUnaccounted = builtins.filter (unit:
+      if unit == "tailscale-serve-jellyfin" then false
+      else if unit == "tailscale-serve-syncthing" then syncthingEnabled
+      else if builtins.match ".*media-.*" unit != null then
+        torrentsEnabled || syncthingEnabled
+      else if unit == "qbittorrent" then torrentsEnabled
+      else false
+    ) mediaUnitsPresent;
 
     # No directory is created and no port is opened by merely importing the
     # module. tmpfiles rules mentioning the media paths are the tell.

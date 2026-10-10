@@ -62,20 +62,22 @@ reported as one that passed.
 summary, and the summary then says "passed with N declared skip(s)" rather than
 claiming an unqualified pass.
 
-## Known failures on master (not introduced by this work)
+## Known failures on master
 
-Both of these fail on a pristine `master` checkout and are **not** fixed here,
-because both live in lanes owned by other PRs:
+**None, as of 2026-10-11.** Both entries that used to be listed here were
+stale, and each was verified rather than assumed before being removed:
 
-1. **`media-travel`** — `state-restore.sh` cannot find `sqlite3`. The flake
-   input is `sqlite`, but in the pinned nixpkgs its `outPath` resolves to the
-   main output rather than the `-bin` split, so the binary is neither on PATH
-   nor visible to the suite's store scan.
-2. **`server-foundation/host-eval.sh`** — 24 assertions fail. `hostPolicy.role`
-   evaluates correctly, but `networking.networkmanager.wifi.macAddress` and
-   `nix.settings.trusted-users` do not evaluate on this nixpkgs revision.
+1. ~~`media-travel/state-restore.sh` cannot find `sqlite3`~~ — passes 21/0.
+   The `-bin` split concern no longer reproduces on the current lock.
+2. ~~`server-foundation/host-eval.sh` — 24 assertions fail~~ — passes 19/19.
+   `wifi.macAddress` and `nix.settings.trusted-users` both evaluate now, and
+   host evaluation has been added to CI — see below.
 
-Both stay registered, so they fail loudly rather than disappearing.
+A stale "known failure" is worse than a missing one: it reads as evidence that
+someone checked, and it invites the suite to be skipped rather than fixed.
+Re-verify with `bash nixos/tests/run.sh` before trusting this paragraph.
+
+All suites stay registered, so none of them can quietly disappear.
 
 ## What is not automated
 
@@ -101,10 +103,16 @@ own locked nixpkgs through `nix build`, so a run today and a run in six months
 use the same shellcheck, fish and cargo. `permissions: contents: read`. No
 secrets are used or needed.
 
-Host evaluation and the VM test are **excluded from CI on purpose**, and the
-workflow says so in its own header: wiring a known-failing suite into CI
-produces a permanently red badge, which gets ignored. Those two exclusions are
-the ones listed above.
+Host evaluation **runs in CI** and passes 19/19 against the current lock. It used
+to be excluded on the grounds that it failed on `master` — `wifi.macAddress` and
+`nix.settings.trusted-users` did not evaluate on this nixpkgs revision — but both
+evaluate now, and leaving it out meant the only check that evaluates the real
+host configurations was not gating changes to them. Re-verify with
+`bash nixos/tests/server-foundation/host-eval.sh` before trusting this paragraph.
+
+The VM test is still **excluded from CI on purpose**, and the workflow says so in
+its own header: it needs `/dev/kvm` and builds a whole system, so it is a
+`nix build` a human asks for. That is the remaining exclusion.
 
 ## Per-lane directories
 

@@ -56,7 +56,20 @@ if [[ ! "$host" =~ ^[A-Za-z0-9._-]+$ ]]; then
 fi
 
 # Show the reason in a window rather than on a stdout nobody is reading.
+#
+# This is the `sh -c 'script' arg0 arg1` idiom. The script is single-quoted so
+# it reaches the inner sh literally, with "$1" bound at runtime from the
+# argument after the arg0 "sh".
+#
+# Checked rather than assumed: swapping to double quotes does NOT break this
+# particular call, because `fail` receives the message as its own "$1", so the
+# outer expansion yields the same text. It would only need escaping to stay
+# equivalent, and the literal form states the intent more directly.
+#
+# SC2016 is disabled rather than baselined so the reason sits next to the code
+# instead of in a list of 29 other findings in another file.
 fail() {
+  # shellcheck disable=SC2016
   foot --title="$title — not connected" --app-id=legion-term \
     sh -c 'printf "%s\n" "$1"; printf "\nPress Enter to close.\n"; read -r _' sh "$1"
   exit 1
