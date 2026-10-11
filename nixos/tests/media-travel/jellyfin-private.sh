@@ -104,6 +104,14 @@ with tempfile.TemporaryDirectory() as tmp:
     for error, succeeds in (
         ('error: failed to remove web serve: handler does not exist', True),
         ('error: failed to remove web serve: handler does not exist\n\ntry `tailscale serve --help` for usage info', True),
+        # tailscaled still in BackendState=NoState. A startup race, not a
+        # configuration error: proceeding is safe because the `serve --bg`
+        # that follows is what actually publishes the mapping, and it fails
+        # loudly on its own if the backend is still unusable. Treating this as
+        # fatal made the unit fail, which makes switch-to-configuration exit 4,
+        # which ns-maint reads as "activation failed" and rolls back.
+        ('unexpected state: NoState', True),
+        ('unexpected state: NoState\n\ntry `tailscale serve --help` for usage info', True),
         ('error: failed to remove web serve: cannot remove web handler; currently serving TCP', False),
         ('failed to connect to local tailscaled', False),
     ):
