@@ -174,7 +174,37 @@
       else
         # Tailscale appends usage guidance after the error line.
         case "''${cleanup_error%%$'\n'*}" in
+          # Nothing to revoke: the ordinary case on a first start, and on every
+          # restart after a clean stop.
           "error: failed to remove web serve: handler does not exist") ;;
+
+          # tailscaled has not finished loading its backend, so `serve` cannot
+          # even answer the question. This is a STARTUP RACE, not a
+          # configuration error. The unit is ordered after tailscaled.service,
+          # but that only means the process exists — not that BackendState has
+          # left NoState. Observed on the Legion:
+          #
+          #   jellyfin-private-serve[102409]: unexpected state: NoState
+          #
+          # Treating it as fatal cost more than the endpoint. A failed unit
+          # makes switch-to-configuration exit 4, which ns-maint reads as
+          # "activation failed" and answers with a full rollback — so this race
+          # could break an UNRELATED update. config/system/tailscale/
+          # reconcile.sh already treats NoState as "retry" for the same reason;
+          # this is that decision applied to the other unit that drives the
+          # tailscale CLI.
+          #
+          # Continuing is correct, not merely tolerable: the publish command
+          # below is what actually creates the mapping, and it is the one whose
+          # failure would be real. If the backend is still NoState it fails
+          # loudly on its own.
+          #
+          # (That command is deliberately NOT named here. The wrapper-order
+          # assertion in tests/media-travel/jellyfin-private.sh matches the
+          # FIRST occurrence of its name, so writing it in a comment above the
+          # real call makes the ordering check fail against prose — which is
+          # exactly what happened when this comment was first written.)
+          "unexpected state: NoState") ;;
           *) printf '%s\n' "$cleanup_error" >&2; exit 1 ;;
         esac
       fi

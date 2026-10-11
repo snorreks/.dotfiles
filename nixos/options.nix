@@ -191,6 +191,35 @@ rec {
     i915Guc = null;
   };
 
+  # ── Per-host hardware-defect workarounds ────────────────────────────────────
+  #
+  # Two per-host lists, both EMPTY by default and consumed by
+  # config/system/kernel.nix. They exist because `boot.kernelParams` and
+  # `boot.blacklistedKernelModules` are single options for the whole machine:
+  # a workaround for a defect observed on one laptop cannot be expressed
+  # without the other laptop inheriting it, and inheriting it means applying a
+  # fix to hardware nobody measured.
+  #
+  # The rule for adding an entry: the defect must be OBSERVED in that host's
+  # own boot log or module tree, and the comment must say what was observed.
+  # "This fixes the error on my GS65" is not a licence to apply it to a Legion
+  # whose firmware may never exhibit the bug at all.
+  #
+  # hosts/gs65/options.nix is the one that currently uses these.
+
+  # Extra kernel command-line parameters, appended after the shared ones.
+  hostKernelParams = [];
+
+  # Extra modules to keep from loading, merged into
+  # `boot.blacklistedKernelModules`.
+  #
+  # Only list a module that is actually MODULAR on this kernel. Blacklisting a
+  # builtin (=y) is silently a no-op — the blacklist is only consulted when
+  # the kernel is about to load a module by name, and a builtin is never
+  # loaded that way. Verify with `zcat /proc/config.gz | grep CONFIG_<NAME>`
+  # (=m, good) before adding anything here.
+  hostBlacklistedKernelModules = [];
+
   # ── Shared NTFS volume ─────────────────────────────────────────────────────
   # /mnt/shared is the Windows dual-boot volume. ON on both hosts: it is wanted
   # as extra storage, and it is wanted in BOTH roles — parked at home as a
@@ -213,11 +242,29 @@ rec {
   #   powercfg /a            # "Hibernate" should be absent as a sleep state
   #   powercfg /h            # hibernate state should be "Unavailable"
   #
+  # 🔴 AND THAT PRECONDITION IS NECESSARY BUT NOT SUFFICIENT. Fast Startup off
+  # only rules out the volume being HIBERNATED. Windows also sets a plain
+  # DIRTY bit, for reasons that have nothing to do with Fast Startup — a
+  # killed shutdown, a crash, a chkdsk that was scheduled and never run — and
+  # a dirty volume is refused by ntfs3 in exactly the same way, with the same
+  # "volume is dirty and force flag is not set" error. The GS65 is in that
+  # state RIGHT NOW (measured, see hosts/gs65/hardware.nix), which is the
+  # proof that "the precondition has been met" was never a guarantee that the
+  # volume mounts. The repair is `chkdsk X: /f` in Windows; there is no safe
+  # Linux-side override, and `force` is a corruption path, not a fix.
+  #
   # Two things this being ON does NOT change, and still do not:
-  #   * `nofail` means a failed mount is SILENT. It is now a path real data is
-  #     expected on, so a mount that did not happen is discovered by the thing
-  #     that needed the files rather than by an error. If this volume starts
-  #     mattering, check `findmnt /mnt/shared` rather than trusting the path.
+  #   * A failed mount is NOT silent. `nofail` only means no unit *depends* on
+  #     this mount succeeding, so the boot carries on — the mount unit still
+  #     fails, and systemd still prints "[FAILED] Failed to mount /mnt/shared."
+  #     to the console, which is what it did, three times a boot, while the
+  #     comment that used to stand here asserted the opposite. Silence comes
+  #     from `x-systemd.automount` (deferred to first access, which is what the
+  #     second half of this sentence wanted all along), not from `nofail`.
+  #     It is now a path real data is expected on, so a mount that did not
+  #     happen is discovered by the thing that needed the files rather than by
+  #     an error. If this volume starts mattering, check `findmnt -T
+  #     /mnt/shared` rather than trusting the path.
   #   * Nothing server-critical lives here. State and media roots remain native
   #     Linux filesystems, so a missing mount degrades convenience, never the
   #     box. See docs/headless-server.md.

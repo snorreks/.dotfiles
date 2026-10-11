@@ -69,10 +69,52 @@
   #
   # The partition is not repartitioned and ntfs3 stays available by hand.
   #
-  # Rely on normal ntfs3 journal recovery; do not persist the `force` option.
-  # If recovery reports structural errors or the volume remains dirty and
-  # refuses to mount, run `chkdsk X: /f` separately in Windows (using this
-  # volume's drive letter), then shut Windows down cleanly before retrying.
+  # 🔴 THIS VOLUME IS CURRENTLY DIRTY AND WILL NOT MOUNT. Measured, on this
+  # machine, not guessed:
+  #
+  #   $ sudo mount -t ntfs3 ... /dev/nvme0n1p4 /mnt/shared
+  #   ntfs3(nvme0n1p4): It is recommended to use chkdsk.
+  #   ntfs3(nvme0n1p4): volume is dirty and "force" flag is not set!
+  #   $ ntfsinfo -m /dev/nvme0n1p4
+  #   Volume is scheduled for check.
+  #
+  # That is the NTFS dirty bit (boot sector 0x42), which Windows set and has
+  # not cleared. It is NOT hibernation — ntfs3 says "dirty", never
+  # "hibernated" — so the Fast Startup discussion above still holds; this is a
+  # separate thing, and it is why the precondition being met was not enough.
+  #
+  # THE FIX IS WINDOWS-SIDE AND CANNOT BE DONE FROM HERE:
+  #
+  #   chkdsk <drive-letter>: /f        # in Windows, on THIS machine
+  #   # then shut Windows down cleanly (not restart-to-Windows, not hibernate)
+  #
+  # `force` is deliberately NOT added. ntfs3 asks for it, and ntfsinfo asks
+  # for it, and it would make the mount succeed — on a volume that its own
+  # native tools have flagged as needing structural repair, mounting it rw is
+  # how a filesystem that was dirty becomes a filesystem that is damaged. A
+  # chkdsk costs ten minutes and a reboot; guessing here costs the data on a
+  # drive this configuration deliberately treats as the shared one.
+  #
+  # `x-systemd.automount` is what makes the BOOT quiet regardless. It is here
+  # because `nofail` does not do what the note in nixos/options.nix says it
+  # does: `nofail` only means no unit *depends* on this mount succeeding, so
+  # the boot carries on — but the unit still fails, and systemd still prints
+  # "[FAILED] Failed to mount /mnt/shared." to the console. Three times a boot,
+  # which is exactly what it was doing. With automount, systemd starts a cheap
+  # .automount unit that always succeeds and mounts the volume on FIRST ACCESS
+  # instead, so a volume that is absent, dirty or unplugged costs nothing at
+  # boot and only the process that actually wanted the files sees a failure.
+  # By then systemd has turned console status reporting off, so it lands in
+  # the journal rather than on the screen.
+  #
+  # The trade: `findmnt /mnt/shared` no longer proves the volume is mounted,
+  # because an automount unit reports as active while the filesystem is not
+  # mounted. Use `findmnt -T /mnt/shared` after touching the path, or
+  # `systemctl status mnt-shared.mount`.
+  #
+  # `x-systemd.device-timeout` is short on purpose: if the volume is not there
+  # at all, a process that touches the path should get its error in 2 seconds,
+  # not wait out systemd's 90-second default.
   fileSystems."/mnt/shared" = lib.mkIf opts.mountShared {
     device = "/dev/disk/by-uuid/EA6CD3956CD35AC1";
     fsType = "ntfs3";
@@ -81,6 +123,8 @@
       "uid=1000"
       "gid=100"
       "nofail"
+      "x-systemd.automount"
+      "x-systemd.device-timeout=2s"
       "exec"
       "fmask=0000"
       "dmask=0000"
