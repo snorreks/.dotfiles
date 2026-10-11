@@ -45,10 +45,20 @@
       ./ssh.nix
       ./sound.nix
       ./user.nix
-      ./gaming.nix
       ./hardware.nix
       ./docker.nix
       ./cache-cleanup.nix
     ]
-    ++ lib.optionals opts.enablePersistence [./persistence.nix];
+    ++ lib.optionals opts.enablePersistence [./persistence.nix]
+    # Gaming needs a desktop to play on, and this import is not free on a host
+    # without one. Steam ran as a service on the parked Legion and opened
+    # 27015/27036/27037/27040 in the firewall — Remote Play, the Source
+    # dedicated server, and LAN transfers — on a machine with no screen and no
+    # player. Gating the whole import closes those ports and drops Steam,
+    # gamemode, gamescope, the extra fonts and the udev rules together, rather
+    # than leaving a service enabled and then ignoring it.
+    #
+    # Set opts.desktop.enable = false to turn it off; set it back and gaming
+    # returns with it, which is the only way a parked server would ever want it.
+    ++ lib.optionals opts.desktop.enable [./gaming.nix];
 }

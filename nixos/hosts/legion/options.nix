@@ -45,9 +45,23 @@
   # there; server.nix adds this public half to sonny's OpenSSH keys on port 2222.
   remoteBuilder.authorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBma7L7cRLEXSfdFHeCtwBEOg931x2uKYnkWM9Aa0vTh gs65-nixbuilder";
 
-  # Keep local desktop login while this is also a daily driver. Set false when
-  # parked as a remote-only server. Server services never depend on Mango.
-  desktop.enable = true;
+  # FALSE: this machine is parked as a remote-only server. See
+  # docs/headless-server.md § "Everyday use on the Legion", which is where
+  # this was already recommended and is now true.
+  #
+  # What it turns off is greetd, so the console no longer sits on a lit
+  # tuigreet login prompt for an empty room. Nothing else: the desktop
+  # packages stay installed, Mango is still one `ns-gui zeditor` away, and
+  # every server service runs without a compositor either way.
+  #
+  # The screens themselves are not turned off by this — DPMS reports every
+  # output On with no session running, and nothing in this configuration sets
+  # console blanking. Whether a monitor drops to standby when its input
+  # disappears is monitor behaviour, not something NixOS decides here.
+  #
+  # It also gates the gaming import (config/system/default.nix), which is
+  # what closes 27015/27036/27037/27040 and stops Steam running as a service.
+  desktop.enable = false;
 
   # 80 while it is a daily driver; 60 once it is parked and permanently on AC.
   #

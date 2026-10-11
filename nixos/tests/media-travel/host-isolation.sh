@@ -130,9 +130,20 @@ else
 fi
 
 # ── 3. The media lane adds no global firewall surface ──────────────────────
-# The Legion's pre-existing allow list is 22 + the gaming ports, and the
-# firewall interfaces are the pre-existing podman0. Neither may gain an entry.
-if [[ "$(json '.allowedTCPPorts' "$LEGION")" == '["22","27015","27036","27037","27040"]' ]]; then
+# A SNAPSHOT of the Legion's non-media baseline, not a derived value. The
+# media lane contributes nothing here — Jellyfin binds loopback and is
+# published through Tailscale Serve, qbittorrent is confined to a network
+# namespace, syncthing opens no global port — so this list must only ever
+# change when the host's NON-media baseline does.
+#
+# It changed on 2026-10-11: 27015/27036/27037/27040 were Steam's (Remote
+# Play, the Source dedicated server, LAN transfers) and were removed when
+# gaming.nix was gated on desktop.enable. That was a deliberate, reviewed
+# change — this snapshot is how the suite noticed.
+#
+# If this fails, the host's baseline genuinely moved. Confirm it was
+# intended, then update the value here in the same commit that caused it.
+if [[ "$(json '.allowedTCPPorts' "$LEGION")" == '["22"]' ]]; then
   ok "Legion global allowed TCP ports are unchanged"
 else
   bad "Legion's global firewall allow list changed" "$(json '.allowedTCPPorts' "$LEGION")"
