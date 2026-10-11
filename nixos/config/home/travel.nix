@@ -54,12 +54,33 @@
     UpdateHostKeys no
   '';
 
-  # The pinned entry itself: "<host> <type> <key>", the known_hosts(5) format.
-  # Written only when a key has been configured, so the file never exists in an
-  # unpinned machine's half-finished state.
-  hostPattern = if cfg.sshPort == 22 then cfg.serverHost else "[${cfg.serverHost}]:${toString cfg.sshPort}";
+  # The pinned entries themselves: "<host> <type> <key>", the known_hosts(5)
+  # format. Written only when a key has been configured, so the file never
+  # exists in an unpinned machine's half-finished state.
+  #
+  # ── Why this is a LIST and not one pattern ─────────────────────────────────
+  # There are TWO aliases and they connect on DIFFERENT PORTS, and known_hosts
+  # qualifies a pattern with the port only when that port is not 22:
+  #
+  #   legion            sshPort 2222        -> looked up as "[legion]:2222"
+  #   legion-tailscale  tailscalePort 22   -> looked up as "legion"
+  #
+  # One pattern therefore pins exactly ONE alias. That was the bug: only the
+  # 2222 pattern was written, so `legion-tailscale` — the alias `nupdate legion`
+  # and `nconfirm legion` actually use — had no entry at all, and the global
+  # `StrictHostKeyChecking yes` turned that into "Host key verification failed"
+  # on every connection. The documented remote-update path could not connect,
+  # and the test suite could not see it: nixos/tests/nupdate-workflow.sh stubs
+  # ssh and asserts the alias NAME is selected, never that it CONNECTS.
+  #
+  # Both aliases reach the same sshd and present the same host key (verified:
+  # Tailscale SSH reports the machine's own /etc/ssh/ssh_host_ed25519_key), so
+  # both patterns carry the same key. `lib.unique` collapses them into one line
+  # when a host is configured with sshPort = tailscalePort = 22.
+  hostPatternFor = port: if port == 22 then cfg.serverHost else "[${cfg.serverHost}]:${toString port}";
+  hostPatterns = lib.unique (map hostPatternFor [cfg.sshPort cfg.tailscalePort]);
   publicKey = (import ../../lib/host-policy.nix).travelHostKey {key = cfg.serverHostKey; type = cfg.serverHostKeyType;};
-  knownHostsEntry = "${hostPattern} ${publicKey}";
+  knownHostsEntry = lib.concatMapStrings (pattern: "${pattern} ${publicKey}\n") hostPatterns;
 in {
   # ── SSH aliases ────────────────────────────────────────────────────────────
   #
@@ -161,7 +182,7 @@ in {
   # appends newly-trusted hosts, and nixos/tests' own history records home
   # manager fighting that file over backups.
   home.file = lib.mkIf (cfg.enable && pinned) {
-    ".ssh/known_hosts.travel".text = knownHostsEntry + "\n";
+    ".ssh/known_hosts.travel".text = knownHostsEntry;
   };
 
   # ── Native herdr remote attachment ────────────────────────────────────────

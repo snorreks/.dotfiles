@@ -252,6 +252,32 @@ if [[ -n "$(json '.pinnedKnownHosts' "$GS65")" ]]; then
   else
     ok "a provisioned pin is not reported as missing"
   fi
+
+  # ── The pin must cover BOTH aliases, and they do not share a lookup name ──
+  # known_hosts qualifies a pattern with the port only when that port is not 22,
+  # so `legion` (sshPort 2222) is looked up as "[legion]:2222" while
+  # `legion-tailscale` (tailscalePort 22) is looked up as plain "legion".
+  #
+  # Emitting only the first left the documented remote-update alias with no
+  # entry at all, and the global StrictHostKeyChecking yes turned that into
+  # "Host key verification failed" on every connection. nixos/tests/
+  # nupdate-workflow.sh kept passing throughout, because it stubs ssh and
+  # asserts the alias NAME is selected rather than that it CONNECTS — so the
+  # gap has to be closed HERE, against the file that is actually written.
+  #
+  # Asserted as two PATTERNS rather than as a line count: a count would also
+  # pass if the same pattern were written twice.
+  pinned_patterns="$(json '.pinnedKnownHosts' "$GS65")"
+  if grep -qE '^\[legion\]:2222 ' <<<"$pinned_patterns"; then
+    ok "the pin covers the 2222 alias lookup name"
+  else
+    bad "the pin does not cover the 2222 alias lookup name" "$pinned_patterns"
+  fi
+  if grep -qE '^legion ' <<<"$pinned_patterns"; then
+    ok "the pin covers the port-22 alias lookup name"
+  else
+    bad "the pin does not cover the port-22 alias lookup name" "$pinned_patterns"
+  fi
 elif grep -q "NOT PINNED" <<<"$sshcfg"; then
   ok "the missing host-key pin is reported in the generated config"
 else
