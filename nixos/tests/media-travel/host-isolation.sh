@@ -70,15 +70,37 @@ for host in legion gs65; do
     legion) f="$LEGION" ;;
     *) f="$GS65" ;;
   esac
-  if [[ "$(json '.mediaUnitsPresent' "$f")" == "[]" ]]; then
-    ok "$host: no media units installed"
+  # Not "no media units" — a host that opted in is SUPPOSED to have them, and
+  # the Legion now runs Jellyfin. The invariant is that every media unit
+  # present is accounted for by a media service this host actually enabled:
+  # an always-declared unit on a host that never asked for it is the
+  # regression. A host with nothing enabled must have nothing.
+  unaccounted="$(json '.mediaUnitsUnaccounted' "$f")"
+  any_enabled="$(json '.jellyfinEnabled or .torrentsEnabled or .syncthingEnabled' "$f")"
+  if [[ "$unaccounted" == "[]" ]]; then
+    ok "$host: every media unit is accounted for by an enabled service"
   else
-    bad "$host: media units present with everything off" "$(json '.mediaUnitsPresent' "$f")"
+    bad "$host: media units with nothing enabled to justify them" "$unaccounted"
   fi
-  if [[ "$(json '.mediaTmpfiles' "$f")" == "[]" ]]; then
-    ok "$host: no media directories created"
+  if [[ "$any_enabled" == "false" ]]; then
+    if [[ "$(json '.mediaUnitsPresent' "$f")" == "[]" ]]; then
+      ok "$host: nothing enabled, and no media units installed"
+    else
+      bad "$host: media units present with everything off" "$(json '.mediaUnitsPresent' "$f")"
+    fi
   else
-    bad "$host: media tmpfiles rules created with everything off" "$(json '.mediaTmpfiles' "$f")"
+    ok "$host: media services enabled, so media units are expected"
+  fi
+  # A media tmpfiles rule creates a directory. Same question: legitimate only
+  # when something media is actually switched on.
+  if [[ "$any_enabled" == "false" ]]; then
+    if [[ "$(json '.mediaTmpfiles' "$f")" == "[]" ]]; then
+      ok "$host: no media directories created"
+    else
+      bad "$host: media tmpfiles rules created with everything off" "$(json '.mediaTmpfiles' "$f")"
+    fi
+  else
+    ok "$host: media services enabled, so media directories are expected"
   fi
 done
 

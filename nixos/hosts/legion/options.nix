@@ -70,6 +70,61 @@
   # Legion modules use.
   acpi.acpiCall = false;
 
+  # ── Media server ───────────────────────────────────────────────────────────
+  # Jellyfin is enabled with its library on the shared NTFS volume. Ownership
+  # and permissions were verified on ntfs3: chown works, chmod persists, and
+  # directory permissions are enforced. The 0750 jellyfin:media tmpfiles rule
+  # in config/system/media/jellyfin.nix can therefore keep the library readable
+  # by Jellyfin.
+  media.jellyfin = {
+    enable = true;
+
+    # The library is the existing 117G of movies on the dual-boot volume
+    # rather than a fresh /srv. All of it is indexed, including the zero-byte
+    # entries, which will show up as broken items — that is expected, not a
+    # scan failure.
+    libraryDir = "/mnt/shared/Videos";
+
+    # See the measurement and the surviving caveats in
+    # config/system/media/jellyfin.nix, next to the assertion.
+    allowSharedNtfsLibrary = true;
+
+    # TRUE, and honestly so. Verified on 2026-10-10, not assumed:
+    #   - /etc/jellyfin/system.xml has IsStartupWizardCompleted = true, which
+    #     is the marker jellyfin-private-config reads;
+    #   - jellyfin-private-config check /etc/jellyfin PASSES — the same
+    #     command the serve unit runs before mapping 8443;
+    #   - the jellyfin user can list the library (28 entries).
+    # The administrator account exists; the wizard is finished.
+    #
+    # Before the wizard, this stayed false and jellyfin still ran, because it
+    # binds loopback only. See the comment on publishServe below for why the
+    # two options exist separately.
+    setupCompleted = true;
+
+    # TRUE, together with setupCompleted above. The module asserts these two
+    # can never disagree in the direction that publishes early, so they are
+    # flipped as a pair.
+    #
+    # This is what maps https://legion.tailf24d02.ts.net:8443 at the Jellyfin
+    # on 127.0.0.1:8096. Collie keeps 443; these are separate units writing to
+    # the same Tailscale Serve config, so `tailscale serve status` should show
+    # BOTH afterwards, and collie must stay up. Worth reading, not assuming.
+    publishServe = true;
+
+    # OFF. The discrete NVIDIA GPU is for Ollama inference on this box, and
+    # jellyfin.nix refuses "nvenc" by assertion for exactly that reason.
+    # Playback will software-transcode. The Intel iGPU path is available via
+    # hardwareAcceleration.type = "vaapi" but is UNVERIFIED here: render nodes
+    # /dev/dri/renderD128 and renderD129 exist, jellyfin-accel-check does not
+    # run until the module is enabled, and "it has an Intel GPU" is not a
+    # statement about QSV being usable.
+    hardwareAcceleration = {
+      enable = false;
+      type = "vaapi";
+    };
+  };
+
   # ── Phone → herdr over Tailscale ───────────────────────────────────────────
   # The Legion is the host this is for: it stays on and runs the agents worth
   # reaching from a phone. Collie is the PRIMARY Android interface; the SSH /

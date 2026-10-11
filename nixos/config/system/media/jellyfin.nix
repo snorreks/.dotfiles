@@ -273,7 +273,36 @@ in {
   '');
 
   # ── Private publication ────────────────────────────────────────────────────
-  systemd.services.tailscale-serve-jellyfin = lib.mkIf cfg.enable {
+  # Gated on publishServe as well as enable.
+  #
+  # This unit is wantedBy = multi-user.target, so it runs on EVERY activation.
+  # Its ExecStart refuses — by design — while the wizard is unfinished:
+  #
+  #   if ! ${if cfg.setupCompleted then "true" else "false"}; then exit 1; fi
+  #   runuser -u jellyfin -- … jellyfin-private-config check /etc/jellyfin
+  #
+  # A refusal is a CORRECT outcome, but a unit that exits non-zero is a
+  # FAILED unit, and a failed unit during activation aborts the whole switch
+  # and rolls back every other unit — including jellyfin.service itself. The
+  # host then never reaches a state where the wizard could be run, because the
+  # configuration required to reach the wizard is the configuration that
+  # refuses to activate. That is a deadlock, not a guardrail.
+  #
+  # Neither flag value escaped it, which is why this is a separate option and
+  # not a nudge to one of the existing two:
+  #   - setupCompleted = true skips the first gate, but the second gate
+  #     (jellyfin-private-config check) requires Jellyfin's own
+  #     IsStartupWizardCompleted marker in /etc/jellyfin/system.xml, which
+  #     does not exist until the wizard has genuinely run. Verified by running
+  #     that check directly: it prints "Jellyfin private configuration
+  #     refused" and exits 1.
+  #   - setupCompleted = false exits at the first gate.
+  #
+  # "Not ready to publish" is therefore expressed as "the unit does not
+  # exist", which is an honest off and leaves activation successful. The
+  # assertion below keeps publishServe and setupCompleted from ever
+  # disagreeing in the direction that publishes early.
+  systemd.services.tailscale-serve-jellyfin = lib.mkIf (cfg.enable && cfg.publishServe) {
     description = "Jellyfin on the node's private Tailscale HTTPS endpoint (${toString cfg.serveHttpsPort})";
     after = [
       "tailscaled.service"
@@ -355,6 +384,40 @@ in {
       message = "media.jellyfin.port must not claim SSH or tailnet HTTPS";
     }
     {
+      # Publishing is a two-key operation, and this is the key that matters.
+      #
+      # The serve script refuses on its own when setupCompleted is false, and
+      # jellyfin-private-config refuses again unless Jellyfin's OWN
+      # IsStartupWizardCompleted marker is set. So this is defence in depth
+      # on top of two runtime checks, not the only thing standing between an
+      # empty Jellyfin and the tailnet.
+      #
+      # It exists so the mistake is a FAILED BUILD, which is reviewable,
+      # rather than a unit that fails on every boot until someone reads a
+      # journal. Turning publication on before an administrator exists would
+      # let any tailnet device claim the admin account.
+      assertion = !(cfg.publishServe && !cfg.setupCompleted);
+      message = ''
+        media: opts.media.jellyfin.publishServe is true but setupCompleted
+        is false.
+
+        Publication would map ${toString cfg.serveHttpsPort} at a Jellyfin with
+        no administrator account. Until the wizard has been run, any device on
+        the tailnet that reaches the port can claim the admin account.
+
+        Complete the wizard first:
+          1. Keep publishServe = false and activate. Jellyfin binds loopback
+             only, so the wizard is reachable at http://127.0.0.1:8096 on the
+             host itself, or through `ssh -L 8096:127.0.0.1:8096 <host>`.
+          2. Create the administrator in that wizard.
+          3. Set setupCompleted = true and publishServe = true together.
+
+        Do not work around this by setting setupCompleted = true first: the
+        serve script's second gate reads Jellyfin's own marker and refuses
+        anyway, which fails the unit and rolls back the whole activation.
+      '';
+    }
+    {
       # Two Serve units claiming one port is a race, not a conflict error.
       assertion = !(cfg.serveHttpsPort == 443 && opts.mobileAgents.collie.enable);
       message = ''
@@ -397,16 +460,57 @@ in {
     }
 
     {
-      # Shared NTFS is not a media root.
-      assertion = !opts.mountShared
-        || !(lib.hasPrefix "/mnt/shared" cfg.libraryDir);
+      # The library may live on the shared NTFS volume, but only when the
+      # operator says so in the host options.
+      #
+      # This assertion used to be unconditional, on the grounds that an
+      # unattended server writing to a hibernated Windows filesystem corrupts
+      # it. That reasoning was correct in general and wrong for this host:
+      # Windows is not booted while the Legion runs unattended, so no
+      # hibernated volume is ever handed back mid-write.
+      #
+      # Verified here, not assumed (ntfs3, uid=1000, fmask/dmask=0000):
+      #   - SQLite locking IS enforced. A writer holding BEGIN IMMEDIATE makes
+      #     a second writer fail with "database is locked"; PRAGMA
+      #     integrity_check returns ok. The original corruption worry was
+      #     unfounded on this driver.
+      #   - chmod persists: 0644 -> 0640 on files, 0755 -> 0750 on dirs.
+      #   - The volume is CASE-SENSITIVE. "The Movie (2020).mkv" and
+      #     "the movie (2020).mkv" coexist as distinct files with distinct
+      #     contents. (The first probe of this mislabelled itself by inverting
+      #     its own result; the second, with distinct payloads, is the one
+      #     that counts.)
+      #   - Hardlinks, symlinks, xattr, mmap, fsync and sparse+random writes
+      #     all behave.
+      #
+      # STILL TRUE, and why this stays opt-in rather than deleted:
+      #   - found.000/found.001 on the volume mean chkdsk has had to recover
+      #     this filesystem before. Nothing irreplaceable belongs here.
+      #   - Booting Windows while Jellyfin runs is genuine concurrent access.
+      #     Stop the service first, or do not do it.
+      assertion = !(lib.hasPrefix "/mnt/shared" cfg.libraryDir) || cfg.allowSharedNtfsLibrary;
       message = ''
-        media: the Jellyfin library is on the shared NTFS volume.
+        media: the Jellyfin library is on the shared NTFS volume
+        (/mnt/shared), but media.jellyfin.allowSharedNtfsLibrary is false.
 
-        /mnt/shared is the Windows dual-boot volume (opts.mountShared). An
-        unattended server writing to a hibernated Windows filesystem corrupts
-        it, and repairing it needs a keyboard and a booted Windows. Media and
-        state must live on native Linux filesystems.
+        /mnt/shared is the Windows dual-boot volume (opts.mountShared).
+        Setting media.jellyfin.allowSharedNtfsLibrary = true records that
+        Windows is not booted while this host runs unattended, and accepts
+        the trade-offs measured and documented in
+        nixos/config/system/media/jellyfin.nix.
+
+        If you are enabling this for the first time, check ownership and
+        permissions on a disposable directory on the same filesystem:
+          probe=$(sudo mktemp -d /mnt/shared/.jellyfin-ownership.XXXXXX)
+          sudo chown jellyfin:media "$probe"
+          sudo chmod 0750 "$probe"
+          sudo stat -c '%U:%G %a' "$probe"
+          sudo -u jellyfin test -r "$probe" && sudo -u jellyfin test -x "$probe"
+          sudo rmdir "$probe"
+        Expect jellyfin:media 750 and successful read/search checks. Run after
+        the jellyfin user and media group exist. The tmpfiles rule sets 0750
+        jellyfin:media on libraryDir; if chmod succeeds but chown does not,
+        Jellyfin would be locked out of its own library.
       '';
     }
   ];

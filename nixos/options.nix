@@ -496,14 +496,34 @@ rec {
     jellyfin = {
       enable = false;
 
-      # Native Linux paths only. /mnt/shared (the Windows NTFS volume,
-      # opts.mountShared) is refused by an assertion below rather than merely
-      # discouraged: an unattended server writing to a hibernated Windows
-      # filesystem corrupts it, and repairing that needs a keyboard.
+      # dataDir and configDir MUST stay on native Linux filesystems: they hold
+      # jellyfin.db and the wizard state, and they are what
+      # agentOps.backup.additionalSources exports.
       dataDir = "/var/lib/jellyfin";
       configDir = "/etc/jellyfin";
+
+      # The media library itself. /mnt/shared/Videos is the Windows dual-boot
+      # NTFS volume (opts.mountShared) and REQUIRES
+      # allowSharedNtfsLibrary = true below. What was measured on this host,
+      # and what does not go away, is in
+      # config/system/media/jellyfin.nix next to the assertion.
       libraryDir = "/srv/media/library";
       downloadDir = "/srv/media/download";
+
+      # Acknowledge that libraryDir is on the dual-boot NTFS volume.
+      #
+      # The original refusal said an unattended server writing to a hibernated
+      # Windows filesystem corrupts it. On THIS host Windows is not booted
+      # while the Legion runs unattended, so that specific path does not apply.
+      # Measured here (ntfs3, uid=1000, fmask/dmask=0000): SQLite locking is
+      # enforced, chmod persists, the volume is case-SENSITIVE, and
+      # hardlinks/symlinks/xattr/mmap/fsync/sparse writes all behave.
+      #
+      # What survives: found.000/found.001 on the volume mean chkdsk has had
+      # to recover it before, and booting Windows while Jellyfin runs is real
+      # concurrent access. Opt-in rather than deleted so the trade-off stays
+      # visible in the diff and greppable later.
+      allowSharedNtfsLibrary = false;
 
       # Loopback port. NOT opened in the firewall — Jellyfin binds 127.0.0.1
       # only and is published through a private Tailscale Serve listener, which
@@ -524,6 +544,26 @@ rec {
       # does not create an account or check for one; it records that the wizard
       # was completed, and false produces a build warning saying so.
       setupCompleted = false;
+
+      # Whether to RUN the tailscale-serve-jellyfin unit that maps the private
+      # HTTPS endpoint (serveHttpsPort) at 127.0.0.1:port.
+      #
+      # SEPARATE from setupCompleted on purpose. That option records a fact
+      # about the world (an administrator exists); this one records an intent
+      # (map the port). Conflating them made the bootstrap impossible: the
+      # serve unit exits 1 while the wizard is unfinished, and because it is
+      # wantedBy = multi-user.target it runs on EVERY activation, so a
+      # correct refusal failed the whole switch and rolled back jellyfin
+      # itself. Neither flag value escaped it — the second gate
+      # (jellyfin-private-config check, requiring Jellyfin's own
+      # IsStartupWizardCompleted marker) fails until the wizard has genuinely
+      # run. See config/system/media/jellyfin.nix.
+      #
+      # With this false the unit does not exist, which is an honest "off"
+      # rather than a permanent failure. An assertion below requires
+      # setupCompleted whenever this is true, so the two can never disagree
+      # in the direction that publishes early.
+      publishServe = true;
 
       hardwareAcceleration = {
         # OFF until jellyfin-accel-check passes on this machine. See
