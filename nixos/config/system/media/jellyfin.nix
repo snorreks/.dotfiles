@@ -37,9 +37,17 @@
 # giving a transcoder the same device is the ordinary way inference stops having
 # memory when a stream starts. Software transcoding remains available as the
 # explicit fallback and is unaffected by any of this.
-{config, pkgs, lib, opts, ...}: let
+{
+  config,
+  pkgs,
+  lib,
+  opts,
+  ...
+}: let
   cfg = opts.media.jellyfin;
-  safeDirectory = path: lib.hasPrefix "/" path && path != "/"
+  safeDirectory = path:
+    lib.hasPrefix "/" path
+    && path != "/"
     && !(lib.any (part: builtins.elem part ["" "." ".."]) (lib.tail (lib.splitString "/" path)));
   # Source proof (pinned nixpkgs Jellyfin v12.1):
   # https://github.com/jellyfin/jellyfin/blob/v12.1/MediaBrowser.Common/Net/NetworkConfiguration.cs
@@ -208,11 +216,45 @@
           *) printf '%s\n' "$cleanup_error" >&2; exit 1 ;;
         esac
       fi
-      if ! ${if cfg.setupCompleted then "true" else "false"}; then
+      if ! ${
+        if cfg.setupCompleted
+        then "true"
+        else "false"
+      }; then
         exit 1
       fi
       runuser -u jellyfin -- ${lib.getExe nativeConfig} check ${lib.escapeShellArg cfg.configDir}
-      tailscale serve --bg --https=${toString cfg.serveHttpsPort} http://127.0.0.1:${toString cfg.port}
+      # Publish the mapping. tailscaled can still answer BackendState=NoState
+      # here: After=tailscaled.service guarantees the process exists, not that
+      # its backend finished loading, and on a cold boot that race is lost
+      # often enough to strand this unit — a oneshot with no Restart=, so a
+      # single loss leaves it permanently failed, which makes
+      # switch-to-configuration exit 4 and sends ns-maint into rolling back an
+      # otherwise healthy activation. Retry ONLY that startup condition, and
+      # give up after NM_SERVE_PUBLISH_ATTEMPTS attempts (default 5, well
+      # inside TimeoutStartSec). Every other failure is real and must surface
+      # on the first attempt.
+      publish_attempts=1
+      publish_max=''${NM_SERVE_PUBLISH_ATTEMPTS:-5}
+      until publish_output="$(tailscale serve --bg --https=${toString cfg.serveHttpsPort} http://127.0.0.1:${toString cfg.port} 2>&1)"; do
+        case "''${publish_output%%$'\n'*}" in
+          "unexpected state: NoState")
+            if [ "$publish_attempts" -ge "$publish_max" ]; then
+              printf '%s\n' "$publish_output" >&2
+              exit 1
+            fi
+            publish_attempts=$((publish_attempts + 1))
+            sleep 1
+            ;;
+          *)
+            printf '%s\n' "$publish_output" >&2
+            exit 1
+            ;;
+        esac
+      done
+      if [ -n "$publish_output" ]; then
+        printf '%s\n' "$publish_output"
+      fi
     '';
   };
 in {
@@ -409,7 +451,10 @@ in {
       message = "media.jellyfin directories must be canonical absolute non-root paths";
     }
     {
-      assertion = builtins.isInt cfg.port && cfg.port > 0 && cfg.port <= 65535
+      assertion =
+        builtins.isInt cfg.port
+        && cfg.port > 0
+        && cfg.port <= 65535
         && !(builtins.elem cfg.port [22 2222 443]);
       message = "media.jellyfin.port must not claim SSH or tailnet HTTPS";
     }
@@ -463,7 +508,8 @@ in {
 
     {
       # Accel on without the check having passed, and without saying so.
-      assertion = !cfg.hardwareAcceleration.enable
+      assertion =
+        !cfg.hardwareAcceleration.enable
         || cfg.hardwareAcceleration.acknowledgeMissing;
       message = ''
         media: hardwareAcceleration.enable is true, but the capability check has
