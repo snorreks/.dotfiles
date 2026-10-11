@@ -253,9 +253,25 @@ t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
 t_start "boot counting is opt-in, and wired when it is on"
-out="$(cfg legion 'system.config.boot.loader.systemd-boot.bootCounting.enable')"
-assert_eq "off by default on the shipped server" "false" "$out"
+# Opt-in is proven by the host that does NOT opt in. gs65 leaves
+# bootHealth.enable at the base default, so its boot counting stays off and its
+# gate unit does not exist. Asserting this against the Legion would now be
+# asserting that the switch has no effect — the Legion opts in deliberately, in
+# hosts/legion/options.nix, and the assertion below covers that side.
+out="$(cfg gs65 '{ bc = system.config.boot.loader.systemd-boot.bootCounting.enable; gate = system.config.systemd.services ? boot-health-local; }')"
+assert_contains "off on the host that does not opt in" "$out" '"bc":false'
+assert_contains "and its local gate unit does not exist" "$out" '"gate":false'
 
+# The Legion is the host that opts in, so the wiring is asserted on the real
+# shipped configuration and not only on a synthetic one.
+out="$(cfg legion '{ bc = system.config.boot.loader.systemd-boot.bootCounting; gate = system.config.systemd.services.systemd-bless-boot.requires; }')"
+assert_contains "on for the Legion, which opts in" "$out" '"enable":true'
+assert_contains "with the configured number of tries" "$out" '"tries":3'
+assert_contains "and the blessing waits for the local gate" "$out" "boot-health-local.service"
+
+# And the synthetic combination still proves the wiring follows the OPTION
+# rather than the host — the property that breaks if someone hard-codes the
+# Legion's answer into the module.
 out="$(combo '"server"' true '{ bootHealth.enable = true; }' 'system.config.boot.loader.systemd-boot.bootCounting')"
 assert_contains "boot counting turns on" "$out" '"enable":true'
 assert_contains "with the configured number of tries" "$out" '"tries":3'

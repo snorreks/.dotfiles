@@ -63,20 +63,36 @@
   # what closes 27015/27036/27037/27040 and stops Steam running as a service.
   desktop.enable = false;
 
-  # 80 while it is a daily driver; 60 once it is parked and permanently on AC.
+  # 60: this machine is parked and permanently on AC. It carried 80 while it
+  # was a daily driver, and the achieved value is the same either way — see the
+  # note below — so this is the config saying what it actually means.
   #
   # 🔴 This hardware does not expose charge_control_end_threshold, so the
   # limit is applied through the ideapad conservation-mode rung, which pins the
   # pack at about 60% and NOT at the requested percentage. config/system/
   # battery.nix reports which rung it landed on and what it actually achieved,
-  # because "I set 80" and "the pack sits at 60" should not be a mystery.
-  batteryChargeLimit = 80;
+  # because a request and the value the pack actually sits at should not be a
+  # mystery.
+  batteryChargeLimit = 60;
 
   # ── Boot health blessing ───────────────────────────────────────────────────
-  # Still OFF: it needs a reboot to observe working, and the first observation
-  # has to be one you scheduled with access to this machine. Enable it after
-  # the checklist in docs/headless-server.md has been walked once by hand.
-  bootHealth.enable = false;
+  # ON. It was off until someone had watched it work, because the first
+  # observation of it is a reboot you have to choose to take; that reboot is
+  # now the attended session described in docs/headless-server.md § "Testing
+  # the boot blessing".
+  #
+  # What this turns on, and they are ONE decision: systemd-boot boot counting
+  # (boot.loader.systemd-boot.bootCounting, tries = 3) and the LOCAL gate in
+  # front of the blessing (config/system/boot/health.sh, required by
+  # systemd-bless-boot). If the gate fails, the blessing does not happen, the
+  # counter stays, and systemd-boot falls back to the previous entry by itself
+  # once the tries run out — no reboot from here, no timer, no network.
+  #
+  # The critical-unit list is LONGER on this host than the option default:
+  # role = "server" makes opts.headless true, which appends sshd.service, and
+  # health.sh appends user@<uid>.service for the management user. So a boot in
+  # which sshd or the operator's session did not come up is not blessed.
+  bootHealth.enable = true;
 
   # acpi_call was loaded on both hosts for "advanced ACPI functions"; nothing
   # in this configuration calls it, so it is not loaded here. acpi_osi=Linux
