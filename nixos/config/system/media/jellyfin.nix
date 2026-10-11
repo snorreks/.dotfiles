@@ -499,11 +499,18 @@ in {
         the trade-offs measured and documented in
         nixos/config/system/media/jellyfin.nix.
 
-        If you are enabling this for the first time, run
-        `sudo bash /tmp/opencode/chown-test.sh` first: the tmpfiles rule
-        sets 0750 jellyfin:media on libraryDir, and on a filesystem where
-        chmod succeeds but chown does not, Jellyfin would be locked out of
-        its own library.
+        If you are enabling this for the first time, check ownership and
+        permissions on a disposable directory on the same filesystem:
+          probe=$(sudo mktemp -d /mnt/shared/.jellyfin-ownership.XXXXXX)
+          sudo chown jellyfin:media "$probe"
+          sudo chmod 0750 "$probe"
+          sudo stat -c '%U:%G %a' "$probe"
+          sudo -u jellyfin test -r "$probe" && sudo -u jellyfin test -x "$probe"
+          sudo rmdir "$probe"
+        Expect jellyfin:media 750 and successful read/search checks. Run after
+        the jellyfin user and media group exist. The tmpfiles rule sets 0750
+        jellyfin:media on libraryDir; if chmod succeeds but chown does not,
+        Jellyfin would be locked out of its own library.
       '';
     }
   ];

@@ -48,15 +48,24 @@ t_done() {
   printf '    ok   %s\n' "$CURRENT_TEST"
   CURRENT_TEST=""
 }
+assert_eval_ok() {
+  if [[ "$2" == "EVAL ERROR:"* ]]; then
+    _fail "$1: $2"
+    return 1
+  fi
+}
 assert_eq() {
+  assert_eval_ok "$1" "$3" || return 1
   if [[ "$2" == "$3" ]]; then return 0; fi
   _fail "$1: expected '$2', got '$3'"
 }
 assert_contains() {
+  assert_eval_ok "$1" "$2" || return 1
   if [[ "$2" == *"$3"* ]]; then return 0; fi
   _fail "$1: expected '$3' in '$2'"
 }
 assert_not_contains() {
+  assert_eval_ok "$1" "$2" || return 1
   if [[ "$2" != *"$3"* ]]; then return 0; fi
   _fail "$1: did NOT expect '$3' in '$2'"
 }
@@ -141,6 +150,7 @@ t_start "both hosts and both variants evaluate"
 # -fast variant would only be noticed the day someone wanted a quick rebuild.
 for output in legion gs65 legion-fast gs65-fast; do
   out="$(cfg "$output" 'system.config.networking.hostName')"
+  assert_eval_ok "nixosConfigurations.$output" "$out" || continue
   case "$out" in
     *'"legion"'* | *'"gs65"'*) ;;
     *) _fail "nixosConfigurations.$output did not evaluate (got: $(printf '%s' "$out" | head -3))" ;;
@@ -227,10 +237,12 @@ wg="$(combo '"server"' true '{}' 'system.config.networking.wg-quick.interfaces.w
 assert_eq "no wg0 interface exists" '"absent"' "$wg"
 
 rules="$(combo '"server"' true '{}' 'system.config.security.sudo.extraRules')"
-case "$rules" in
-  *wg-quick* | *proton-wg*) _fail "a server must have no NOPASSWD rule that can write the VPN config (got: $rules)" ;;
-  *) : ;;
-esac
+if assert_eval_ok "server sudo rules" "$rules"; then
+  case "$rules" in
+    *wg-quick* | *proton-wg*) _fail "a server must have no NOPASSWD rule that can write the VPN config (got: $rules)" ;;
+    *) : ;;
+  esac
+fi
 
 # …and it is all still there on a desktop, or the toggle would simply be broken.
 wg="$(combo '"desktop"' false '{}' 'builtins.hasAttr "wg0" system.config.networking.wg-quick.interfaces')"

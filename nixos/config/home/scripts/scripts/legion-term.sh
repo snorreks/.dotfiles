@@ -61,10 +61,9 @@ fi
 # it reaches the inner sh literally, with "$1" bound at runtime from the
 # argument after the arg0 "sh".
 #
-# Checked rather than assumed: swapping to double quotes does NOT break this
-# particular call, because `fail` receives the message as its own "$1", so the
-# outer expansion yields the same text. It would only need escaping to stay
-# equivalent, and the literal form states the intent more directly.
+# Messages such as "$ts_state" must remain positional arguments. Interpolating
+# them into the `sh -c` program could cause their contents to be parsed as shell
+# syntax rather than printed as data.
 #
 # SC2016 is disabled rather than baselined so the reason sits next to the code
 # instead of in a list of 29 other findings in another file.

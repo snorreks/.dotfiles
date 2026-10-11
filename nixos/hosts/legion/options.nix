@@ -71,20 +71,12 @@
   acpi.acpiCall = false;
 
   # ── Media server ───────────────────────────────────────────────────────────
-  # STAGED, NOT YET ENABLED. `media.jellyfin.enable` is still false at the base
-  # default in nixos/options.nix. Flipping it is one line here, deliberately
-  # left out until `sudo bash /tmp/opencode/chown-test.sh` reports ALL PASS:
-  # the tmpfiles rule sets 0750 jellyfin:media on libraryDir, and on a
-  # filesystem where chmod succeeds but chown does not, Jellyfin ends up locked
-  # out of its own library while the build looks clean.
+  # Jellyfin is enabled with its library on the shared NTFS volume. Ownership
+  # and permissions were verified on ntfs3: chown works, chmod persists, and
+  # directory permissions are enforced. The 0750 jellyfin:media tmpfiles rule
+  # in config/system/media/jellyfin.nix can therefore keep the library readable
+  # by Jellyfin.
   media.jellyfin = {
-    # GATED ON: sudo bash /tmp/opencode/chown-test.sh -> ALL PASS
-    #   chown works on ntfs3; chmod persists across it; and the permission
-    #   model genuinely enforces (nobody refused a root-owned 0750 dir,
-    #   allowed at 0755). The 0750 jellyfin:media tmpfiles rule in
-    #   config/system/media/jellyfin.nix can therefore succeed, instead of
-    #   leaving the library unreadable to jellyfin while the build reports
-    #   success.
     enable = true;
 
     # The library is the existing 117G of movies on the dual-boot volume
