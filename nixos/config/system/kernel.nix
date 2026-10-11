@@ -53,9 +53,16 @@
   # iGPU still load its GuC/HuC firmware without it?" — is a hardware
   # observation, listed as pending in docs/headless-server.md rather than
   # claimed here.
+  #
+  # opts.hostKernelParams carries the per-host workarounds. They are appended
+  # last, and for the same reason as everything above: each one is a fact about
+  # ONE machine's firmware or hardware, verified in that machine's own boot log,
+  # and must not leak onto the other host. See the list's definition in
+  # nixos/options.nix for the bar an entry has to clear.
   hostKernelParams =
     lib.optional (acpi.acpiOsi != null) "acpi_osi=${acpi.acpiOsi}"
-    ++ lib.optional (acpi.i915Guc != null) "i915.enable_guc=${toString acpi.i915Guc}";
+    ++ lib.optional (acpi.i915Guc != null) "i915.enable_guc=${toString acpi.i915Guc}"
+    ++ opts.hostKernelParams;
 in {
   boot = {
     # ── Which kernel ─────────────────────────────────────────────────────────
@@ -91,14 +98,19 @@ in {
     # and never from the top-level `pkgs`: a module built against a different
     # kernel refuses to load with an ENOEXEC vermagic error, and on a server
     # that error happens after the boot you needed the machine for.
-    extraModulePackages =
-      with config.boot.kernelPackages;
+    extraModulePackages = with config.boot.kernelPackages;
       lib.optional acpi.acpiCall acpi_call;
 
     # Prevent conflicting drivers from loading.
-    blacklistedKernelModules = [
-      "nouveau" # The open-source NVIDIA driver, which conflicts with the proprietary one.
-    ];
+    #
+    # The per-host entries come from opts.hostBlacklistedKernelModules; see the
+    # note in nixos/options.nix — a module is only blacklisted on the host
+    # whose own boot log showed the defect, and only if it is modular there.
+    blacklistedKernelModules =
+      [
+        "nouveau" # The open-source NVIDIA driver, which conflicts with the proprietary one.
+      ]
+      ++ opts.hostBlacklistedKernelModules;
 
     # Low-level kernel module configuration.
     extraModprobeConfig = ''
