@@ -11,33 +11,21 @@
   bootHealth = opts.bootHealth;
   criticalUnits = bootHealth.criticalUnits ++ lib.optionals opts.headless ["sshd.service"];
   # systemd-bless-boot exits 1 with "Not booted with boot counting in effect."
-  # whenever the booted entry carries no counter — which is the ordinary state
-  # on every boot AFTER a blessing. NixOS says as much itself (systemd.nix:
-  # "`systemd-bless-boot good` fails once the current boot has been blessed").
-  # Wiring the unit into the boot graph without this wrapper would therefore
-  # leave a FAILED unit on every routine boot, and a failed unit makes
-  # switch-to-configuration exit 4, which ns-maint reads as "activation
-  # failed" and rolls an otherwise healthy activation back. Treat exactly that
-  # one message as a no-op success and pass every other failure through.
-  blessWrapper = pkgs.writeShellApplication {
-    name = "systemd-bless-boot-noop";
-    runtimeInputs = [config.systemd.package];
-    text = ''
-      status=0
-      output="$(systemd-bless-boot good 2>&1)" || status=$?
-      if [ "$status" -eq 0 ]; then
-        if [ -n "$output" ]; then
-          printf '%s\n' "$output"
-        fi
-        exit 0
-      fi
-      printf '%s\n' "$output" >&2
-      case "$output" in
-        *"Not booted with boot counting in effect."*) exit 0 ;;
-      esac
-      exit "$status"
-    '';
-  };
+  # whenever the booted entry carries no counter — the ordinary state on every
+  # boot AFTER a blessing. NixOS says as much itself (systemd.nix: "`systemd-bless-boot
+  # good` fails once the current boot has been blessed"). The unit still has to
+  # be in the boot graph (nothing else pulls it in), so wiring it without the
+  # wrapper would leave a FAILED unit on every routine boot — and a failed unit
+  # makes switch-to-configuration exit 4, which ns-maint reads as "activation
+  # failed" and rolls the whole activation back. bless.sh handles exactly that
+  # one message as a no-op; its header carries the full reasoning.
+  #
+  # The target path is published as a unit Environment rather than substituted
+  # into the script, so the test can read the EXACT value this config computes
+  # and assert it is executable. Substituting it into bless.sh hid the target
+  # from `nix eval`, and an assertion that hardcoded the same path instead
+  # proved nothing: mutating the config left it green.
+  blessScript = ./boot/bless.sh;
 in {
   boot = {
     # ── Shared NTFS volume ──────────────────────────────────────────────────
@@ -195,7 +183,12 @@ in {
     serviceConfig = {
       # The empty assignment resets the ExecStart inherited from systemd's own
       # unit file; without it a oneshot would append and run both commands.
-      ExecStart = ["" "${blessWrapper}/bin/systemd-bless-boot-noop"];
+      ExecStart = ["" "${pkgs.runtimeShell} ${blessScript}"];
+      # systemd-bless-boot is NOT on PATH — it lives in $pkg/lib/systemd, which
+      # is exactly why calling it by name died with 127 and took a healthy
+      # activation down with it. Declared here, read by bless.sh, asserted by
+      # tests: one place, and the test reads that same place.
+      Environment = ["NM_BLESS_BOOT=${config.systemd.package}/lib/systemd/systemd-bless-boot"];
     };
   };
 }

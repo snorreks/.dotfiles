@@ -323,6 +323,47 @@ teardown
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
+# bless.sh is the other half of this mechanism: it runs systemd-bless-boot
+# without letting a routine no-op fail the unit. The no-op is not hypothetical
+# — the first version of this wrapper called the binary by name, it is not on
+# PATH (it lives in $pkg/lib/systemd, not $pkg/bin), exited 127, and took a
+# healthy activation down with it via switch-to-configuration's exit 4. These
+# run the SHIPPED script against a stub, so what is asserted is the real logic
+# rather than a paraphrase of it.
+BLESS="$ROOT/config/system/boot/bless.sh"
+stub_bless() { # $1 = exit status, $2 = output
+  printf '#!/bin/sh\nprintf "%%s\\n" "%s"\nexit %s\n' "$2" "$1" >"$TMP/stub-bless"
+  chmod +x "$TMP/stub-bless"
+}
+
+t_start "an already-blessed no-op must not fail the unit"
+setup
+stub_bless 1 "Not booted with boot counting in effect."
+out="$(NM_BLESS_BOOT="$TMP/stub-bless" bash "$BLESS" 2>&1)" && rc=0 || rc=$?
+assert_eq "exit status is 0" 0 "$rc"
+assert_contains "the reason still reaches the journal" "$out" "Not booted with boot counting in effect."
+teardown
+t_done
+
+t_start "a real blessing failure still fails the unit"
+setup
+stub_bless 1 "Failed to update the boot loader entry"
+out="$(NM_BLESS_BOOT="$TMP/stub-bless" bash "$BLESS" 2>&1)" && rc=0 || rc=$?
+assert_ne_zero "exit status" "$rc"
+assert_contains "the real message is surfaced, not swallowed" "$out" "Failed to update the boot loader entry"
+teardown
+t_done
+
+t_start "a successful blessing passes its message through"
+setup
+stub_bless 0 "Marked boot as good. (Boot attempt counter is at 1.)"
+out="$(NM_BLESS_BOOT="$TMP/stub-bless" bash "$BLESS" 2>&1)" && rc=0 || rc=$?
+assert_eq "exit status" 0 "$rc"
+assert_contains "the blessing message is reported" "$out" "Marked boot as good."
+teardown
+t_done
+
+# ─────────────────────────────────────────────────────────────────────────────
 if [[ "$TESTS_FAILED" -ne 0 ]]; then
   printf '\n\033[31mboot-health: %d assertion(s) failed\033[0m\n' "$TESTS_FAILED"
   exit 1
