@@ -277,7 +277,7 @@ assert_contains "and the blessing waits for the local gate" "$out" "boot-health-
 out="$(cfg legion '{ w = system.config.systemd.services.systemd-bless-boot.wantedBy; x = system.config.systemd.services.systemd-bless-boot.serviceConfig.ExecStart; }')"
 assert_contains "the blessing is enqueued at boot" "$out" '"multi-user.target"'
 assert_contains "its ExecStart resets the package unit's entry first" "$out" '""'
-assert_contains "then runs the wrapper that tolerates the already-blessed no-op" "$out" "systemd-bless-boot-noop"
+assert_contains "then runs the wrapper that tolerates the already-blessed no-op" "$out" "bless.sh"
 
 # And the synthetic combination still proves the wiring follows the OPTION
 # rather than the host — the property that breaks if someone hard-codes the
@@ -294,6 +294,19 @@ out="$(combo '"server"' true '{ bootHealth.enable = true; }' 'system.config.syst
 assert_contains "and the blessing is enqueued at boot" "$out" "multi-user.target"
 out="$(combo '"desktop"' false '{}' 'system.config.systemd.services.systemd-bless-boot.wantedBy')"
 assert_eq "but never on a configuration that did not opt in" '[]' "$out"
+# The wrapper calls systemd-bless-boot by absolute path because it lives in
+# $pkg/lib/systemd, NOT $pkg/bin. The first version called it by name, was not
+# on PATH, exited 127, and took a healthy activation down with exit 4.
+#
+# The path is read from the CONFIG's own Environment, not hardcoded here: an
+# earlier version of this assertion hardcoded the same string boot.nix uses,
+# so mutating boot.nix left it green — a test that could not fail. Mutating
+# the config must move this assertion.
+envlist="$(cfg legion 'system.config.systemd.services.systemd-bless-boot.serviceConfig.Environment')"
+tgt="${envlist#*NM_BLESS_BOOT=}"
+tgt="${tgt%%\"*}"
+assert_eq "the wrapper's declared target exists and is executable" "true" \
+  "$([[ -x "$tgt" ]] && echo true)"
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
