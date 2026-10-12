@@ -11,6 +11,7 @@ fi
 "$PYTHON" - "$HERE/../../config/system/media/jellyfin.nix" <<'PY'
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -84,7 +85,24 @@ with tempfile.TemporaryDirectory() as tmp:
     cli.mkdir()
     log = root / 'calls'
     tailscale = cli / 'tailscale'
-    tailscale.write_text('#!' + sys.executable + '\nimport os,sys\nwith open(os.environ["CALLS"], "a") as f: f.write(" ".join(sys.argv[1:]) + "\\n")\nif sys.argv[-1] == "off" and os.environ.get("CLEANUP_ERROR"):\n print(os.environ["CLEANUP_ERROR"], file=sys.stderr)\n sys.exit(1)\n')
+    tailscale.write_text('#!' + sys.executable + '''
+import os, sys
+with open(os.environ["CALLS"], "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+if sys.argv[-1] == "off" and os.environ.get("CLEANUP_ERROR"):
+    print(os.environ["CLEANUP_ERROR"], file=sys.stderr)
+    sys.exit(1)
+if "--bg" in sys.argv and os.environ.get("PUBLISH_ERROR"):
+    marker = os.environ.get("PUBLISH_MARKER", "")
+    if os.environ.get("PUBLISH_ONCE"):
+        if marker and not os.path.exists(marker):
+            open(marker, "w").close()
+            print(os.environ["PUBLISH_ERROR"], file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(os.environ["PUBLISH_ERROR"], file=sys.stderr)
+        sys.exit(1)
+''')
     runuser = cli / 'runuser'
     runuser.write_text('#!' + sys.executable + '\nimport os,sys\nassert sys.argv[1:4] == ["-u", "jellyfin", "--"]\nos.execv(sys.argv[4], sys.argv[4:])\n')
     tailscale.chmod(0o755)
@@ -92,7 +110,11 @@ with tempfile.TemporaryDirectory() as tmp:
     for opted, flag, published in ((False, 'true', False), (True, 'false', False), (True, 'True', False), (True, 'true', True)):
         system.write_text('<ServerConfiguration><IsStartupWizardCompleted>' + flag + '</IsStartupWizardCompleted></ServerConfiguration>')
         log.write_text('')
-        script = shell.replace('${if cfg.setupCompleted then "true" else "false"}', 'true' if opted else 'false')
+        # Match the Nix interpolation however alejandra laid it out. It sits
+        # inside a '' shell string, so the formatter may split it over several
+        # lines; the shell that comes out must still see a literal value.
+        script = re.sub(r'\$\{\s*if cfg\.setupCompleted\s+then\s+"true"\s+else\s+"false"\s*\}',
+                        'true' if opted else 'false', shell)
         result = subprocess.run([shutil.which('bash'), '-e', '-u', '-o', 'pipefail', '-c', script], env={**os.environ, 'PATH': str(cli), 'CALLS': str(log)}, capture_output=True)
         assert (result.returncode == 0) == published
         calls = log.read_text().splitlines()
@@ -122,6 +144,51 @@ with tempfile.TemporaryDirectory() as tmp:
         assert len(log.read_text().splitlines()) == (2 if succeeds else 1)
         if not succeeds:
             assert error.encode() in result.stderr
+    # The publish call racing a cold tailscaled. Only that startup condition is
+    # retried; every other failure must surface on the first attempt. This is
+    # the path that actually broke on a cold boot: the cleanup call above was
+    # already tolerated, but the publish below still died and, with no Restart=
+    # on the oneshot, stranded the unit as failed.
+    marker = root / 'publish-marker'
+    def publish_run(error, once=False, attempts=None):
+        if marker.exists():
+            marker.unlink()
+        # Fake CLIs stay first so they shadow any real tailscale/runuser; the
+        # rest of PATH is needed because, unlike the cleanup path above, this
+        # one sleeps between retries.
+        env = {**os.environ, 'PATH': str(cli) + os.pathsep + os.environ.get('PATH', ''),
+               'CALLS': str(log),
+               'PUBLISH_ERROR': error, 'PUBLISH_MARKER': str(marker)}
+        if once:
+            env['PUBLISH_ONCE'] = '1'
+        if attempts is not None:
+            env['NM_SERVE_PUBLISH_ATTEMPTS'] = str(attempts)
+        log.write_text('')
+        result = subprocess.run([shutil.which('bash'), '-e', '-u', '-o', 'pipefail', '-c', script],
+                                env=env, capture_output=True)
+        return result, log.read_text().splitlines()
+
+    # Lost the race once, then won it: cleanup, failed publish, successful publish.
+    result, calls = publish_run('unexpected state: NoState', once=True)
+    assert result.returncode == 0, result.stderr
+    assert calls[0] == 'serve --https=8443 off'
+    assert calls[1] == calls[2] == 'serve --bg --https=8443 http://127.0.0.1:28096'
+    assert len(calls) == 3
+    assert b'fixture-secret' not in result.stdout + result.stderr
+
+    # Never wins the race: gives up after NM_SERVE_PUBLISH_ATTEMPTS and fails,
+    # having spent exactly one attempt per try and no more.
+    result, calls = publish_run('unexpected state: NoState', attempts=2)
+    assert result.returncode != 0, result.returncode
+    assert b'unexpected state: NoState' in result.stderr
+    assert len(calls) == 1 + 2
+
+    # A real failure is never retried: one publish attempt, then stop.
+    result, calls = publish_run('failed to connect to local tailscaled')
+    assert result.returncode != 0
+    assert b'failed to connect to local tailscaled' in result.stderr
+    assert len(calls) == 1 + 1
+
     # Refuse symlink reads both at the file and directory level.
     system.unlink()
     system.symlink_to(auth)
