@@ -18,7 +18,17 @@
       media =
         base.media
         // {
-          jellyfin = base.media.jellyfin // {enable = true;};
+          jellyfin =
+            base.media.jellyfin
+            // {
+              enable = true;
+              # publishServe defaults to true while setupCompleted defaults to
+              # false, which trips media's own consistency assertion — so this
+              # fixture, which merely enables Jellyfin to prove backup source
+              # wiring, would not evaluate at all. The fixture says nothing
+              # about publication, so it does not publish.
+              publishServe = false;
+            };
           syncthing = base.media.syncthing // {enable = true;};
         };
     };
