@@ -1,29 +1,42 @@
 # Standalone enabled unit evaluation; no runtime secrets or service startup.
-{nixpkgsPath ? <nixpkgs>}:
-let
+{nixpkgsPath ? <nixpkgs>}: let
   pkgs = import nixpkgsPath {};
   lib = pkgs.lib;
   defaults = import ../../options.nix;
-  opts = defaults // {
-    media = defaults.media // {
-      torrents = defaults.media.torrents // {
-        enable = true;
-        tunnel = defaults.media.torrents.tunnel // {
-          interface = "fixturewg";
-          endpoint = "203.0.113.7:51820";
-          address = "10.8.0.2/32";
-          resolver = "10.8.0.1";
+  opts =
+    defaults
+    // {
+      media =
+        defaults.media
+        // {
+          torrents =
+            defaults.media.torrents
+            // {
+              enable = true;
+              tunnel =
+                defaults.media.torrents.tunnel
+                // {
+                  interface = "fixturewg";
+                  endpoint = "203.0.113.7:51820";
+                  address = "10.8.0.2/32";
+                  resolver = "10.8.0.1";
+                };
+            };
         };
-      };
     };
-  };
   system = import "${nixpkgsPath}/nixos/lib/eval-config.nix" {
     specialArgs = {inherit opts;};
     modules = [
       ../../config/system/media/torrents.nix
       ({lib, ...}: {
-        options.sops.secrets = lib.mkOption {type = lib.types.attrsOf lib.types.anything; default = {};};
-        options.agentOps.backup = lib.mkOption {type = lib.types.anything; default = {};};
+        options.sops.secrets = lib.mkOption {
+          type = lib.types.attrsOf lib.types.anything;
+          default = {};
+        };
+        options.agentOps.backup = lib.mkOption {
+          type = lib.types.anything;
+          default = {};
+        };
         config.system.stateVersion = "25.11";
       })
     ];

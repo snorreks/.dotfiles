@@ -80,15 +80,13 @@ in {
       # The same union server.nix acts on, computed rather than imported, so this
       # reports the CONDITION and not a second opinion about it.
       lingering = opts.headless || opts.mobileAgents.enable;
-      dns =
-        let
-          d = dnsPolicy {headless = opts.headless;};
-        in
-        {
-          inherit (d) owner;
-          inherit (d) nameservers;
-          maxnames = d.maxnames;
-        };
+      dns = let
+        d = dnsPolicy {headless = opts.headless;};
+      in {
+        inherit (d) owner;
+        inherit (d) nameservers;
+        maxnames = d.maxnames;
+      };
     };
 
     # The invariant that made this a bug once, stated where it can be checked.

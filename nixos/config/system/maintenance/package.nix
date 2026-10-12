@@ -39,11 +39,15 @@ writeShellApplication {
   # is the tool that owns the reboot-free maintenance contract.
   # Store-backed configuration survives sudo and systemd-run. Do not preserve
   # caller-controlled command/path overrides in a privileged executable.
-  text = ''
-    for nm_variable in "''${!NM_@}"; do
-      unset "$nm_variable"
-    done
-  '' + lib.concatStringsSep "\n" (lib.mapAttrsToList
-    (name: value: "export ${name}=${lib.escapeShellArg value}") deploymentConfig)
-    + "\n" + builtins.readFile ./ns-maint.sh;
+  text =
+    ''
+      for nm_variable in "''${!NM_@}"; do
+        unset "$nm_variable"
+      done
+    ''
+    + lib.concatStringsSep "\n" (lib.mapAttrsToList
+      (name: value: "export ${name}=${lib.escapeShellArg value}")
+      deploymentConfig)
+    + "\n"
+    + builtins.readFile ./ns-maint.sh;
 }

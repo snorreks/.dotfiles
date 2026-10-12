@@ -13,7 +13,13 @@
 # backup mechanism, a second health collector or a second set of cgroup
 # policies. Torrents add only a narrow backend UID rejection, never host NAT,
 # forwarding, or a global firewall policy change.
-{config, pkgs, lib, opts, ...}: let
+{
+  config,
+  pkgs,
+  lib,
+  opts,
+  ...
+}: let
   jellyfin = opts.media.jellyfin;
   torrents = opts.media.torrents;
 
@@ -33,7 +39,6 @@
     text = builtins.readFile ./scripts/media-state.sh;
   };
   backupEnabled = config.agentOps.backup.enable;
-
 in {
   imports = [
     ./jellyfin.nix
@@ -151,8 +156,9 @@ in {
       MEDI_STATE_DIR = exportDir;
       MEDI_JELLYFIN_DB =
         lib.optionalString jellyfin.enable "${jellyfin.dataDir}/data/jellyfin.db";
-      MEDI_QBITTORRENT_PATHS_JSON = builtins.toJSON (lib.optionals torrents.enable
-        (lib.unique [torrents.stateDir torrents.configDir]));
+      MEDI_QBITTORRENT_PATHS_JSON =
+        builtins.toJSON (lib.optionals torrents.enable
+          (lib.unique [torrents.stateDir torrents.configDir]));
       MEDI_QBITTORRENT_UNIT = lib.optionalString torrents.enable "qbittorrent.service";
     };
 

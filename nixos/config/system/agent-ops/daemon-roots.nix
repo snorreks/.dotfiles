@@ -64,7 +64,10 @@
     text = builtins.readFile script;
   };
   pinCommand = lib.escapeShellArgs (["${lib.getExe tool}" "pin"] ++ lib.concatMap (unit: ["--unit" unit]) cfg.units);
-  daemonEnvironment = {NM_GCROOTS = cfg.gcrootsDir; NS_OPS_USER = opts.username;};
+  daemonEnvironment = {
+    NM_GCROOTS = cfg.gcrootsDir;
+    NS_OPS_USER = opts.username;
+  };
 in {
   options.agentOps.daemonRoots = {
     enable = lib.mkOption {

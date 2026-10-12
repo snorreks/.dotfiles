@@ -24,7 +24,13 @@
 # Every remote command here therefore passes an EXPLICIT `--machine <id>`, and
 # obtains the id from `herdr machine list` rather than from a hard-coded string
 # that a re-created machine invalidates.
-{config, lib, opts, pkgs, ...}: let
+{
+  config,
+  lib,
+  opts,
+  pkgs,
+  ...
+}: let
   cfg = opts.travel;
 
   # The pin. Empty means "not pinned yet", which is reported as such rather than
@@ -77,9 +83,15 @@
   # Tailscale SSH reports the machine's own /etc/ssh/ssh_host_ed25519_key), so
   # both patterns carry the same key. `lib.unique` collapses them into one line
   # when a host is configured with sshPort = tailscalePort = 22.
-  hostPatternFor = port: if port == 22 then cfg.serverHost else "[${cfg.serverHost}]:${toString port}";
+  hostPatternFor = port:
+    if port == 22
+    then cfg.serverHost
+    else "[${cfg.serverHost}]:${toString port}";
   hostPatterns = lib.unique (map hostPatternFor [cfg.sshPort cfg.tailscalePort]);
-  publicKey = (import ../../lib/host-policy.nix).travelHostKey {key = cfg.serverHostKey; type = cfg.serverHostKeyType;};
+  publicKey = (import ../../lib/host-policy.nix).travelHostKey {
+    key = cfg.serverHostKey;
+    type = cfg.serverHostKeyType;
+  };
   knownHostsEntry = lib.concatMapStrings (pattern: "${pattern} ${publicKey}\n") hostPatterns;
 in {
   # ── SSH aliases ────────────────────────────────────────────────────────────
@@ -103,11 +115,15 @@ in {
       # home-manager no longer pre-empts it. The travel pin is a SECOND file, so
       # both are listed: ~/.ssh/known_hosts is the one that grows live, and
       # dropping it would break github.com and gitlab.com lookups.
-      ${if pinned then ''
-        UserKnownHostsFile ~/.ssh/known_hosts ~/.ssh/known_hosts.travel
-      '' else ''
-        UserKnownHostsFile ~/.ssh/known_hosts
-      ''}
+      ${
+        if pinned
+        then ''
+          UserKnownHostsFile ~/.ssh/known_hosts ~/.ssh/known_hosts.travel
+        ''
+        else ''
+          UserKnownHostsFile ~/.ssh/known_hosts
+        ''
+      }
 
       Host ${cfg.serverHost}
           HostName ${cfg.serverHost}
@@ -144,7 +160,10 @@ in {
           # socket. `auto` means the first connection becomes the master.
           ControlMaster auto
           ControlPersist 10m
-      ${if pinned then hostKeyLine else ''
+      ${
+        if pinned
+        then hostKeyLine
+        else ''
           # ð NOT PINNED, AND THIS REFUSES TO CONNECT.
           #
           # This was `StrictHostKeyChecking no` with `UserKnownHostsFile
@@ -159,7 +178,8 @@ in {
           StrictHostKeyChecking yes
           UserKnownHostsFile /dev/null
           LogLevel VERBOSE
-      ''}
+        ''
+      }
 
       Host ${cfg.serverHost}-tailscale
           HostName ${cfg.serverHost}

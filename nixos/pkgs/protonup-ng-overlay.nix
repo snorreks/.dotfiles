@@ -16,6 +16,6 @@
 # protonup-ng itself) ships the fix.
 final: prev: {
   protonup-ng = prev.protonup-ng.overrideAttrs (old: {
-    patches = (old.patches or [ ]) ++ [ ./protonup-ng-ge-per-arch.patch ];
+    patches = (old.patches or []) ++ [./protonup-ng-ge-per-arch.patch];
   });
 }
