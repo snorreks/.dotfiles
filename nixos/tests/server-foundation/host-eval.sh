@@ -261,6 +261,9 @@ t_start "boot counting is opt-in, and wired when it is on"
 out="$(cfg gs65 '{ bc = system.config.boot.loader.systemd-boot.bootCounting.enable; gate = system.config.systemd.services ? boot-health-local; }')"
 assert_contains "off on the host that does not opt in" "$out" '"bc":false'
 assert_contains "and its local gate unit does not exist" "$out" '"gate":false'
+# Nothing may pull the blessing in on a host that did not ask for it.
+out="$(cfg gs65 'system.config.systemd.services.systemd-bless-boot.wantedBy')"
+assert_eq "and it is not enqueued at boot there" '[]' "$out"
 
 # The Legion is the host that opts in, so the wiring is asserted on the real
 # shipped configuration and not only on a synthetic one.
@@ -268,6 +271,13 @@ out="$(cfg legion '{ bc = system.config.boot.loader.systemd-boot.bootCounting; g
 assert_contains "on for the Legion, which opts in" "$out" '"enable":true'
 assert_contains "with the configured number of tries" "$out" '"tries":3'
 assert_contains "and the blessing waits for the local gate" "$out" "boot-health-local.service"
+# Being WANTED BY is what makes any of it happen. Without it the whole chain
+# is never enqueued: observed on a cold boot as "No jobs running" with
+# boot-complete.target inactive, while the gate had run on the previous boot.
+out="$(cfg legion '{ w = system.config.systemd.services.systemd-bless-boot.wantedBy; x = system.config.systemd.services.systemd-bless-boot.serviceConfig.ExecStart; }')"
+assert_contains "the blessing is enqueued at boot" "$out" '"multi-user.target"'
+assert_contains "its ExecStart resets the package unit's entry first" "$out" '""'
+assert_contains "then runs the wrapper that tolerates the already-blessed no-op" "$out" "systemd-bless-boot-noop"
 
 # And the synthetic combination still proves the wiring follows the OPTION
 # rather than the host — the property that breaks if someone hard-codes the
@@ -278,6 +288,12 @@ assert_contains "with the configured number of tries" "$out" '"tries":3'
 
 out="$(combo '"server"' true '{ bootHealth.enable = true; }' 'system.config.systemd.services.systemd-bless-boot.requires')"
 assert_contains "and the blessing waits for the local gate" "$out" "boot-health-local.service"
+# The enqueue must follow the OPTION, not the Legion — otherwise a host that
+# opts in later would silently get no gate.
+out="$(combo '"server"' true '{ bootHealth.enable = true; }' 'system.config.systemd.services.systemd-bless-boot.wantedBy')"
+assert_contains "and the blessing is enqueued at boot" "$out" "multi-user.target"
+out="$(combo '"desktop"' false '{}' 'system.config.systemd.services.systemd-bless-boot.wantedBy')"
+assert_eq "but never on a configuration that did not opt in" '[]' "$out"
 t_done
 
 # ─────────────────────────────────────────────────────────────────────────────
