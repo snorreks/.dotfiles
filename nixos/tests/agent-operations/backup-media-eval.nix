@@ -12,12 +12,16 @@
 #   * the unsupported ioMaxConcurrent setting is gone from options and config.
 {nixpkgs ? <nixpkgs>}: let
   base = import ../../options.nix;
-  opts = base // {
-    media = base.media // {
-      jellyfin = base.media.jellyfin // {enable = true;};
-      syncthing = base.media.syncthing // {enable = true;};
+  opts =
+    base
+    // {
+      media =
+        base.media
+        // {
+          jellyfin = base.media.jellyfin // {enable = true;};
+          syncthing = base.media.syncthing // {enable = true;};
+        };
     };
-  };
   stateDir = "/var/lib/custom-backup";
   evaluate = extra:
     (import (nixpkgs + "/nixos/lib/eval-config.nix") {
@@ -42,7 +46,10 @@
             agentOps.backup.enable = true;
             agentOps.backup.stateDir = stateDir;
             # Boilerplate so the generic NixOS assertions hold; never built.
-            fileSystems."/" = {device = "none"; fsType = "tmpfs";};
+            fileSystems."/" = {
+              device = "none";
+              fsType = "tmpfs";
+            };
             boot.loader.grub.enable = false;
             system.stateVersion = "25.11";
           };
@@ -70,8 +77,14 @@
   config.agentOps.state.manifest);
   integrations = [exportDir opts.media.syncthing.dataDir opts.media.jellyfin.configDir];
   hasAll = wanted: actual: builtins.all (path: builtins.elem path actual) wanted;
-  noDuplicates = xs: builtins.length xs == builtins.length (builtins.attrNames
-    (builtins.listToAttrs (map (x: {name = x; value = true;}) xs)));
+  noDuplicates = xs:
+    builtins.length xs
+    == builtins.length (builtins.attrNames
+      (builtins.listToAttrs (map (x: {
+          name = x;
+          value = true;
+        })
+        xs)));
   units = ["agent-ops-backup" "agent-ops-backup-retention" "agent-ops-backup-verify"];
   failed = c: map (a: a.message) (builtins.filter (a: !a.assertion) c.assertions);
 in

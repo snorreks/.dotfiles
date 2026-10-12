@@ -12,7 +12,11 @@
 # `.backup` was left behind (home-manager refuses to clobber an existing
 # backup). Pinning just the hosts we actually care about here means the
 # per-user known_hosts file is never touched by home-manager again.
-{lib, opts, ...}: {
+{
+  lib,
+  opts,
+  ...
+}: {
   programs.ssh.knownHosts = {
     "github.com-ed25519" = {
       hostNames = ["github.com"];
@@ -32,7 +36,11 @@
     };
     travel-server = lib.mkIf (opts.travel.enable && opts.travel.serverHostKey != "") {
       hostNames = [
-        (if opts.travel.sshPort == 22 then opts.travel.serverHost else "[${opts.travel.serverHost}]:${toString opts.travel.sshPort}")
+        (
+          if opts.travel.sshPort == 22
+          then opts.travel.serverHost
+          else "[${opts.travel.serverHost}]:${toString opts.travel.sshPort}"
+        )
       ];
       publicKey = (import ../../lib/host-policy.nix).travelHostKey {
         key = opts.travel.serverHostKey;

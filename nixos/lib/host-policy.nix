@@ -70,22 +70,25 @@ rec {
   # (the untouched base default) is the normal shape of a host that has been
   # promoted to a server by editing one line. It resolves to `server` and the
   # resolved boolean is written back, so every module sees `headless = true`.
-  resolveRole =
-    {
-      role,
-      headless
-    }:
-    if role == null then
-      (if headless then "server" else "desktop")
+  resolveRole = {
+    role,
+    headless,
+  }:
+    if role == null
+    then
+      (
+        if headless
+        then "server"
+        else "desktop"
+      )
     else role;
 
   # The EFFECTIVE `opts.headless`, which is the compatibility contract other
   # groups (and any existing host override) read. Always a boolean.
-  resolveHeadless =
-    {
-      role,
-      headless
-    }:
+  resolveHeadless = {
+    role,
+    headless,
+  }:
     (resolveRole {inherit role headless;}) == "server" || headless;
 
   # Everything that has to be checked about a host's declared policy, in one
@@ -101,117 +104,125 @@ rec {
   # choice somebody can still make (a desktop-provisioned server box that has
   # no battery at all), while `role = "desktop"` next to `headless = true` is
   # a statement that cannot be true.
-  policyDiagnostics =
-    {
-      role,
-      headless,
-      batteryChargeLimit,
-      mobileAgents
-    }:
-    let
-      resolvedRole = resolveRole {inherit role headless;};
-      effectiveHeadless = resolvedRole == "server" || headless;
+  policyDiagnostics = {
+    role,
+    headless,
+    batteryChargeLimit,
+    mobileAgents,
+  }: let
+    resolvedRole = resolveRole {inherit role headless;};
+    effectiveHeadless = resolvedRole == "server" || headless;
 
-      # `role` may be any value at all — options.nix is an untyped attrset and
-      # a host is free to misspell it. Comparing against the valid list is the
-      # check; `resolvedRole == "server"` above is already false for a typo,
-      # which is the safe direction: a misspelt role must never quietly grant
-      # or quietly deny server behaviour.
-      badRole =
-        role != null && !(builtins.elem role validRoles);
+    # `role` may be any value at all — options.nix is an untyped attrset and
+    # a host is free to misspell it. Comparing against the valid list is the
+    # check; `resolvedRole == "server"` above is already false for a typo,
+    # which is the safe direction: a misspelt role must never quietly grant
+    # or quietly deny server behaviour.
+    badRole =
+      role != null && !(builtins.elem role validRoles);
 
-      problems =
-        (if badRole then [
+    problems =
+      (
+        if badRole
+        then [
           ''
             role: '${builtins.toString role}' is not one of ${builtins.concatStringsSep ", " validRoles}.
                     role is per host (hosts/<host>/options.nix) and is the
                     server/travel switch; leave it null to inherit `headless`.
           ''
-        ] else [])
-        ++ (
-          if !badRole && resolvedRole == "desktop" && headless then
-            [
-              ''
-                role/headless: this host resolves to role = "desktop" while
-                opts.headless = true. Those are different questions — role says
-                what KIND of machine this is, headless says it is reached only
-                remotely — and with both set the modules that read `headless`
-                (suspend removal, lingering, LAN ports, exit node) would behave
-                as a server while the role says laptop.
+        ]
+        else []
+      )
+      ++ (
+        if !badRole && resolvedRole == "desktop" && headless
+        then [
+          ''
+            role/headless: this host resolves to role = "desktop" while
+            opts.headless = true. Those are different questions — role says
+            what KIND of machine this is, headless says it is reached only
+            remotely — and with both set the modules that read `headless`
+            (suspend removal, lingering, LAN ports, exit node) would behave
+            as a server while the role says laptop.
 
-                Pick one:
-                  * keep headless = true   -> set role = "server" (or null)
-                  * keep role = "desktop"  -> set headless = false
-              ''
-            ]
-          else []
-        )
-        ++ (
-          if mobileAgents.enable && mobileAgents.sshPort == 22 then
-            [
-              ''
-                mobileAgents: sshPort = 22 is refused. Tailscale SSH answers on
-                tailnet port 22 before the OS sshd does, so a key-authenticated
-                client (Moshi, Termux) stalls against it and then fails with an
-                auth error that says nothing about the key actually being wrong.
-                Pick any port other than 22; 2222 is the value every host in
-                this repository uses.
-              ''
-            ]
-          else []
-        )
-        ++ (
-          if mobileAgents.collie.enable && !mobileAgents.enable then
-            [
-              ''
-                mobileAgents: collie.enable is true while mobileAgents.enable
-                is false. Collie is a client BEHIND the shared infrastructure
-                (the second sshd listener, linger, the Serve mapping) — it has
-                no meaning without it, and this combination builds a bridge
-                with no way in and no warning.
+            Pick one:
+              * keep headless = true   -> set role = "server" (or null)
+              * keep role = "desktop"  -> set headless = false
+          ''
+        ]
+        else []
+      )
+      ++ (
+        if mobileAgents.enable && mobileAgents.sshPort == 22
+        then [
+          ''
+            mobileAgents: sshPort = 22 is refused. Tailscale SSH answers on
+            tailnet port 22 before the OS sshd does, so a key-authenticated
+            client (Moshi, Termux) stalls against it and then fails with an
+            auth error that says nothing about the key actually being wrong.
+            Pick any port other than 22; 2222 is the value every host in
+            this repository uses.
+          ''
+        ]
+        else []
+      )
+      ++ (
+        if mobileAgents.collie.enable && !mobileAgents.enable
+        then [
+          ''
+            mobileAgents: collie.enable is true while mobileAgents.enable
+            is false. Collie is a client BEHIND the shared infrastructure
+            (the second sshd listener, linger, the Serve mapping) — it has
+            no meaning without it, and this combination builds a bridge
+            with no way in and no warning.
 
-                Set mobileAgents.enable = true, or collie.enable = false.
-              ''
-            ]
-          else []
-        );
+            Set mobileAgents.enable = true, or collie.enable = false.
+          ''
+        ]
+        else []
+      );
 
-      warnings =
-        (if resolvedRole == "server" && batteryChargeLimit == null then
-          [
-            ''
-              role = "server" with batteryChargeLimit = null. An unattended
-              laptop that is left on AC for months will hold its pack at 100%,
-              which is what actually ages it. Consider 60 (the documented
-              server value) or, if the hardware has no writable threshold at
-              all, ignore this — config/system/battery.nix reports which rung
-              it landed on and the limit actually achieved.
-            ''
-          ]
-          else [])
-        ++ (
-          if resolvedRole == "server" && !mobileAgents.enable && !mobileAgents.collie.enable then
-            [
-              ''
-                role = "server" with the phone clients off. That is a valid
-                combination — system lingering is what keeps the user manager
-                alive on a server, and it is independent of the phone — but it
-                means nothing starts herdr or Collie at boot yet. The
-                agent-operations group owns that WantedBy work.
-              ''
-            ]
-          else []);
-    in
-    {
-      role = resolvedRole;
-      inherit effectiveHeadless headless;
-      problems = map (s: ''
+    warnings =
+      (
+        if resolvedRole == "server" && batteryChargeLimit == null
+        then [
+          ''
+            role = "server" with batteryChargeLimit = null. An unattended
+            laptop that is left on AC for months will hold its pack at 100%,
+            which is what actually ages it. Consider 60 (the documented
+            server value) or, if the hardware has no writable threshold at
+            all, ignore this — config/system/battery.nix reports which rung
+            it landed on and the limit actually achieved.
+          ''
+        ]
+        else []
+      )
+      ++ (
+        if resolvedRole == "server" && !mobileAgents.enable && !mobileAgents.collie.enable
+        then [
+          ''
+            role = "server" with the phone clients off. That is a valid
+            combination — system lingering is what keeps the user manager
+            alive on a server, and it is independent of the phone — but it
+            means nothing starts herdr or Collie at boot yet. The
+            agent-operations group owns that WantedBy work.
+          ''
+        ]
+        else []
+      );
+  in {
+    role = resolvedRole;
+    inherit effectiveHeadless headless;
+    problems =
+      map (s: ''
         ${s}
-      '') problems;
-      warnings = map (s: ''
+      '')
+      problems;
+    warnings =
+      map (s: ''
         ${s}
-      '') warnings;
-    };
+      '')
+      warnings;
+  };
 
   # Which slice of a private override file applies to one host.
   #
@@ -233,66 +244,65 @@ rec {
   #                                        silently applied to BOTH machines
   #
   # Returns { overrides, shape, warning }.
-  selectHostOverrides =
-    {
-      local,
-      hostKey
-    }:
-    let
-      keys = if local == null then [] else builtins.attrNames local;
-      hostKeyed = builtins.elem true (map (k: builtins.elem k knownHostKeys || k == "_default") keys);
-    in
-    if local == null || keys == [] then
-      {
-        overrides = {};
-        shape = "empty";
-        warning = null;
-      }
-    else if hostKeyed then
-      {
-        # The per-host key wins over _default, and there is no merge between
-        # the two: _default is a default, not a base to extend.
-        overrides =
-          if builtins.hasAttr hostKey local then
-            local.${hostKey}
-          else if builtins.hasAttr "_default" local then
-            local."_default"
-          else
-            {};
-        shape = "host-scoped";
-        warning =
-          if !(builtins.hasAttr hostKey local || builtins.hasAttr "_default" local) then
-            ''
-              local.nix is host-scoped and defines ${builtins.concatStringsSep ", " keys},
-              but this host is '${hostKey}' and matches none of them, so NO
-              private override applies to it. Add
+  selectHostOverrides = {
+    local,
+    hostKey,
+  }: let
+    keys =
+      if local == null
+      then []
+      else builtins.attrNames local;
+    hostKeyed = builtins.elem true (map (k: builtins.elem k knownHostKeys || k == "_default") keys);
+  in
+    if local == null || keys == []
+    then {
+      overrides = {};
+      shape = "empty";
+      warning = null;
+    }
+    else if hostKeyed
+    then {
+      # The per-host key wins over _default, and there is no merge between
+      # the two: _default is a default, not a base to extend.
+      overrides =
+        if builtins.hasAttr hostKey local
+        then local.${hostKey}
+        else if builtins.hasAttr "_default" local
+        then local."_default"
+        else {};
+      shape = "host-scoped";
+      warning =
+        if !(builtins.hasAttr hostKey local || builtins.hasAttr "_default" local)
+        then ''
+          local.nix is host-scoped and defines ${builtins.concatStringsSep ", " keys},
+          but this host is '${hostKey}' and matches none of them, so NO
+          private override applies to it. Add
 
-                  ${hostKey} = { … };
+              ${hostKey} = { … };
 
-              or a `_default` entry, if the override was meant for every host.
-            ''
-          else null;
-      }
-    else
-      {
-        overrides = local;
-        shape = "flat-legacy";
-        warning = ''
-          local.nix uses the legacy FLAT shape, so these overrides apply to
-          EVERY host in the flake, not just one. That is rarely intended: it
-          made `hostName`, a battery limit or a monitor rule on the Legion also
-          apply to the travel laptop. Scope it by host:
+          or a `_default` entry, if the override was meant for every host.
+        ''
+        else null;
+    }
+    else {
+      overrides = local;
+      shape = "flat-legacy";
+      warning = ''
+        local.nix uses the legacy FLAT shape, so these overrides apply to
+        EVERY host in the flake, not just one. That is rarely intended: it
+        made `hostName`, a battery limit or a monitor rule on the Legion also
+        apply to the travel laptop. Scope it by host:
 
-            {
-              ${hostKey} = {
-                # …overrides for this host only…
-              };
-            }
+          {
+            ${hostKey} = {
+              # …overrides for this host only…
+            };
+          }
 
-          Until it is scoped, treat every host in this configuration as
-          carrying these values.
-        '';
-      };
+        Until it is scoped, treat every host in this configuration as
+        carrying these values.
+      '';
+    };
 
   # The DNS owner and its rescue targets, as one value.
   #
@@ -321,35 +331,41 @@ rec {
   # Desktop keeps just the two loopback addresses: there is no unattended boot
   # to survive, and a laptop on hotel wifi is better off not silently sending
   # every lookup to a public resolver the moment its local cache misses.
-  dnsPolicy =
-    {
-      headless
-    }:
-    let
-      loopback = ["127.0.0.1" "::1"];
-      # Quad9 first, then Cloudflare. Both are numeric, both answer on 53
-      # without any name of their own, and neither is a resolver we run.
-      rescue = ["9.9.9.9" "1.1.1.1"];
-      nameservers = if headless then ["127.0.0.1"] ++ rescue else loopback;
-    in
-    {
-      owner = "dnscrypt-proxy";
-      nameservers = nameservers;
-      maxnames = builtins.length nameservers;
-    };
+  dnsPolicy = {headless}: let
+    loopback = ["127.0.0.1" "::1"];
+    # Quad9 first, then Cloudflare. Both are numeric, both answer on 53
+    # without any name of their own, and neither is a resolver we run.
+    rescue = ["9.9.9.9" "1.1.1.1"];
+    nameservers =
+      if headless
+      then ["127.0.0.1"] ++ rescue
+      else loopback;
+  in {
+    owner = "dnscrypt-proxy";
+    nameservers = nameservers;
+    maxnames = builtins.length nameservers;
+  };
 
   # Accept raw base64 or an OpenSSH public-key line, not a known_hosts record.
-  travelHostKey = { key, type ? "ssh-ed25519" }:
-    let
-      words = builtins.filter (v: builtins.isString v && v != "") (builtins.split "[[:space:]]+" key);
-      hasType = words != [] && builtins.match "(ssh-.*|ecdsa-.*)" (builtins.head words) != null;
-      value = if hasType then builtins.elemAt words 1 else builtins.head words;
-    in
-      if key == "" then ""
-      else if builtins.match ".*[\n\r].*" key != null
-        || (hasType && (builtins.length words < 2 || builtins.head words != type))
-        || (!hasType && builtins.length words != 1)
-        || builtins.match "[A-Za-z0-9+/]+={0,2}" value == null
-      then throw "travel.serverHostKey must be a single public key matching serverHostKeyType"
-      else "${type} ${value}";
+  travelHostKey = {
+    key,
+    type ? "ssh-ed25519",
+  }: let
+    words = builtins.filter (v: builtins.isString v && v != "") (builtins.split "[[:space:]]+" key);
+    hasType = words != [] && builtins.match "(ssh-.*|ecdsa-.*)" (builtins.head words) != null;
+    value =
+      if hasType
+      then builtins.elemAt words 1
+      else builtins.head words;
+  in
+    if key == ""
+    then ""
+    else if
+      builtins.match ".*[\n\r].*" key
+      != null
+      || (hasType && (builtins.length words < 2 || builtins.head words != type))
+      || (!hasType && builtins.length words != 1)
+      || builtins.match "[A-Za-z0-9+/]+={0,2}" value == null
+    then throw "travel.serverHostKey must be a single public key matching serverHostKeyType"
+    else "${type} ${value}";
 }

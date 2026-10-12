@@ -59,37 +59,40 @@
   #   65   collector exited 0/1 but its output was not ONE JSON object;
   #        nothing is written, and the unit fails visibly. The malformed output
   #        is never echoed, so it cannot leak into the journal.
-  snapshotScript = name: arguments: pkgs.writeShellScript name ''
-    set -euo pipefail
-    umask 0077
-    status=0
-    snapshot="$(${lib.getExe tool} --json ${arguments})" || status=$?
-    if ! printf '%s\n' "$snapshot" | ${pkgs.jq}/bin/jq -e -s \
-      'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
-      printf '%s: collector (exit %s) produced no single JSON object; nothing recorded\n' \
-        ${lib.escapeShellArg name} "$status" >&2
-      if [ "$status" -gt 1 ]; then exit "$status"; fi
-      exit 65
-    fi
-    stamp="$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%SZ)"
-    # Write a hidden partial first and rename, so a reader (or the age
-    # cleaner) never sees a truncated report under its final name.
-    partial="$(${pkgs.coreutils}/bin/mktemp ${historyDir}/."$stamp".XXXXXXXX)"
-    trap '${pkgs.coreutils}/bin/rm -f -- "$partial"' EXIT
-    printf '%s\n' "$snapshot" >"$partial"
-    final="${historyDir}/''${partial##*/.}.json"
-    ${pkgs.coreutils}/bin/mv -n -T -- "$partial" "$final"
-    [ ! -e "$partial" ] || { printf '%s: snapshot name collision\n' ${lib.escapeShellArg name} >&2; exit 73; }
-    trap - EXIT
-    exit "$status"
-  '';
+  snapshotScript = name: arguments:
+    pkgs.writeShellScript name ''
+      set -euo pipefail
+      umask 0077
+      status=0
+      snapshot="$(${lib.getExe tool} --json ${arguments})" || status=$?
+      if ! printf '%s\n' "$snapshot" | ${pkgs.jq}/bin/jq -e -s \
+        'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1; then
+        printf '%s: collector (exit %s) produced no single JSON object; nothing recorded\n' \
+          ${lib.escapeShellArg name} "$status" >&2
+        if [ "$status" -gt 1 ]; then exit "$status"; fi
+        exit 65
+      fi
+      stamp="$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%SZ)"
+      # Write a hidden partial first and rename, so a reader (or the age
+      # cleaner) never sees a truncated report under its final name.
+      partial="$(${pkgs.coreutils}/bin/mktemp ${historyDir}/."$stamp".XXXXXXXX)"
+      trap '${pkgs.coreutils}/bin/rm -f -- "$partial"' EXIT
+      printf '%s\n' "$snapshot" >"$partial"
+      final="${historyDir}/''${partial##*/.}.json"
+      ${pkgs.coreutils}/bin/mv -n -T -- "$partial" "$final"
+      [ ! -e "$partial" ] || { printf '%s: snapshot name collision\n' ${lib.escapeShellArg name} >&2; exit 73; }
+      trap - EXIT
+      exit "$status"
+    '';
   ownerHome = config.users.users.${opts.username}.home;
   ownerServices = lib.attrByPath ["home-manager" "users" opts.username "systemd" "user" "services"] {} config;
   # Only enabled stateful agent services are required; desktop helpers and
   # oneshot validation units are not long-running health dependencies.
-  requiredServices = lib.filter (name:
-    let unit = ownerServices.${name} or {}; in
-    (unit.Install.WantedBy or []) != [] && (unit.Service.Type or "simple") != "oneshot"
+  requiredServices = lib.filter (
+    name: let
+      unit = ownerServices.${name} or {};
+    in
+      (unit.Install.WantedBy or []) != [] && (unit.Service.Type or "simple") != "oneshot"
   ) ["herdr" "collie"];
   ownerEnvironment = {
     AGENT_OPS_HEALTH_USER = opts.username;
@@ -109,18 +112,22 @@
     '');
     # The checker also invokes the owner's herdr client and user manager.
     # Run it as that owner, not as the root timer's HOME/session.
-    AGENT_OPS_DAEMON_CHECK = if !(builtins.elem "herdr" requiredServices) then "" else toString (pkgs.writeShellScript "health-owner-daemon-check" ''
-      export HOME=${lib.escapeShellArg ownerHome}
-      export XDG_RUNTIME_DIR="/run/user/$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg opts.username})"
-      export HERDR_BIN=/etc/profiles/per-user/${opts.username}/bin/herdr
-      unset CREDENTIALS_DIRECTORY
-      if [ "$(${pkgs.coreutils}/bin/id -u)" = 0 ]; then
-        exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg opts.username} -- \
-          ${pkgs.coreutils}/bin/env HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" HERDR_BIN="$HERDR_BIN" \
-          ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/herdr-daemon-check"} "$@"
-      fi
-      exec ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/herdr-daemon-check"} "$@"
-    '');
+    AGENT_OPS_DAEMON_CHECK =
+      if !(builtins.elem "herdr" requiredServices)
+      then ""
+      else
+        toString (pkgs.writeShellScript "health-owner-daemon-check" ''
+          export HOME=${lib.escapeShellArg ownerHome}
+          export XDG_RUNTIME_DIR="/run/user/$(${pkgs.coreutils}/bin/id -u ${lib.escapeShellArg opts.username})"
+          export HERDR_BIN=/etc/profiles/per-user/${opts.username}/bin/herdr
+          unset CREDENTIALS_DIRECTORY
+          if [ "$(${pkgs.coreutils}/bin/id -u)" = 0 ]; then
+            exec ${pkgs.util-linux}/bin/runuser -u ${lib.escapeShellArg opts.username} -- \
+              ${pkgs.coreutils}/bin/env HOME="$HOME" XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" HERDR_BIN="$HERDR_BIN" \
+              ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/herdr-daemon-check"} "$@"
+          fi
+          exec ${lib.escapeShellArg "${ownerHome}/.config/agent-ops/herdr-daemon-check"} "$@"
+        '');
     AGENT_OPS_HEALTH_REQUIRED_SERVICES = lib.concatStringsSep " " (map (name: "${name}.service") requiredServices);
   };
 
@@ -138,12 +145,10 @@
   # failed for every key including the ones that exist. Comparing the text before
   # the first colon is exact, needs no escaping, and cannot depend on the
   # engine's anchoring rules.
-  sopsFileHasKey =
-    file: key:
-    let
-      lines = lib.splitString "\n" (builtins.readFile file);
-      nameOf = line: lib.head (lib.splitString ":" line);
-    in
+  sopsFileHasKey = file: key: let
+    lines = lib.splitString "\n" (builtins.readFile file);
+    nameOf = line: lib.head (lib.splitString ":" line);
+  in
     builtins.any (line: nameOf line == key) lines;
   tool = pkgs.writeShellApplication {
     name = "ns-agent-health";
@@ -166,7 +171,6 @@
     ];
     text = builtins.readFile script;
   };
-
 in {
   options.agentOps.health = {
     enable = lib.mkOption {
@@ -235,10 +239,12 @@ in {
         "d ${historyDir} 0700 root root m:${toString cfg.retentionHours}h"
       ];
 
-      environment.variables = ownerEnvironment // {
-        AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
-        AGENT_OPS_HEALTH_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
-      };
+      environment.variables =
+        ownerEnvironment
+        // {
+          AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
+          AGENT_OPS_HEALTH_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
+        };
 
       # The secrets are declared only when the heartbeat is enabled, so a host
       # that does not use one is not asked for credentials it will never use —
@@ -272,10 +278,12 @@ in {
             "AGENT_OPS_HEARTBEAT_TOKEN:${config.sops.secrets.${cfg.heartbeat.tokenSecretName}.path}"
           ];
         };
-        environment = ownerEnvironment // {
-          AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
-          AGENT_OPS_HEARTBEAT_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
-        };
+        environment =
+          ownerEnvironment
+          // {
+            AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
+            AGENT_OPS_HEARTBEAT_MAX_ATTEMPTS = toString cfg.heartbeat.maxAttempts;
+          };
       };
 
       systemd.timers.agent-ops-health = {
@@ -294,9 +302,11 @@ in {
       # redaction note in the module header.
       systemd.services.agent-ops-health-record = {
         description = "Record one redacted boot health snapshot";
-        environment = ownerEnvironment // {
-          AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
-        };
+        environment =
+          ownerEnvironment
+          // {
+            AGENT_OPS_BACKUP_RECORD = defaultBackupRecord;
+          };
         wantedBy = ["multi-user.target"];
         serviceConfig = {
           Type = "oneshot";

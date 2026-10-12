@@ -8,12 +8,14 @@
 }: let
   protonServers = import ./vpn/proton-servers.nix;
   envSecrets = import ./env-secrets.nix;
-  sessionVariableNames = lib.concatMap (
-    s:
-      if s.sessionVariable or true
-      then [s.name] ++ (s.aliases or [])
-      else []
-  ) envSecrets;
+  sessionVariableNames =
+    lib.concatMap (
+      s:
+        if s.sessionVariable or true
+        then [s.name] ++ (s.aliases or [])
+        else []
+    )
+    envSecrets;
 
   mkVpnTemplate = server: {
     name = "vpn-${server.name}.conf";

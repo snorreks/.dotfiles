@@ -66,28 +66,27 @@ in {
   #
   # If a server role ever does need the tunnel, the answer is a per-host opt-in
   # that has been thought about — not this default becoming true again.
-  security.sudo.extraRules =
-    lib.optional (!opts.headless) {
-      users = [opts.username];
-      commands = [
-        {
-          command = "/run/current-system/sw/bin/systemctl start wg-quick-wg0.service";
-          options = ["NOPASSWD"];
-        }
-        {
-          command = "/run/current-system/sw/bin/systemctl stop wg-quick-wg0.service";
-          options = ["NOPASSWD"];
-        }
-        {
-          command = "/run/current-system/sw/bin/wg show wg0 latest-handshakes";
-          options = ["NOPASSWD"];
-        }
-        {
-          command = "/run/current-system/sw/bin/cp /home/${opts.username}/.vpn/configs/*.conf /etc/nixos/proton-wg.conf";
-          options = ["NOPASSWD"];
-        }
-      ];
-    };
+  security.sudo.extraRules = lib.optional (!opts.headless) {
+    users = [opts.username];
+    commands = [
+      {
+        command = "/run/current-system/sw/bin/systemctl start wg-quick-wg0.service";
+        options = ["NOPASSWD"];
+      }
+      {
+        command = "/run/current-system/sw/bin/systemctl stop wg-quick-wg0.service";
+        options = ["NOPASSWD"];
+      }
+      {
+        command = "/run/current-system/sw/bin/wg show wg0 latest-handshakes";
+        options = ["NOPASSWD"];
+      }
+      {
+        command = "/run/current-system/sw/bin/cp /home/${opts.username}/.vpn/configs/*.conf /etc/nixos/proton-wg.conf";
+        options = ["NOPASSWD"];
+      }
+    ];
+  };
 
   # --- VPN START
   # Tailscale now lives in config/system/server.nix (it is infrastructure for

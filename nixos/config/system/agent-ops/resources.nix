@@ -53,16 +53,26 @@
   ...
 }: let
   cfg = config.agentOps.resources;
-  mkPolicyClass = defaults: lib.mkOption {
-    default = {};
-    type = lib.types.submodule {
-      options = {
-        cpuWeight = lib.mkOption {type = lib.types.ints.between 1 10000; default = defaults.cpuWeight;};
-        ioWeight = lib.mkOption {type = lib.types.ints.between 1 10000; default = defaults.ioWeight;};
-        ioLatencyTargetSec = lib.mkOption {type = lib.types.str; default = defaults.ioLatencyTargetSec;};
+  mkPolicyClass = defaults:
+    lib.mkOption {
+      default = {};
+      type = lib.types.submodule {
+        options = {
+          cpuWeight = lib.mkOption {
+            type = lib.types.ints.between 1 10000;
+            default = defaults.cpuWeight;
+          };
+          ioWeight = lib.mkOption {
+            type = lib.types.ints.between 1 10000;
+            default = defaults.ioWeight;
+          };
+          ioLatencyTargetSec = lib.mkOption {
+            type = lib.types.str;
+            default = defaults.ioLatencyTargetSec;
+          };
+        };
       };
     };
-  };
 
   # ── The weight-class generators ────────────────────────────────────────────
   #
@@ -77,39 +87,40 @@
   # real workload placed in `<parent>-build.slice` inherits the SLICE's settings
   # and nothing else. Weights on the service therefore bounded nothing while
   # looking as though they bounded something.
-  mkClassSlice =
-    name: description: policy: {
-      systemd.user.slices.${name} = {
-        inherit description;
-        sliceConfig = {
-          # Slice parentage comes from hyphenated names, not Slice= here.
-          CPUWeight = policy.cpuWeight;
-          IOWeight = policy.ioWeight;
-          IOAccounting = true;
-          TasksAccounting = true;
-          MemoryAccounting = true;
-        };
+  mkClassSlice = name: description: policy: {
+    systemd.user.slices.${name} = {
+      inherit description;
+      sliceConfig = {
+        # Slice parentage comes from hyphenated names, not Slice= here.
+        CPUWeight = policy.cpuWeight;
+        IOWeight = policy.ioWeight;
+        IOAccounting = true;
+        TasksAccounting = true;
+        MemoryAccounting = true;
       };
     };
+  };
 
-  mkClassSample =
-    name: policy: {
-      systemd.user.services.${name} = {
-        description = "Sample unit proving ${name}.slice exists and is joinable";
-        serviceConfig = {
-          # `Slice=` is a [Service] directive for a SERVICE unit — unlike a slice
-          # unit, whose hierarchy is encoded in its name. Putting it in either the top
-          # level or a non-existent `sliceConfig` fails evaluation.
-          Slice = "${name}.slice";
-          Type = "oneshot";
-          RemainAfterExit = true;
-          ExecStart = "${pkgs.coreutils}/bin/true";
-          # [Slice] has no IOSchedulingClass; that is a [Service] directive, so
-          # it is applied by the class's sample unit rather than the slice.
-          IOSchedulingClass = if policy.ioWeight <= 32 then "idle" else "best-effort";
-        };
+  mkClassSample = name: policy: {
+    systemd.user.services.${name} = {
+      description = "Sample unit proving ${name}.slice exists and is joinable";
+      serviceConfig = {
+        # `Slice=` is a [Service] directive for a SERVICE unit — unlike a slice
+        # unit, whose hierarchy is encoded in its name. Putting it in either the top
+        # level or a non-existent `sliceConfig` fails evaluation.
+        Slice = "${name}.slice";
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${pkgs.coreutils}/bin/true";
+        # [Slice] has no IOSchedulingClass; that is a [Service] directive, so
+        # it is applied by the class's sample unit rather than the slice.
+        IOSchedulingClass =
+          if policy.ioWeight <= 32
+          then "idle"
+          else "best-effort";
       };
     };
+  };
 in {
   options.agentOps.resources = {
     enable = lib.mkOption {
@@ -125,41 +136,41 @@ in {
     policy = lib.mkOption {
       type = lib.types.submodule {
         options = lib.mapAttrs (_: defaults: mkPolicyClass defaults) {
-        # Relative weights, not CPU counts or percentages. They only affect
-        # sibling cgroups under contention; 1024 does not mean one full CPU.
-        # Record-only: interactive agents inherit their shell/workspace cgroup;
-        # no real agent workload is assigned these weights by this module.
-        agent = {
-          cpuWeight = 1024;
-          ioWeight = 1024;
-          ioLatencyTargetSec = "50ms";
-        };
-        build = {
-          cpuWeight = 128;
-          # idle IO class: a build writes a lot and blocks nothing if delayed.
-          ioWeight = 32;
-          ioLatencyTargetSec = "500ms";
-        };
-        inference = {
-          cpuWeight = 256;
-          ioWeight = 128;
-          ioLatencyTargetSec = "100ms";
-        };
-        transcode = {
-          cpuWeight = 256;
-          ioWeight = 128;
-          ioLatencyTargetSec = "100ms";
-        };
-        download = {
-          cpuWeight = 64;
-          ioWeight = 16;
-          ioLatencyTargetSec = "2s";
-        };
-        management = {
-          cpuWeight = 2048;
-          ioWeight = 2048;
-          ioLatencyTargetSec = "10ms";
-        };
+          # Relative weights, not CPU counts or percentages. They only affect
+          # sibling cgroups under contention; 1024 does not mean one full CPU.
+          # Record-only: interactive agents inherit their shell/workspace cgroup;
+          # no real agent workload is assigned these weights by this module.
+          agent = {
+            cpuWeight = 1024;
+            ioWeight = 1024;
+            ioLatencyTargetSec = "50ms";
+          };
+          build = {
+            cpuWeight = 128;
+            # idle IO class: a build writes a lot and blocks nothing if delayed.
+            ioWeight = 32;
+            ioLatencyTargetSec = "500ms";
+          };
+          inference = {
+            cpuWeight = 256;
+            ioWeight = 128;
+            ioLatencyTargetSec = "100ms";
+          };
+          transcode = {
+            cpuWeight = 256;
+            ioWeight = 128;
+            ioLatencyTargetSec = "100ms";
+          };
+          download = {
+            cpuWeight = 64;
+            ioWeight = 16;
+            ioLatencyTargetSec = "2s";
+          };
+          management = {
+            cpuWeight = 2048;
+            ioWeight = 2048;
+            ioLatencyTargetSec = "10ms";
+          };
         };
       };
       default = {};
@@ -229,18 +240,29 @@ in {
       # `description` is the one directive that legitimately sits at the top
       # level; everything else goes in the section it belongs to.
 
-      assertions = [{
-        assertion = builtins.match "[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*" cfg.slice != null
-          && !(builtins.elem cfg.slice ["system" "user" "init" "agentOpsManagement"]);
-        message = "agentOps.resources.slice must be a dedicated valid user slice name without .slice";
-      } {
-        assertion = lib.all (name: let policy = cfg.policy.${name} or {}; in
-          lib.all (key: let weight = policy.${key} or 0; in
-            builtins.isInt weight && weight >= 1 && weight <= 10000
-          ) ["cpuWeight" "ioWeight"]
-        ) ["agent" "build" "inference" "transcode" "download" "management"];
-        message = "agentOps.resources requires CPU/IO weights between 1 and 10000 for every class";
-      }];
+      assertions = [
+        {
+          assertion =
+            builtins.match "[A-Za-z0-9_]+(-[A-Za-z0-9_]+)*" cfg.slice
+            != null
+            && !(builtins.elem cfg.slice ["system" "user" "init" "agentOpsManagement"]);
+          message = "agentOps.resources.slice must be a dedicated valid user slice name without .slice";
+        }
+        {
+          assertion = lib.all (
+            name: let
+              policy = cfg.policy.${name} or {};
+            in
+              lib.all (
+                key: let
+                  weight = policy.${key} or 0;
+                in
+                  builtins.isInt weight && weight >= 1 && weight <= 10000
+              ) ["cpuWeight" "ioWeight"]
+          ) ["agent" "build" "inference" "transcode" "download" "management"];
+          message = "agentOps.resources requires CPU/IO weights between 1 and 10000 for every class";
+        }
+      ];
 
       # User scopes must opt into these slices. System workload services below
       # receive real weights; these sample units are not workload admission.
@@ -316,7 +338,8 @@ in {
               class.${name}.ioLatencyTargetSec=${v.ioLatencyTargetSec}
             ''
           )
-          cfg.policy)}
+          cfg.policy
+        )}
       '';
 
       # ── The sampler ────────────────────────────────────────────────────────
@@ -372,22 +395,40 @@ in {
       };
     })
     (lib.mkIf (cfg.enable && config.services.openssh.enable) {
-      systemd.services.sshd.serviceConfig = {CPUWeight = cfg.policy.management.cpuWeight; IOWeight = cfg.policy.management.ioWeight;};
+      systemd.services.sshd.serviceConfig = {
+        CPUWeight = cfg.policy.management.cpuWeight;
+        IOWeight = cfg.policy.management.ioWeight;
+      };
     })
     (lib.mkIf (cfg.enable && config.services.tailscale.enable) {
-      systemd.services.tailscaled.serviceConfig = {CPUWeight = cfg.policy.management.cpuWeight; IOWeight = cfg.policy.management.ioWeight;};
+      systemd.services.tailscaled.serviceConfig = {
+        CPUWeight = cfg.policy.management.cpuWeight;
+        IOWeight = cfg.policy.management.ioWeight;
+      };
     })
     (lib.mkIf (cfg.enable && config.services.ollama.enable) {
-      systemd.services.ollama.serviceConfig = {CPUWeight = cfg.policy.inference.cpuWeight; IOWeight = cfg.policy.inference.ioWeight;};
+      systemd.services.ollama.serviceConfig = {
+        CPUWeight = cfg.policy.inference.cpuWeight;
+        IOWeight = cfg.policy.inference.ioWeight;
+      };
     })
     (lib.mkIf (cfg.enable && config.services.jellyfin.enable) {
-      systemd.services.jellyfin.serviceConfig = {CPUWeight = cfg.policy.transcode.cpuWeight; IOWeight = cfg.policy.transcode.ioWeight;};
+      systemd.services.jellyfin.serviceConfig = {
+        CPUWeight = cfg.policy.transcode.cpuWeight;
+        IOWeight = cfg.policy.transcode.ioWeight;
+      };
     })
     (lib.mkIf (cfg.enable && opts.media.torrents.enable) {
-      systemd.services.qbittorrent.serviceConfig = {CPUWeight = cfg.policy.download.cpuWeight; IOWeight = cfg.policy.download.ioWeight;};
+      systemd.services.qbittorrent.serviceConfig = {
+        CPUWeight = cfg.policy.download.cpuWeight;
+        IOWeight = cfg.policy.download.ioWeight;
+      };
     })
     (lib.mkIf (cfg.enable && config.services.syncthing.enable) {
-      systemd.services.syncthing.serviceConfig = {CPUWeight = cfg.policy.download.cpuWeight; IOWeight = cfg.policy.download.ioWeight;};
+      systemd.services.syncthing.serviceConfig = {
+        CPUWeight = cfg.policy.download.cpuWeight;
+        IOWeight = cfg.policy.download.ioWeight;
+      };
     })
   ];
 }

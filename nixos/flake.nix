@@ -187,70 +187,78 @@
     #
     # Everything else — the output's display name, the -fast variant — reads
     # the answer from here rather than re-merging the inputs a second time.
-    resolveHostOpts =
-      {
-        hostKey,
-        hostCfg,
-        # null = follow whatever the host (or its private override) declared,
-        # which is the default variant. Explicitly false = the `-fast` variant,
-        # which skips the CUDA build.
-        enableOllama ? null
-      }:
-      let
-        selected = hostPolicy.selectHostOverrides {
-          local = localOverrides;
-          inherit hostKey;
-        };
-        # recursiveUpdate, not `//`: a host (or local.nix) overriding a single
-        # key of a nested attrset — say `mouse.thumbWheelInvert` — must not
-        # drop the rest of that attrset. Lists still replace wholesale, so
-        # `monitorrule` keeps its all-or-nothing semantics.
-        merged = nixpkgs.lib.recursiveUpdate (nixpkgs.lib.recursiveUpdate baseOpts hostCfg.optsOverrides) selected.overrides;
-        withOllama = merged // {
-          enableOllama = if enableOllama == null then merged.enableOllama else enableOllama;
-        };
-
-        diagnostics = hostPolicy.policyDiagnostics {
-          role = withOllama.role or null;
-          headless = withOllama.headless;
-          batteryChargeLimit = withOllama.batteryChargeLimit;
-          mobileAgents = withOllama.mobileAgents;
-        };
-
-        # Refuse a contradictory configuration AT EVALUATION. Not an
-        # `assertions` entry: those fire at build time, one at a time, and a
-        # role that contradicts the boolean is a mistake in the inputs rather
-        # than a build failure. Failing here means every command that touches
-        # this host explains it, and nothing half-builds first.
-        #
-        # Every problem is reported at once, because fixing them one rebuild at
-        # a time on a machine you may only reach remotely is a bad use of a day.
-        opts =
-          if diagnostics.problems != [] then
-            throw ''
-              hostPolicy: ${hostKey} declares a contradictory configuration:
-
-              ${builtins.concatStringsSep "\n" diagnostics.problems}
-            ''
-          else
-            # Fold the RESOLVED role back into the effective boolean. This is
-            # the compatibility contract other work depends on: `opts.headless`
-            # is still a boolean and still means "this host is reached only
-            # remotely", it is just now derived from the role when a role is
-            # set — so a host promoted to a server by editing one line gets
-            # every headless behaviour instead of having to remember a second.
-            withOllama // {
-              role = diagnostics.role;
-              headless = diagnostics.effectiveHeadless;
-            };
-      in
-      {
-        inherit opts;
-        shape = selected.shape;
-        warnings =
-          (if selected.warning != null then [selected.warning] else [])
-          ++ diagnostics.warnings;
+    resolveHostOpts = {
+      hostKey,
+      hostCfg,
+      # null = follow whatever the host (or its private override) declared,
+      # which is the default variant. Explicitly false = the `-fast` variant,
+      # which skips the CUDA build.
+      enableOllama ? null,
+    }: let
+      selected = hostPolicy.selectHostOverrides {
+        local = localOverrides;
+        inherit hostKey;
       };
+      # recursiveUpdate, not `//`: a host (or local.nix) overriding a single
+      # key of a nested attrset — say `mouse.thumbWheelInvert` — must not
+      # drop the rest of that attrset. Lists still replace wholesale, so
+      # `monitorrule` keeps its all-or-nothing semantics.
+      merged = nixpkgs.lib.recursiveUpdate (nixpkgs.lib.recursiveUpdate baseOpts hostCfg.optsOverrides) selected.overrides;
+      withOllama =
+        merged
+        // {
+          enableOllama =
+            if enableOllama == null
+            then merged.enableOllama
+            else enableOllama;
+        };
+
+      diagnostics = hostPolicy.policyDiagnostics {
+        role = withOllama.role or null;
+        headless = withOllama.headless;
+        batteryChargeLimit = withOllama.batteryChargeLimit;
+        mobileAgents = withOllama.mobileAgents;
+      };
+
+      # Refuse a contradictory configuration AT EVALUATION. Not an
+      # `assertions` entry: those fire at build time, one at a time, and a
+      # role that contradicts the boolean is a mistake in the inputs rather
+      # than a build failure. Failing here means every command that touches
+      # this host explains it, and nothing half-builds first.
+      #
+      # Every problem is reported at once, because fixing them one rebuild at
+      # a time on a machine you may only reach remotely is a bad use of a day.
+      opts =
+        if diagnostics.problems != []
+        then
+          throw ''
+            hostPolicy: ${hostKey} declares a contradictory configuration:
+
+            ${builtins.concatStringsSep "\n" diagnostics.problems}
+          ''
+        else
+          # Fold the RESOLVED role back into the effective boolean. This is
+          # the compatibility contract other work depends on: `opts.headless`
+          # is still a boolean and still means "this host is reached only
+          # remotely", it is just now derived from the role when a role is
+          # set — so a host promoted to a server by editing one line gets
+          # every headless behaviour instead of having to remember a second.
+          withOllama
+          // {
+            role = diagnostics.role;
+            headless = diagnostics.effectiveHeadless;
+          };
+    in {
+      inherit opts;
+      shape = selected.shape;
+      warnings =
+        (
+          if selected.warning != null
+          then [selected.warning]
+          else []
+        )
+        ++ diagnostics.warnings;
+    };
 
     mkPkgs = nixpkgsInput:
       import nixpkgsInput {
@@ -283,10 +291,9 @@
       # two belong to different halves of the policy — module-level warnings
       # come from the mobile layer, these from role resolution.
       policyWarnings =
-        if resolved.warnings == [] then
-          []
-        else
-          ["private override shape is ${resolved.shape}."] ++ resolved.warnings;
+        if resolved.warnings == []
+        then []
+        else ["private override shape is ${resolved.shape}."] ++ resolved.warnings;
     in
       builtins.trace (builtins.concatStringsSep "" (map (w: "hostPolicy (${hostKey}): ${w}\n") policyWarnings))
       nixpkgs.lib.nixosSystem {
@@ -345,10 +352,11 @@
         # so the name of the output and the options the output was built from
         # could disagree — and a role, a host-scoped private override or a
         # warning is exactly the sort of thing a second merge drops.
-        mergedOpts = (resolveHostOpts {
-          inherit hostKey hostCfg;
-          enableOllama = hostCfg.optsOverrides.enableOllama or baseOpts.enableOllama;
-        }).opts;
+        mergedOpts =
+          (resolveHostOpts {
+            inherit hostKey hostCfg;
+            enableOllama = hostCfg.optsOverrides.enableOllama or baseOpts.enableOllama;
+          }).opts;
         hostname = mergedOpts.hostname;
       in
         acc
@@ -421,8 +429,6 @@
         )
         + "\n"
       );
-
-
   in {
     formatter.${system} = inputs.alejandra.defaultPackage.${system};
 
@@ -446,20 +452,22 @@
         pkgs = nixpkgs.legacyPackages.${system};
         lib = nixpkgs.lib;
         homes = map (host: allHosts.${host}.config.home-manager.users.sonny) ["legion" "gs65"];
-      in pkgs.runCommand "mango-config-check" {nativeBuildInputs = [pkgs.bash pkgs.gnugrep];} ''
-        ${lib.concatMapStringsSep "\n" (hm: ''
-          test "$(grep -c '^exec_once = ' ${hm.xdg.configFile."mango/config.conf".source})" = 1
-          if grep -Eq '^(exec-once|borderpx|gappih|gappiv|gappoh|gappov|monitorrule|tagrule|windowrule|focuscolor|bordercolor) *=' \
-            ${hm.xdg.configFile."mango/config.conf".source}; then
-            echo "obsolete Mango configuration keyword" >&2
-            exit 1
-          fi
-          bash -n ${hm.xdg.configFile."mango/autostart.sh".source}
-          grep -q 'dbus-update-activation-environment --systemd --all' ${hm.xdg.configFile."mango/autostart.sh".source}
-          grep -q 'start mango-session.target' ${hm.xdg.configFile."mango/autostart.sh".source}
-        '') homes}
-        touch "$out"
-      '';
+      in
+        pkgs.runCommand "mango-config-check" {nativeBuildInputs = [pkgs.bash pkgs.gnugrep];} ''
+          ${lib.concatMapStringsSep "\n" (hm: ''
+              test "$(grep -c '^exec_once = ' ${hm.xdg.configFile."mango/config.conf".source})" = 1
+              if grep -Eq '^(exec-once|borderpx|gappih|gappiv|gappoh|gappov|monitorrule|tagrule|windowrule|focuscolor|bordercolor) *=' \
+                ${hm.xdg.configFile."mango/config.conf".source}; then
+                echo "obsolete Mango configuration keyword" >&2
+                exit 1
+              fi
+              bash -n ${hm.xdg.configFile."mango/autostart.sh".source}
+              grep -q 'dbus-update-activation-environment --systemd --all' ${hm.xdg.configFile."mango/autostart.sh".source}
+              grep -q 'start mango-session.target' ${hm.xdg.configFile."mango/autostart.sh".source}
+            '')
+            homes}
+          touch "$out"
+        '';
 
       maintenance-contracts =
         nixpkgs.legacyPackages.${system}.runCommand
@@ -490,7 +498,6 @@
             nixpkgs.legacyPackages.${system}.which
           ];
           src = ./.;
-
         }
         ''
           runHook preInstall
@@ -574,7 +581,6 @@
             nixpkgs.legacyPackages.${system}.which
           ];
           src = ./.;
-
         }
         ''
           runHook preInstall
@@ -622,7 +628,6 @@
             nixpkgs.legacyPackages.${system}.which
           ];
           src = ./.;
-
         }
         ''
           runHook preInstall
@@ -677,11 +682,10 @@
       # this build does not depend on whatever toolchain the contributor
       # happens to have. The vendored crate sources are fetched through
       # `cargoLock`, exactly as package.nix already does for the daemon itself.
-      repo-contracts =
-        let
-          inherit (nixpkgs.legacyPackages.${system}) runCommand;
-          pkgs = nixpkgs.legacyPackages.${system};
-        in
+      repo-contracts = let
+        inherit (nixpkgs.legacyPackages.${system}) runCommand;
+        pkgs = nixpkgs.legacyPackages.${system};
+      in
         pkgs.rustPlatform.buildRustPackage
         {
           pname = "repo-contracts-tests";

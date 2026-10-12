@@ -43,7 +43,8 @@
   cfg = config.agentOps.backup;
   stateDir = cfg.stateDir;
   script = ./scripts/ns-agent-backup.sh;
-  quiesceTable = pkgs.writeText "agent-ops-quiesce.conf"
+  quiesceTable =
+    pkgs.writeText "agent-ops-quiesce.conf"
     (lib.concatMapStrings (e: "${e.path}|${e.method}|${e.arg}\n") cfg.quiesce);
 
   # The monthly proof that the repository can be read back. A separate
@@ -402,12 +403,14 @@ in {
     # service it also owns; this module is verifying someone else's directory,
     # and inventing a second copy of that path here is how the two drift.
     (lib.mkIf (cfg.enable && cfg.heartbeatHook && cfg.mediaStateHook != null) {
-      systemd.services."agent-ops-backup".serviceConfig.ExecStartPost =
-        let hook = pkgs.writeShellApplication {
+      systemd.services."agent-ops-backup".serviceConfig.ExecStartPost = let
+        hook = pkgs.writeShellApplication {
           name = "agent-ops-media-verify";
           runtimeInputs = [pkgs.sqlite pkgs.coreutils pkgs.findutils pkgs.util-linux pkgs.jq];
           text = ''exec ${pkgs.bash}/bin/bash ${lib.escapeShellArg (toString cfg.mediaStateHook)} "$@"'';
-        }; in lib.escapeShellArgs [
+        };
+      in
+        lib.escapeShellArgs [
           (lib.getExe hook)
           "verify"
           "--exports"

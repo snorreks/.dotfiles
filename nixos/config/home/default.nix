@@ -1,5 +1,9 @@
 # nixos/config/home/default.nix
-{opts, lib, ...}: {
+{
+  opts,
+  lib,
+  ...
+}: {
   home = {
     username = opts.username;
     homeDirectory = "/home/${opts.username}";
@@ -8,50 +12,51 @@
 
   programs.home-manager.enable = true;
 
-  imports = [
-    ./sops.nix # Dedicated secrets & environment config
-    ./ssh.nix # SINGLE owner of ~/.ssh/config; other modules add stanzas via extraConfig
-    ./bat.nix # better cat command
-    ./btop.nix # resources monitor
-    ./git.nix # version control
-    ./theme # gtk theme, stylix base, dynamic wallpaper theming (matugen render layer)
-    ./mango.nix # window manager (mangowm)
-    ./foot.nix # terminal (foot)
-    ./dashboard # quickshell shell: dashboard panel + notification daemon (SUPER+D)
-    ./packages.nix # other packages
-    ./scripts/scripts.nix # personal scripts
-    ./starship.nix # shell prompt
-    ./discord # discord with catppuccino theme
-    ./waybar # status bar
-    ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
-    ./herdr.nix # herdr headless server as a supervised user service (never a shell job)
-    ./gui-session # GUI launch boundary for persistent server terminals
-    ./collie.nix # Collie bridge: phone PWA over Tailscale Serve; self-gates on opts.mobileAgents.collie.enable
-    ./updates # nupdate/nconfirm: local and remote upgrades
-    ./travel.nix # travel laptop: host-key-pinned SSH aliases + native herdr remote; gates on opts.travel.enable
-    ./moshi-hook.nix # moshi-hook daemon + agent-hook installer; self-gates on opts.mobileAgents.moshi.enable (optional client)
-    ./idle.nix # swayidle: dim + lock on real seat idleness (gated on herdr/media/CPU/net/disk), plus power-profile recovery
-    ./zen-browser.nix # zen browser
-    ./wlogout.nix
-    ./fuzzel.nix # launcher
-    ./spotify.nix # music streaming
-    ./pcmanfm.nix # file manager (X11 backend for context menu fix)
-    ./fish # fish shell
-    ./files # hard copy over files
-    ./mpv.nix # video player
-    ./yazi.nix # file manager in terminal
-    ./lsd.nix # better ls command
-    ./eye-protection.nix
-    ./xdg.nix
-    ./variables.nix
-    ./zed-editor.nix
-    ./direnv.nix
-    ./swaylock.nix
-    ./clipboard.nix
-    ./mouse.nix # logitech mouse (MX Master 3S) declarative settings
-  ]
-  # GS65-only: replay the keyboard RGB colour the dashboard last set.
-  ++ lib.optionals (opts.hostname == "gs65") [
-    ../../hosts/gs65/keyboard-restore.nix
-  ];
+  imports =
+    [
+      ./sops.nix # Dedicated secrets & environment config
+      ./ssh.nix # SINGLE owner of ~/.ssh/config; other modules add stanzas via extraConfig
+      ./bat.nix # better cat command
+      ./btop.nix # resources monitor
+      ./git.nix # version control
+      ./theme # gtk theme, stylix base, dynamic wallpaper theming (matugen render layer)
+      ./mango.nix # window manager (mangowm)
+      ./foot.nix # terminal (foot)
+      ./dashboard # quickshell shell: dashboard panel + notification daemon (SUPER+D)
+      ./packages.nix # other packages
+      ./scripts/scripts.nix # personal scripts
+      ./starship.nix # shell prompt
+      ./discord # discord with catppuccino theme
+      ./waybar # status bar
+      ./sys-daemon.nix # rust event-driven daemon (waybar streams + dev-ports dashboard)
+      ./herdr.nix # herdr headless server as a supervised user service (never a shell job)
+      ./gui-session # GUI launch boundary for persistent server terminals
+      ./collie.nix # Collie bridge: phone PWA over Tailscale Serve; self-gates on opts.mobileAgents.collie.enable
+      ./updates # nupdate/nconfirm: local and remote upgrades
+      ./travel.nix # travel laptop: host-key-pinned SSH aliases + native herdr remote; gates on opts.travel.enable
+      ./moshi-hook.nix # moshi-hook daemon + agent-hook installer; self-gates on opts.mobileAgents.moshi.enable (optional client)
+      ./idle.nix # swayidle: dim + lock on real seat idleness (gated on herdr/media/CPU/net/disk), plus power-profile recovery
+      ./zen-browser.nix # zen browser
+      ./wlogout.nix
+      ./fuzzel.nix # launcher
+      ./spotify.nix # music streaming
+      ./pcmanfm.nix # file manager (X11 backend for context menu fix)
+      ./fish # fish shell
+      ./files # hard copy over files
+      ./mpv.nix # video player
+      ./yazi.nix # file manager in terminal
+      ./lsd.nix # better ls command
+      ./eye-protection.nix
+      ./xdg.nix
+      ./variables.nix
+      ./zed-editor.nix
+      ./direnv.nix
+      ./swaylock.nix
+      ./clipboard.nix
+      ./mouse.nix # logitech mouse (MX Master 3S) declarative settings
+    ]
+    # GS65-only: replay the keyboard RGB colour the dashboard last set.
+    ++ lib.optionals (opts.hostname == "gs65") [
+      ../../hosts/gs65/keyboard-restore.nix
+    ];
 }
