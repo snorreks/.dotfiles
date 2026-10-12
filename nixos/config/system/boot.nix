@@ -10,6 +10,34 @@
 }: let
   bootHealth = opts.bootHealth;
   criticalUnits = bootHealth.criticalUnits ++ lib.optionals opts.headless ["sshd.service"];
+  # systemd-bless-boot exits 1 with "Not booted with boot counting in effect."
+  # whenever the booted entry carries no counter — which is the ordinary state
+  # on every boot AFTER a blessing. NixOS says as much itself (systemd.nix:
+  # "`systemd-bless-boot good` fails once the current boot has been blessed").
+  # Wiring the unit into the boot graph without this wrapper would therefore
+  # leave a FAILED unit on every routine boot, and a failed unit makes
+  # switch-to-configuration exit 4, which ns-maint reads as "activation
+  # failed" and rolls an otherwise healthy activation back. Treat exactly that
+  # one message as a no-op success and pass every other failure through.
+  blessWrapper = pkgs.writeShellApplication {
+    name = "systemd-bless-boot-noop";
+    runtimeInputs = [config.systemd.package];
+    text = ''
+      status=0
+      output="$(systemd-bless-boot good 2>&1)" || status=$?
+      if [ "$status" -eq 0 ]; then
+        if [ -n "$output" ]; then
+          printf '%s\n' "$output"
+        fi
+        exit 0
+      fi
+      printf '%s\n' "$output" >&2
+      case "$output" in
+        *"Not booted with boot counting in effect."*) exit 0 ;;
+      esac
+      exit "$status"
+    '';
+  };
 in {
   boot = {
     # ── Shared NTFS volume ──────────────────────────────────────────────────
@@ -145,12 +173,29 @@ in {
     environment = {
       NM_BOOT_CRITICAL_UNITS = lib.concatStringsSep " " criticalUnits;
       NM_BOOT_TRIES = toString bootHealth.tries;
-      NM_BOOT_USER = if opts.headless then opts.username else "";
+      NM_BOOT_USER =
+        if opts.headless
+        then opts.username
+        else "";
     };
   };
 
   systemd.services.systemd-bless-boot = lib.mkIf bootHealth.enable {
+    # Nothing else puts this chain in the boot graph: NixOS only copies the
+    # unit (systemd.nix) and never sets wantedBy, neither unit has a
+    # .wants/.requires symlink, and no in-repo code starts them. Observed
+    # directly on a cold boot: "No jobs running", boot-complete.target
+    # inactive, and the gate absent from the journal on the very next boot
+    # after it had run. wantedBy here pulls systemd-bless-boot in, and its
+    # Requires= below pulls the gate in with it — one wiring point for the
+    # whole chain. Wants semantics mean a failure cannot stall multi-user.
+    wantedBy = ["multi-user.target"];
     requires = ["boot-health-local.service"];
     after = ["boot-health-local.service"];
+    serviceConfig = {
+      # The empty assignment resets the ExecStart inherited from systemd's own
+      # unit file; without it a oneshot would append and run both commands.
+      ExecStart = ["" "${blessWrapper}/bin/systemd-bless-boot-noop"];
+    };
   };
 }
